@@ -151,6 +151,24 @@ changes the argument ABI), `mul24` in the source (still DW x DW), `IGC_ForceNoFP
 The Gen9 command stream is unchanged; after D3 and after D5, `make -C lib check` passed on the HD 530 and the GEMM speeds
 matched `results/skylake-hd530-2026-11-12.txt` within 0.6 % (n >= 2048).
 
+## 6a. First run on the Cherryview (2026-11-12, `lib/test_gen8_smoke.py`, one step per run, guarded) [MEAS]
+
+| Step | Kernels | Result |
+|---|---|---|
+| init | none (no GPU work) | Gen8 detected; FP32 and FP64 available |
+| copy (n = 64, 4096, 2^20) | `copy16_f` (only width-1 `<2;1,0>` 64-bit regions) | correct, 1.4 ms in total |
+| axpy (n = 64, 4096, 2^20) | `axpy_f` (+ 6 non-scalar DW x DW `mul`) | correct (error 0), 1.9 ms |
+| SGEMM n = 16 | `skinny_n4_f`, `skinny_n2_f` | correct |
+| SGEMM n = 64, 256 | `pkf_a`, `pkf_b`, `sgemm_v` | **wrong** (relative error ~1), no reset |
+| DGEMM n = 16 | `pkd_a` | **GPU hang, engine reset** (detected by kcl; machine and services unaffected) |
+
+So kcl itself works on Gen8 (command stream, 4 GB address space, coherency, patch-token descriptors) and the width-1
+64-bit regions of `-noFP64bRegion` executed correctly in `copy16_f`. The failing packing kernels use the same memory
+messages as the working ones (A64 dword/qword gather and scatter), so the difference is in index arithmetic: they contain
+non-scalar DW x DW multiplies and `mul`/`mach` sequences emulating 64-bit multiplies, which break R1 [HYP: the most likely
+cause; `axpy` with unit strides may have passed because its products were trivial]. Next: remove these multiplies from
+the GEMM-path kernels (section 3, way 2) and re-run; no further GPU runs on the target before that.
+
 ## 7. Open questions
 
 - Does Cherryview accept the width-1 `<2;1,0>` 64-bit regions, and how does it behave on DW x DW `mul` with non-scalar
