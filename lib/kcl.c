@@ -1,4 +1,4 @@
-// kcl: the OpenCL subset used by gen9blas.c, implemented directly on i915 (Gen9, UHD 620), without NEO. Facts and measurements: ../docs/no-neo.md.
+// kcl: the OpenCL subset used by gen9blas.c, implemented directly on i915 (Gen9: UHD 620, HD 530; Gen8 Cherryview: docs/gen8.md), without NEO. Facts and measurements: ../docs/no-neo.md.
 //
 // Model: an in-order queue = a batch buffer built on the fly; each clEnqueueNDRangeKernel appends
 // IDD + indirect data + (for stateful arguments) binding table and surface states + GPGPU_WALKER; between kernels
@@ -20,11 +20,19 @@
 #include <unistd.h>
 #include "gen9_pack.h"
 #include "kcl_desc.h"
+#include "kcl_gen8.h"
 #include <time.h>
 
 static uint32_t MOCS_WB = 2 << 1;   // [HIP] index 2 of the i915 MOCS table (SKL) = WB, like Mesa; KCL_MOCS=n: a different index (diagnostics)
 #define L3_SLM 0x60000321u          // L3CNTLREG with SLM (NEO gen9/reg_configs.h)
 #define L3_NO_SLM 0x80000340u       // L3CNTLREG without SLM
+// Gen8 Cherryview (docs/gen8.md): MOCS is not a table index but a direct encoding, 0x78 = WB + L3 (Mesa isl.c); L3CNTLREG
+// without bit 9 (no GPU hang on L3 parity errors, which would also oblige us to zero SLM/URB), always the SLM layout
+// (SLM is inconsistent after every reconfiguration on CHV; Beignet: the same value, "random hang" when switching).
+#define MOCS_WB_GEN8 0x78u
+#define L3_GEN8 0x60000121u
+// Device parameters, read in init(): Gen9.5 (default) or Gen8 Cherryview.
+static struct { int gen8; uint32_t eus, max_group_threads; uint64_t ts_freq; const struct kcl_program_desc *progs; int nprogs; } dev;
 enum { KSLOT = 8, DYN = 1 << 20, BB = 128 << 10, IDD_MAX = 64,
        O_IND = 0x1000, O_SS = 0xC0000, SS_LEN = 0x10000,   // dyn: IDD | indirect data | binding tables + surface states
        MAXBO = 512, TS_MAX = 4096 };
@@ -277,25 +285,39 @@ static int open_batch(void) {
     EMIT(MI_LOAD_REGISTER_IMM, .RegisterOffset = 0x7034, .DataDWord = L3_NO_SLM);
     // EU thread arbitration: round-robin (DebugControlReg2 0xE404 = 0x100), like NEO on Gen9 (gfx_core_helper_gen9.cpp:
     // getDefaultThreadArbitrationPolicy, command_encoder_gen9.cpp). KCL_ARB=age: the hardware default (diagnostics).
+    // Not on Gen8: the register's bits are not documented for CHV and NEO does not program it on Gen8.
     static int arb = -1; if (arb < 0) arb = !(getenv("KCL_ARB") && !strcmp(getenv("KCL_ARB"), "age"));
-    if (arb) EMIT(MI_LOAD_REGISTER_IMM, .RegisterOffset = 0xE404, .DataDWord = 0x100);
-    EMIT(PIPELINE_SELECT, .MaskBits = 3, .PipelineSelection = GPGPU);
-    EMIT(STATE_BASE_ADDRESS,
-        .GeneralStateBaseAddressModifyEnable = 1, .GeneralStateBaseAddress = 0, .GeneralStateMOCS = MOCS_WB,
-        .StatelessDataPortAccessMOCS = MOCS_WB,
-        .SurfaceStateBaseAddressModifyEnable = 1, .SurfaceStateBaseAddress = D + O_SS, .SurfaceStateMOCS = MOCS_WB,
-        .DynamicStateBaseAddressModifyEnable = 1, .DynamicStateBaseAddress = D, .DynamicStateMOCS = MOCS_WB,
-        .IndirectObjectBaseAddressModifyEnable = 1, .IndirectObjectBaseAddress = D, .IndirectObjectMOCS = MOCS_WB,
-        .InstructionBaseAddressModifyEnable = 1, .InstructionBaseAddress = isa->addr, .InstructionMOCS = MOCS_WB,
-        .GeneralStateBufferSizeModifyEnable = 1, .GeneralStateBufferSize = 0xfffff,
-        .DynamicStateBufferSizeModifyEnable = 1, .DynamicStateBufferSize = DYN / 4096,
-        .IndirectObjectBufferSizeModifyEnable = 1, .IndirectObjectBufferSize = DYN / 4096,
-        .InstructionBuffersizeModifyEnable = 1, .InstructionBufferSize = (uint32_t)(isa->size / 4096),
-        .BindlessSurfaceStateBaseAddressModifyEnable = 1, .BindlessSurfaceStateMOCS = MOCS_WB,
-        .BindlessSurfaceStateSize = 0xfffff);
+    if (arb && !dev.gen8) EMIT(MI_LOAD_REGISTER_IMM, .RegisterOffset = 0xE404, .DataDWord = 0x100);
+    if (dev.gen8) {
+        p = kcl_gen8_pipeline_select_gpgpu(p);
+        // WaSendDummyVFEafterPipelineSelect (PRM CHV vol16): MEDIA_VFE_STATE right after the GPGPU PIPELINE_SELECT
+        EMIT(MEDIA_VFE_STATE, .MaximumNumberofThreads = dev.eus * 7 - 1, .NumberofURBEntries = 1,
+             .URBEntryAllocationSize = 0x782, .CURBEAllocationSize = 0);
+        const struct kcl_sba sba = { .surface = D + O_SS, .dynamic = D, .indirect = D, .instruction = isa->addr,
+            .mocs = MOCS_WB, .dynamic_size = DYN / 4096, .indirect_size = DYN / 4096,
+            .instruction_size = (uint32_t)(isa->size / 4096) };
+        p = kcl_gen8_state_base_address(p, &sba);
+    } else {
+        EMIT(PIPELINE_SELECT, .MaskBits = 3, .PipelineSelection = GPGPU);
+        EMIT(STATE_BASE_ADDRESS,
+            .GeneralStateBaseAddressModifyEnable = 1, .GeneralStateBaseAddress = 0, .GeneralStateMOCS = MOCS_WB,
+            .StatelessDataPortAccessMOCS = MOCS_WB,
+            .SurfaceStateBaseAddressModifyEnable = 1, .SurfaceStateBaseAddress = D + O_SS, .SurfaceStateMOCS = MOCS_WB,
+            .DynamicStateBaseAddressModifyEnable = 1, .DynamicStateBaseAddress = D, .DynamicStateMOCS = MOCS_WB,
+            .IndirectObjectBaseAddressModifyEnable = 1, .IndirectObjectBaseAddress = D, .IndirectObjectMOCS = MOCS_WB,
+            .InstructionBaseAddressModifyEnable = 1, .InstructionBaseAddress = isa->addr, .InstructionMOCS = MOCS_WB,
+            .GeneralStateBufferSizeModifyEnable = 1, .GeneralStateBufferSize = 0xfffff,
+            .DynamicStateBufferSizeModifyEnable = 1, .DynamicStateBufferSize = DYN / 4096,
+            .IndirectObjectBufferSizeModifyEnable = 1, .IndirectObjectBufferSize = DYN / 4096,
+            .InstructionBuffersizeModifyEnable = 1, .InstructionBufferSize = (uint32_t)(isa->size / 4096),
+            .BindlessSurfaceStateBaseAddressModifyEnable = 1, .BindlessSurfaceStateMOCS = MOCS_WB,
+            .BindlessSurfaceStateSize = 0xfffff);
+    }
+    // Gen8: CS stall needs one of the flush/post-sync bits as well (PRM CHV vol02a p.1098) -> DC flush
     EMIT(PIPE_CONTROL, .CommandStreamerStallEnable = 1, .StateCacheInvalidationEnable = 1,
-         .InstructionCacheInvalidateEnable = 1, .ConstantCacheInvalidationEnable = 1, .TextureCacheInvalidationEnable = 1);
-    EMIT(MEDIA_VFE_STATE, .MaximumNumberofThreads = 24 * 7 - 1, .NumberofURBEntries = 1,
+         .InstructionCacheInvalidateEnable = 1, .ConstantCacheInvalidationEnable = 1, .TextureCacheInvalidationEnable = 1,
+         .DCFlushEnable = dev.gen8);
+    EMIT(MEDIA_VFE_STATE, .MaximumNumberofThreads = dev.eus * 7 - 1, .NumberofURBEntries = 1,
          .URBEntryAllocationSize = 0x782, .CURBEAllocationSize = 0);
     idl = p;   // IDD table length filled in at submit time
     EMIT(MEDIA_INTERFACE_DESCRIPTOR_LOAD, .InterfaceDescriptorTotalLength = 32, .InterfaceDescriptorDataStartAddress = 0);
@@ -313,7 +335,8 @@ static int submit(void) {
     EMIT(MI_BATCH_BUFFER_END);
     if ((p - (uint32_t *)s->bb->map) & 1) *p++ = 0;
     { struct GFX9_MI_LOAD_REGISTER_IMM l = { GFX9_MI_LOAD_REGISTER_IMM_header, .RegisterOffset = 0x7034,
-          .DataDWord = (slm_in_batch || l3_always_slm) ? L3_SLM : L3_NO_SLM }; GFX9_MI_LOAD_REGISTER_IMM_pack(NULL, lri, &l); }
+          .DataDWord = dev.gen8 ? L3_GEN8 : (slm_in_batch || l3_always_slm) ? L3_SLM : L3_NO_SLM };
+      GFX9_MI_LOAD_REGISTER_IMM_pack(NULL, lri, &l); }
     { struct GFX9_MEDIA_INTERFACE_DESCRIPTOR_LOAD l = { GFX9_MEDIA_INTERFACE_DESCRIPTOR_LOAD_header,
           .InterfaceDescriptorTotalLength = 32 * (nlaunch ? nlaunch : 1), .InterfaceDescriptorDataStartAddress = 0 };
       GFX9_MEDIA_INTERFACE_DESCRIPTOR_LOAD_pack(NULL, idl, &l); }
@@ -347,7 +370,7 @@ static int wait_seq(uint64_t seq) {
 
 static void collect_measurements(void) {   // after waiting for all work: kernel times into the sums
     for (int i = 0; i < nmeas; i++) {
-        const uint64_t *t = ts_bo->map; double ms = (double)(t[meas[i].ts1] - t[meas[i].ts0]) / 12e3;
+        const uint64_t *t = ts_bo->map; double ms = (double)(t[meas[i].ts1] - t[meas[i].ts0]) * 1e3 / dev.ts_freq;
         int j = 0; while (j < nsum && strcmp(sums[j].name, meas[i].name)) j++;
         if (j == nsum && nsum < 256) { sums[nsum].name = meas[i].name; nsum++; }
         if (j < 256) { sums[j].ms += ms; sums[j].n++; }
@@ -367,6 +390,10 @@ cl_int kcl_wait(void) {
 }
 
 // ---------------- initialization ----------------
+static int getparam(int param, int *value) {
+    struct drm_i915_getparam g = { .param = param, .value = value };
+    return ioctl(fd, DRM_IOCTL_I915_GETPARAM, &g);
+}
 static int init(void) {
     if (fd >= 0) return 0;
     fd = open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
@@ -374,20 +401,32 @@ static int init(void) {
     struct drm_i915_gem_context_create cc = { 0 };
     if (ioctl(fd, DRM_IOCTL_I915_GEM_CONTEXT_CREATE, &cc)) return -1;
     ctx_id = cc.ctx_id;
+    int chip = 0, eus = 0, subslices = 0, freq = 0;
+    if (getparam(I915_PARAM_CHIPSET_ID, &chip) || getparam(I915_PARAM_EU_TOTAL, &eus) ||
+        getparam(I915_PARAM_SUBSLICE_TOTAL, &subslices) || getparam(I915_PARAM_CS_TIMESTAMP_FREQUENCY, &freq) ||
+        eus <= 0 || subslices <= 0 || freq <= 0) return -1;
+    dev.gen8 = (chip & ~3) == 0x22b0;   // Cherryview/Braswell 0x22b0-0x22b3 (Mesa crocus_pci_ids.h)
+    dev.eus = (uint32_t)eus; dev.ts_freq = (uint64_t)freq;
+    // Threads per work-group: Gen8 at most the threads of one subslice (PRM CHV vol02d p.223: needed for barriers;
+    // applied to every kernel to keep it simple); Gen9 unchanged.
+    dev.max_group_threads = dev.gen8 ? (uint32_t)(eus / subslices) * 7 : 64;
+    dev.progs = dev.gen8 ? kcl_programs_gen8 : kcl_programs;
+    dev.nprogs = dev.gen8 ? kcl_nprograms_gen8 : kcl_nprograms;
+    if (dev.gen8) MOCS_WB = MOCS_WB_GEN8;
     resets_seen = reset_count();
     kprofile_kernels = getenv("KCL_PROFILE_KERNELS") != NULL;
     kprofile = getenv("GEN9BLAS_PROFILE") != NULL || kprofile_kernels;
     const char *um = getenv("KCL_USERPTR_MB");
     up_limit = (uint64_t)(um && *um ? atoi(um) : 1024) << 20;   // pinned process memory
-    if (getenv("KCL_MOCS")) MOCS_WB = atoi(getenv("KCL_MOCS")) << 1;
+    if (getenv("KCL_MOCS")) MOCS_WB = (uint32_t)atoi(getenv("KCL_MOCS")) << (dev.gen8 ? 0 : 1);   // Gen8: the raw value
     if (getenv("KCL_L3") && !strcmp(getenv("KCL_L3"), "slm")) l3_always_slm = 1;
     uint64_t sz = 0;
-    for (int i = 0; i < kcl_nprograms; i++)
-        for (uint32_t j = 0; j < kcl_programs[i].nkernels; j++) sz += (kcl_programs[i].kernels[j].isa_len + 1024 + 63) & ~63u;
+    for (int i = 0; i < dev.nprogs; i++)
+        for (uint32_t j = 0; j < dev.progs[i].nkernels; j++) sz += (dev.progs[i].kernels[j].isa_len + 1024 + 63) & ~63u;
     if (kbo_new(sz + 4096, 1, &isa)) return -1;
     uint64_t o = 0;
-    for (int i = 0; i < kcl_nprograms; i++) {
-        const struct kcl_program_desc *pr = &kcl_programs[i];
+    for (int i = 0; i < dev.nprogs; i++) {
+        const struct kcl_program_desc *pr = &dev.progs[i];
         isa_off[i] = calloc(pr->nkernels, sizeof(uint32_t));
         for (uint32_t j = 0; j < pr->nkernels; j++) {
             isa_off[i][j] = (uint32_t)o;
@@ -427,8 +466,8 @@ cl_command_queue kcl_CreateCommandQueueWithProperties(cl_context c, cl_device_id
 }
 
 cl_int kcl_program(const char *file, const char *options, cl_program *out) {
-    for (int i = 0; i < kcl_nprograms; i++) {
-        const struct kcl_program_desc *pr = &kcl_programs[i];
+    for (int i = 0; i < dev.nprogs; i++) {
+        const struct kcl_program_desc *pr = &dev.progs[i];
         if (strcmp(pr->file, file)) continue;
         if ((options == NULL) != (pr->options == NULL) || (options && strcmp(options, pr->options))) continue;
         struct _cl_program *x = calloc(1, sizeof *x);
@@ -447,8 +486,8 @@ cl_kernel kcl_CreateKernel(cl_program pr, const char *name, cl_int *e) {
         }
         struct _cl_kernel *k = calloc(1, sizeof *k);
         k->o = o; k->isa_off = isa_off[pr->idx][j]; k->prog = pr->idx;
-        if (o->private_size) {   // private memory: private_size x SIMD x (24 EU x 7 threads), like NEO
-            uint64_t needed = (uint64_t)o->private_size * o->simd * 24 * 7;
+        if (o->private_size) {   // private memory: private_size x SIMD x (EUs x 7 threads), like NEO
+            uint64_t needed = (uint64_t)o->private_size * o->simd * dev.eus * 7;
             if (!priv_bo || priv_bo->size < needed) {
                 if (priv_bo) { kcl_wait(); kbo_release(priv_bo); priv_bo = NULL; }
                 if (kbo_new(needed, 0, &priv_bo)) { *e = CL_OUT_OF_RESOURCES; free(k); return NULL; }
@@ -545,7 +584,7 @@ void *kcl_GetExtensionFunctionAddressForPlatform(cl_platform_id pl, const char *
 }
 
 // ---------------- events and timestamps ----------------
-static int timestamp_mark(void) {   // PIPE_CONTROL writing the time counter (12 MHz) after the previous work has finished
+static int timestamp_mark(void) {   // PIPE_CONTROL writing the time counter (Gen9 12 MHz, CHV 12.5 MHz) after the previous work has finished
     if (!kprofile || !ts_bo) return -1;
     int i = (int)(ts_n++ % TS_MAX);
     EMIT(PIPE_CONTROL, .CommandStreamerStallEnable = 1, .PostSyncOperation = 3 /* write timestamp */,
@@ -588,7 +627,10 @@ cl_int kcl_GetEventProfilingInfo(cl_event e, cl_profiling_info i, size_t n, void
     if (wait_seq(e->seq)) return CL_OUT_OF_RESOURCES;
     cl_ulong t = 0;
     const int j = i == CL_PROFILING_COMMAND_END ? e->ts_k : e->ts;
-    if (j >= 0) t = ((uint64_t *)ts_bo->map)[j] * 1000ull / 12;   // 12 MHz counter -> ns
+    if (j >= 0) {   // counter -> ns (split so that ticks * 1e9 cannot overflow)
+        const uint64_t c = ((uint64_t *)ts_bo->map)[j];
+        t = c / dev.ts_freq * 1000000000ull + c % dev.ts_freq * 1000000000ull / dev.ts_freq;
+    }
     *(cl_ulong *)v = t; return CL_SUCCESS;
 }
 cl_int kcl_ReleaseEvent(cl_event e) { if (e && --e->ref == 0) free(e); return CL_SUCCESS; }
@@ -621,7 +663,7 @@ static cl_int enqueue_(cl_command_queue q, cl_kernel k, cl_uint dim, const size_
         if (dim > 2) L[2] = divisor(G[2], o->simd / (L[0] * L[1]));
     }
     const uint32_t lt = L[0] * L[1] * L[2], threads = (lt + o->simd - 1) / o->simd;
-    if (threads > 64) return CL_INVALID_WORK_GROUP_SIZE;
+    if (threads > dev.max_group_threads) return CL_INVALID_WORK_GROUP_SIZE;
     const uint32_t pt = o->per_thread ? o->per_thread : 32;   // NEO: at least 1 GRF of data per thread
     const uint32_t dlen = (o->cross + threads * pt + 63) & ~63u;
 
@@ -685,12 +727,14 @@ static cl_int enqueue_(cl_command_queue q, cl_kernel k, cl_uint dim, const size_
     // SLM size encoding in the IDD (PRM KBL vol. 2d, NEO computeSlmValues): log2(pow2(max(slm, 1K))) - 9, i.e.
     // 1K=1, 2K=2, 4K=3 ... 64K=7. Note: the Gen8 encoding (Mesa genxml gen80.xml: 4K=1, 8K=2, ...) differs; Mesa's gen90.xml has the right one -- with Gen8 values work-groups
     // got too little SLM and overlapped (SYMM/TRMM: wrong result with more than one work-group).
-    if (o->slm) { uint32_t v = 1024; slm = 1; while (v < o->slm) { v *= 2; slm++; } slm_in_batch = 1; }
+    if (o->slm && dev.gen8) {   // Gen8: 4 KB steps, powers of two: 4K=1, 8K=2, 16K=4 ... 64K=16 (PRM CHV vol02d p.223)
+        uint32_t v = 4096; slm = 1; while (v < o->slm) { v *= 2; slm *= 2; } slm_in_batch = 1;
+    } else if (o->slm) { uint32_t v = 1024; slm = 1; while (v < o->slm) { v *= 2; slm++; } slm_in_batch = 1; }
     struct GFX9_INTERFACE_DESCRIPTOR_DATA idd = {
         .KernelStartPointer = k->isa_off, .NumberofThreadsinGPGPUThreadGroup = threads,
         .CrossThreadConstantDataReadLength = o->cross / 32, .ConstantURBEntryReadLength = pt / 32,
         .BindingTablePointer = bt, .BindingTableEntryCount = o->nbti < 32 ? o->nbti : 31,
-        .SharedLocalMemorySize = slm, .BarrierEnable = o->barrier };
+        .SharedLocalMemorySize = slm, .BarrierEnable = o->barrier || (dev.gen8 && o->slm) };   // CHV: SLM needs a barrier
     GFX9_INTERFACE_DESCRIPTOR_DATA_pack(NULL, D + 32 * nlaunch, &idd);
     const int ts = ev || kprofile_kernels ? timestamp_mark() : -1;
     const uint32_t rem = lt % o->simd;

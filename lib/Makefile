@@ -17,8 +17,11 @@ kernels_gen8.c: gen_kernels.py $(filter %.cl,$(CL_SOURCES))
 check-patchtokens:
 	python3 check_patchtokens.py .check_patchtokens
 
-libgen9blas.so: gen9blas.c gen9blas.h kcl.c kcl.h kcl_desc.h kernels.c $(GEN)/gen9_pack.h
-	gcc $(CFL) -I$(GEN) -o $@ gen9blas.c kcl.c kernels.c -lm
+KCL_SRC = kcl.c kcl_gen8.c kernels.c kernels_gen8.c
+KCL_DEP = $(KCL_SRC) kcl.h kcl_desc.h kcl_gen8.h $(GEN)/gen9_pack.h $(GEN)/gen8_pack.h
+
+libgen9blas.so: gen9blas.c gen9blas.h $(KCL_DEP)
+	gcc $(CFL) -I$(GEN) -o $@ gen9blas.c $(KCL_SRC) -lm
 
 libgen9blas_neo.so: gen9blas.c gen9blas.h
 	gcc $(CFL) -DGEN9BLAS_NEO -o $@ gen9blas.c -lOpenCL -lm
@@ -43,8 +46,8 @@ clean:
 	rm -f libgen9blas.so libgen9blas_neo.so libgen9blas_blas.so libgen9blas_blas_neo.so kernels.c kernels_gen8.c
 
 # Full BLAS/CBLAS: S/D functions on the GPU, the rest through jumps to OpenBLAS (gen9blas_blas_forward.c generated from the symbol list).
-libgen9blas_blas.so: gen9blas.c gen9blas.h kcl.c kcl.h kcl_desc.h kernels.c gen9blas_blas.c gen9blas_blas_d.inc gen9blas_blas_forward.c
-	gcc $(CFL) -I$(GEN) -o $@ gen9blas.c kcl.c kernels.c gen9blas_blas.c gen9blas_blas_forward.c -lm -ldl -lpthread
+libgen9blas_blas.so: gen9blas.c gen9blas.h $(KCL_DEP) gen9blas_blas.c gen9blas_blas_d.inc gen9blas_blas_forward.c
+	gcc $(CFL) -I$(GEN) -o $@ gen9blas.c $(KCL_SRC) gen9blas_blas.c gen9blas_blas_forward.c -lm -ldl -lpthread
 
 libgen9blas_blas_neo.so: gen9blas.c gen9blas.h gen9blas_blas.c gen9blas_blas_d.inc gen9blas_blas_forward.c
 	gcc $(CFL) -DGEN9BLAS_NEO -o $@ gen9blas.c gen9blas_blas.c gen9blas_blas_forward.c -lOpenCL -lm -ldl -lpthread
