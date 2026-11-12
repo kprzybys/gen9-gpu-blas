@@ -5,8 +5,9 @@
 // a PIPE_CONTROL barrier (CS stall + DC flush) -- without it consecutive walkers overlap (docs/no-neo.md 6d).
 // The buffer is submitted (execbuffer2, softpin) on clFlush/clFinish/kcl_wait, when full (64 IDD) or when
 // an event status is queried. Batch buffers rotate (KSLOT); before a slot is reused we wait for it to finish.
-// Memory: cl_mem = GEM object (PPGTT address fixed: softpin, increasing allocation, addresses are never reused);
-// "USM host" (gen9blas_alloc) = GEM object mapped WB to the CPU (LLC: coherent with the GPU), pointers inside are translated by a table.
+// Memory: cl_mem = GEM object (PPGTT address fixed: softpin; Gen9: increasing allocation, addresses are never reused;
+// Gen8: 4 GB space with reuse, see kbo_addr); "USM host" (gen9blas_alloc) = GEM object mapped WB to the CPU (Gen9 LLC:
+// coherent with the GPU; Gen8: made snooped, see kbo_new), pointers inside are translated by a table.
 #include "kcl.h"
 #include <drm/i915_drm.h>
 #include <errno.h>
@@ -32,7 +33,9 @@ static uint32_t MOCS_WB = 2 << 1;   // [HIP] index 2 of the i915 MOCS table (SKL
 #define MOCS_WB_GEN8 0x78u
 #define L3_GEN8 0x60000121u
 // Device parameters, read in init(): Gen9.5 (default) or Gen8 Cherryview.
-static struct { int gen8; uint32_t eus, max_group_threads; uint64_t ts_freq; const struct kcl_program_desc *progs; int nprogs; } dev;
+// llc = 0 (CHV): CPU caches are not shared with the GPU; gtt_end != 0: small (32-bit) GPU address space, see kbo_addr.
+static struct { int gen8, llc; uint32_t eus, max_group_threads; uint64_t ts_freq, gtt_end;
+                const struct kcl_program_desc *progs; int nprogs; } dev;
 enum { KSLOT = 8, DYN = 1 << 20, BB = 128 << 10, IDD_MAX = 64,
        O_IND = 0x1000, O_SS = 0xC0000, SS_LEN = 0x10000,   // dyn: IDD | indirect data | binding tables + surface states
        MAXBO = 512, TS_MAX = 4096 };
@@ -58,22 +61,71 @@ static uint32_t *isa_off[16];   // [program][kernel] -> offset in isa
 static uint32_t ts_n;
 
 static uint64_t kbo_addr(uint64_t size);
-static int kbo_new(uint64_t size, int map_it, kbo **out) {
+// CPU access to a GEM object. With LLC (Gen9) both mappings are WB and coherent. Without LLC (CHV, docs/gen8.md section 4)
+// a plain object is not coherent with CPU caches: KMAP_RW objects (the CPU reads them) are made snooped (SET_CACHING
+// CACHED), KMAP_WRITE objects (the CPU only writes them: batch, indirect data, ISA, constants) are mapped WC.
+enum { KMAP_NONE, KMAP_RW, KMAP_WRITE };
+static int kbo_new(uint64_t size, int map, kbo **out) {
     size = (size + 4095) & ~4095ull;
     kbo *b = calloc(1, sizeof *b);
     struct drm_i915_gem_create c = { .size = size };
     if (!b || ioctl(fd, DRM_IOCTL_I915_GEM_CREATE, &c)) { free(b); return -1; }
     b->h = c.handle; b->size = size; b->ref = 1; b->addr = kbo_addr(size);
-    if (map_it) {
-        struct drm_i915_gem_mmap_offset m = { .handle = b->h, .flags = I915_MMAP_OFFSET_WB };
+    if (!b->addr) { struct drm_gem_close cl = { .handle = b->h }; ioctl(fd, DRM_IOCTL_GEM_CLOSE, &cl); free(b); return -1; }
+    if (!dev.llc && map == KMAP_RW) {
+        struct drm_i915_gem_caching ca = { .handle = b->h, .caching = I915_CACHING_CACHED };
+        if (ioctl(fd, DRM_IOCTL_I915_GEM_SET_CACHING, &ca)) return -1;
+    }
+    if (map != KMAP_NONE) {
+        struct drm_i915_gem_mmap_offset m = { .handle = b->h,
+            .flags = !dev.llc && map == KMAP_WRITE ? I915_MMAP_OFFSET_WC : I915_MMAP_OFFSET_WB };
         if (ioctl(fd, DRM_IOCTL_I915_GEM_MMAP_OFFSET, &m)) return -1;
         b->map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, m.offset);
         if (b->map == MAP_FAILED) { b->map = NULL; return -1; }
     }
     *out = b; return 0;
 }
-// Object address in the PPGTT (softpin; increasing allocation, addresses are never reused).
+static uint64_t seq_next = 1, seq_sent = 0, seq_done = 0;   // batch sequence numbers: next, last submitted, last finished
+// Gen8 (4 GB PPGTT): freed address ranges, reusable once the GPU has finished every batch that could use them (seq).
+typedef struct { uint64_t addr, size, seq; } range_t;
+static range_t *fr; static int nfr, cfr;
+static uint64_t seq_in_use(void);
+static int kcl_wait_all(void);
+static void range_free(uint64_t addr, uint64_t size) {   // keeps fr sorted by address, merges neighbours
+    const uint64_t seq = seq_in_use();
+    int i = 0; while (i < nfr && fr[i].addr < addr) i++;
+    if (i > 0 && fr[i - 1].addr + fr[i - 1].size == addr) {
+        fr[i - 1].size += size; if (seq > fr[i - 1].seq) fr[i - 1].seq = seq; i--;
+    } else {
+        if (nfr == cfr) { cfr = cfr ? 2 * cfr : 64; fr = realloc(fr, cfr * sizeof *fr); }
+        memmove(fr + i + 1, fr + i, (nfr - i) * sizeof *fr); fr[i] = (range_t){ addr, size, seq }; nfr++;
+    }
+    if (i + 1 < nfr && fr[i].addr + fr[i].size == fr[i + 1].addr) {
+        fr[i].size += fr[i + 1].size; if (fr[i + 1].seq > fr[i].seq) fr[i].seq = fr[i + 1].seq;
+        memmove(fr + i + 1, fr + i + 2, (nfr - i - 2) * sizeof *fr); nfr--;
+    }
+}
+static uint64_t range_take(uint64_t size) {   // first fit among the ranges the GPU no longer uses; 0: none
+    for (int i = 0; i < nfr; i++) {
+        if (fr[i].seq > seq_done || fr[i].size < size) continue;
+        const uint64_t a = fr[i].addr;
+        fr[i].addr += size; fr[i].size -= size;
+        if (!fr[i].size) { memmove(fr + i, fr + i + 1, (nfr - i - 1) * sizeof *fr); nfr--; }
+        return a;
+    }
+    return 0;
+}
+// Object address in the PPGTT (softpin). Gen9: increasing allocation, addresses are never reused. Gen8: below
+// dev.gtt_end, freed ranges reused (range_free/range_take); when the space is exhausted, wait for the GPU and retry.
 static uint64_t kbo_addr(uint64_t size) {
+    if (dev.gtt_end) {
+        size = (size + 0xffff) & ~0xffffull;
+        uint64_t a = range_take(size);
+        if (!a && next_addr + size > dev.gtt_end && nfr && !kcl_wait_all()) a = range_take(size);
+        if (a) return a;
+        if (next_addr + size > dev.gtt_end) return 0;
+        a = next_addr; next_addr += size; return a;
+    }
     // PPGTT address: objects >= 2 MB are aligned to 2 MB (like NEO) -- only then can i915 use 2 MB pages in the GPU
     // page table (fewer TLB misses on large matrices); smaller ones to 64 KB.
     static int mode = -1, counter;
@@ -87,6 +139,7 @@ static uint64_t kbo_addr(uint64_t size) {
 }
 static void kbo_release(kbo *b) {
     if (!b || --b->ref > 0) return;
+    if (dev.gtt_end) range_free(b->addr, (b->size + 0xffff) & ~0xffffull);
     if (b->map) munmap(b->map, b->size);
     struct drm_gem_close c = { .handle = b->h };
     ioctl(fd, DRM_IOCTL_GEM_CLOSE, &c);   // safe even if the GPU is still using it (i915 holds a reference)
@@ -166,6 +219,7 @@ static up_t *up_object(uintptr_t s, uintptr_t e, int wr) {
     kbo *b = calloc(1, sizeof *b);
     if (!b || ioctl(fd, DRM_IOCTL_I915_GEM_USERPTR, &u)) { free(b); return NULL; }
     b->h = u.handle; b->size = e - s; b->ref = 1; b->ro = !wr; b->addr = kbo_addr(e - s);
+    if (!b->addr) { struct drm_gem_close cl = { .handle = b->h }; ioctl(fd, DRM_IOCTL_GEM_CLOSE, &cl); free(b); return NULL; }
     up[nup] = (up_t){ s, e, b, ++up_counter, up_epoch }; up_bytes += e - s;
     return &up[nup++];
 }
@@ -235,7 +289,6 @@ typedef struct { kbo *dyn, *bb; uint64_t seq; } slot_t;
 static slot_t S[KSLOT];
 static int cur = -1;                   // slot of the buffer being built (-1: none)
 static uint64_t S_cur_seq(void) { return S[cur].seq; }
-static uint64_t seq_next = 1, seq_sent = 0, seq_done = 0;
 // GPU resets that hit our context (batch_active + batch_pending from I915_GET_RESET_STATS). After a reset (e.g. a kernel
 // running longer than the engine's preempt_timeout_ms while another context waits) GEM_WAIT still succeeds, but the work
 // was cut off: the results are wrong. The count is compared after every wait and a change is reported as an error.
@@ -351,6 +404,7 @@ static int submit(void) {
         .batch_len = (uint32_t)((p - (uint32_t *)s->bb->map) * 4), .flags = I915_EXEC_RENDER | I915_EXEC_NO_RELOC,
         .rsvd1 = ctx_id };
     int r;
+    if (!dev.llc) __builtin_ia32_sfence();   // WC writes (batch, indirect data) out of the CPU's write-combining buffers
     PHASE_BEGIN;
     while ((r = ioctl(fd, DRM_IOCTL_I915_GEM_EXECBUFFER2, &eb)) && errno == EINTR) {}
     PHASE_END(F_EXEC); if (phases) fz_objects += n;
@@ -388,6 +442,8 @@ cl_int kcl_wait(void) {
     if (kprofile_kernels) collect_measurements();
     return CL_SUCCESS;
 }
+static uint64_t seq_in_use(void) { return cur >= 0 ? S[cur].seq : seq_sent; }   // the last batch that may use an object
+static int kcl_wait_all(void) { return kcl_wait() != CL_SUCCESS; }
 
 // ---------------- initialization ----------------
 static int getparam(int param, int *value) {
@@ -406,6 +462,12 @@ static int init(void) {
         getparam(I915_PARAM_SUBSLICE_TOTAL, &subslices) || getparam(I915_PARAM_CS_TIMESTAMP_FREQUENCY, &freq) ||
         eus <= 0 || subslices <= 0 || freq <= 0) return -1;
     dev.gen8 = (chip & ~3) == 0x22b0;   // Cherryview/Braswell 0x22b0-0x22b3 (Mesa crocus_pci_ids.h)
+    int llc = 0;
+    struct drm_i915_gem_context_param gp = { .ctx_id = ctx_id, .param = I915_CONTEXT_PARAM_GTT_SIZE };
+    if (getparam(I915_PARAM_HAS_LLC, &llc) || ioctl(fd, DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM, &gp)) return -1;
+    dev.llc = llc;
+    // A 32-bit PPGTT (CHV: 4 GB, docs/gen8.md): allocate from 1 MB up to 64 KB below the end; softpin above it fails (EINVAL).
+    if (gp.value <= (1ull << 32)) { dev.gtt_end = gp.value - 0x10000; next_addr = 1 << 20; }
     dev.eus = (uint32_t)eus; dev.ts_freq = (uint64_t)freq;
     // Threads per work-group: Gen8 at most the threads of one subslice (PRM CHV vol02d p.223: needed for barriers;
     // applied to every kernel to keep it simple); Gen9 unchanged.
@@ -423,7 +485,7 @@ static int init(void) {
     uint64_t sz = 0;
     for (int i = 0; i < dev.nprogs; i++)
         for (uint32_t j = 0; j < dev.progs[i].nkernels; j++) sz += (dev.progs[i].kernels[j].isa_len + 1024 + 63) & ~63u;
-    if (kbo_new(sz + 4096, 1, &isa)) return -1;
+    if (kbo_new(sz + 4096, KMAP_WRITE, &isa)) return -1;
     uint64_t o = 0;
     for (int i = 0; i < dev.nprogs; i++) {
         const struct kcl_program_desc *pr = &dev.progs[i];
@@ -434,12 +496,12 @@ static int init(void) {
             o += (pr->kernels[j].isa_len + 1024 + 63) & ~63u;   // zeros after the code: instruction prefetch reads further
         }
         if (pr->nconstants) {
-            if (kbo_new(pr->nconstants, 1, &consts[i])) return -1;
+            if (kbo_new(pr->nconstants, KMAP_WRITE, &consts[i])) return -1;
             memcpy(consts[i]->map, pr->constants, pr->nconstants);
         }
     }
-    for (int s = 0; s < KSLOT; s++) if (kbo_new(DYN, 1, &S[s].dyn) || kbo_new(BB, 1, &S[s].bb)) return -1;
-    if (kprofile && kbo_new(TS_MAX * 8, 1, &ts_bo)) return -1;
+    for (int s = 0; s < KSLOT; s++) if (kbo_new(DYN, KMAP_WRITE, &S[s].dyn) || kbo_new(BB, KMAP_WRITE, &S[s].bb)) return -1;
+    if (kprofile && kbo_new(TS_MAX * 8, KMAP_RW, &ts_bo)) return -1;
     if (kprofile_kernels) atexit(print_measurements);
     return 0;
 }
@@ -490,7 +552,7 @@ cl_kernel kcl_CreateKernel(cl_program pr, const char *name, cl_int *e) {
             uint64_t needed = (uint64_t)o->private_size * o->simd * dev.eus * 7;
             if (!priv_bo || priv_bo->size < needed) {
                 if (priv_bo) { kcl_wait(); kbo_release(priv_bo); priv_bo = NULL; }
-                if (kbo_new(needed, 0, &priv_bo)) { *e = CL_OUT_OF_RESOURCES; free(k); return NULL; }
+                if (kbo_new(needed, KMAP_NONE, &priv_bo)) { *e = CL_OUT_OF_RESOURCES; free(k); return NULL; }
             }
         }
         *e = CL_SUCCESS; return k;
@@ -503,7 +565,7 @@ cl_mem kcl_CreateBuffer(cl_context c, cl_mem_flags f, size_t n, void *host, cl_i
     (void)c; (void)f;
     if (host) { *e = CL_INVALID_HOST_PTR; return NULL; }
     struct _cl_mem *m = calloc(1, sizeof *m);
-    if (!m || kbo_new(n ? n : 1, 0, &m->bo)) { free(m); *e = CL_MEM_OBJECT_ALLOCATION_FAILURE; return NULL; }
+    if (!m || kbo_new(n ? n : 1, KMAP_NONE, &m->bo)) { free(m); *e = CL_MEM_OBJECT_ALLOCATION_FAILURE; return NULL; }
     m->size = n; m->ref = 1; *e = CL_SUCCESS; return m;
 }
 cl_mem kcl_CreateSubBuffer(cl_mem b, cl_mem_flags f, cl_buffer_create_type t, const void *info, cl_int *e) {
@@ -526,7 +588,7 @@ cl_int kcl_GetMemObjectInfo(cl_mem m, cl_mem_info i, size_t n, void *v, size_t *
 static void *usm_alloc(cl_context c, const cl_mem_properties_intel *pr, size_t n, cl_uint align, cl_int *e) {
     (void)c; (void)pr; (void)align;
     kbo *b;
-    if (init() || kbo_new(n ? n : 1, 1, &b)) { *e = CL_OUT_OF_HOST_MEMORY; return NULL; }
+    if (init() || kbo_new(n ? n : 1, KMAP_RW, &b)) { *e = CL_OUT_OF_HOST_MEMORY; return NULL; }
     if (nusm == cusm) { cusm = cusm ? 2 * cusm : 64; usm = realloc(usm, cusm * sizeof *usm); }
     usm[nusm++] = (usm_t){ (uintptr_t)b->map, n ? n : 1, b };
     *e = CL_SUCCESS; return b->map;
