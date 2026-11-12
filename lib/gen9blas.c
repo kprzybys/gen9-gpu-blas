@@ -503,7 +503,7 @@ struct gen9blas_packed { int type, K, N, Np, Kp; cl_mem buf; };
 
 static size_t pack_band_bytes(void) {
     static size_t v = 0;
-    if (!v) { const char *e = getenv("GEN9BLAS_PACK_BAND_MB"); v = (size_t)(e && atof(e) > 0 ? atof(e) : 256) << 20; }
+    if (!v) { const char *e = getenv("GEN9BLAS_PACK_BAND_MB"); v = (size_t)(e && atof(e) > 0 ? atof(e) : 128) << 20; }
     return v;
 }
 

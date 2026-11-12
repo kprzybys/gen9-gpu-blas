@@ -34,7 +34,7 @@ int gen9blas_gemm_batched(int type, int transA, int transB, int M, int N, int K,
                      const void *A, int lda, long sA, const void *B, int ldb, long sB,
                      double beta, void *C, int ldc, long sC, int count);
 // Packed B kept on the GPU (e.g. constant weights): pack op(B) (K×N; transB: B stored as N×K) once, multiply many times.
-// Packing runs in launches of at most GEN9BLAS_PACK_BAND_MB of packed data (default 256; ~4 GB/s, so ~64 ms each).
+// Packing runs in launches of at most GEN9BLAS_PACK_BAND_MB of packed data (default 128; 2.3-4 GB/s, so 30-55 ms each).
 // gemm_pb: C = alpha·op(A)·Bp + beta·C with op(A) M×K. Same types as gen9blas_gemm whose A and B element types are
 // equal (GEN9BLAS_S, GEN9BLAS_H, GEN9BLAS_HS, GEN9BLAS_D). NULL / -1 on error (gen9blas_error()).
 typedef struct gen9blas_packed gen9blas_packed;

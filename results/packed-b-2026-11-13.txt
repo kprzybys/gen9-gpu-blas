@@ -29,3 +29,8 @@ Notes:
   the per-pass rate inside llama-bench was ~4 GB/s of packed output [MEAS, results/llama-cpp-blas-2026-11-12.txt].
   Each 256 MB band is therefore ~65-110 ms, at or under the 100 ms launch policy; 128 MB would leave more margin [HYP].
 - gemm_pb of the head (239 GFLOP) took ~900 ms = 263-270 GFLOPS in launch bands (est. 300 GFLOPS -> 8 bands).
+
+Default band lowered to 128 MB afterwards (256 MB bands were 65-110 ms at the measured 2.3-4 GB/s, at the 100 ms policy):
+OK  S  head 512x151936x1536 (0.93 GB packed)       rel err 1.79e-07  pack 551 ms (1.69 GB/s), gemm_pb 960 ms (249 GFLOPS)
+all 14 cases OK; no GPU reset. Pack time 410 -> 551 ms with 8 instead of 4 submissions (one run each, not separated
+from noise).
