@@ -230,7 +230,9 @@ library. `test_level12` skips ROTG/ROTMG/ROTM when SciPy is missing (their refer
 | `test_level3` (GEMM, SYMM, SYRK, SYR2K, TRMM, TRSM, batched, views; FP32, FP64) | all OK |
 | `test_level12` (levels 1 and 2, FP32 and FP64) | all OK |
 | `test_userptr` | all OK |
-| `test_skinny` | **wrong results** exactly in the cases that use `skinny_r4_f` / `skinny_r8_f` (K a multiple of 16, M = 2, 4, 8, B transposed); the cases on `skinny_k*` pass |
+| `test_skinny` | **wrong results** exactly in the cases that use `skinny_r4_f` / `skinny_r8_f` (K a multiple of 16, M = 2, 4, 8, B transposed); the cases on `skinny_k*` pass. With `skinny_k*` only: all OK |
+| `test_level3` with `GEN9BLAS_MAX_LAUNCH_MS=0.5` | all OK |
+| `test_long_launch` (DGEMM n = 4096, SGEMM n = 8192, batched DGEMM 2 x 3072) | first **two GPU resets**: the band-split launches went into one batch, which on Gen8 (no preemption) is one request, longer than the heartbeat allows (~10 s). With one request per kernel on Gen8 (`lib/kcl.c` `enqueue_`): all OK |
 
 `skinny_r*` differ from the passing SLM/barrier kernels (`skinny_k4_f`, `trsv_block_f`, same 16 threads per group) by
 SIMD8 and the A64 aligned OWord block read x4 (`intel_sub_group_block_read2`); which of the two (if either) is the cause
