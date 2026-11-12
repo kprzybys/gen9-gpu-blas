@@ -3,6 +3,7 @@
   copy   FP32 copy (kernel copy16_f: no DW x DW multiply, only width-1 64-bit regions)
   axpy   FP32 axpy (axpy_f: adds vector DW x DW multiplies in index code)
   sgemm  SGEMM n = 16, 64, 100, 256 and batched (2 matrices): packing pkf_a/pkf_b, sgemm_v, epilogue
+  dcopy  FP64 copy, n from the command line (default 64): copy16_d, A64 qword gather/scatter + DF moves, no multiplies
   dgemm  small DGEMM (pkd_a hung on the first run, docs/gen8.md 6a -- run only on purpose)
 Run one step: KCL_PROFILE_KERNELS=1 python3 test_gen8_smoke.py <step>   (prints which kernels ran)
 """
@@ -50,6 +51,14 @@ elif step == "sgemm":
     err = float(np.max(np.abs(C - ref)) / np.max(np.abs(ref)))
     ok &= err < 1e-4
     print(f"sgemm batched 2 x 64: max rel err {err:.1e} {'OK' if err < 1e-4 else 'WRONG'}")
+elif step == "dcopy":
+    n = int(sys.argv[2]) if len(sys.argv) > 2 else 64
+    x = rng.standard_normal(n)
+    y = np.zeros(n)
+    g.copy(x, y)
+    good = np.array_equal(x, y)
+    ok &= good
+    print(f"dcopy n={n}: {'OK' if good else 'WRONG'}")
 elif step == "dgemm":
     for dt, tol in ((np.float64, 1e-12),):
         for n in (16, 64, 256):

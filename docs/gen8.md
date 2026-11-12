@@ -184,8 +184,10 @@ Analysis (offline, 2026-11-12):
   256 and batched 2 x 64 correct (max relative error 1e-7 .. 6e-7; kernels `pkf_a`, `pkf_b`, `sgemm_v`,
   `gen9blas_epilog_fb`, `skinny_*`), no reset. This confirms the layout diagnosis and that these kernels, including their
   DW x DW multiplies and the `mul`/`mach` sequence with non-zero batch index, execute correctly on the Cherryview.
-- Next (may hang, needs a decision): FP64 copy (`copy16_d`: A64 qword messages without multiplies) to test the
-  qword-message candidate for the DGEMM hang.
+- FP64 copy n = 64 (`copy16_d`: A64 qword gather/scatter and `mov :df`, no multiplies), 2026-11-13 [MEAS]: **GPU hang,
+  engine reset** (detected by kcl; machine and services unaffected). So the DGEMM hang does not come from index
+  arithmetic; the candidates left are the A64 qword scattered messages (most likely) and DF-typed moves [HYP].
+  `-cl-intel-force-enable-a64WA` (internal option) does not change these messages [EXP].
 
 ## 7. Open questions
 
