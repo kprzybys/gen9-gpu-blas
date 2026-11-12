@@ -1,0 +1,19 @@
+# Level 3, whole call, gen9blas.empty arrays, n = 4096, FP32 and FP16, 2026-11-12
+[17 more lines]== n = 4096, float32
+  gemm    346.7 GFLOPS     396 ms   CPU   0.53 ms ( 0.1%)
+# This is the second of two runs (the first one, with the CPU column printed as whole percent, gave: FP32 gemm 353.2 symm 336.2 syrk 266.2 syr2k 247.0 trmm 250.5 trsm 226.3;
+#   FP16 gemm 716.1 symm 623.1 syrk 492.7 syr2k 482.9 trmm 480.6 trsm 406.4 GFLOPS; CPU 0-1% everywhere). Run-to-run spread is up to 10% (FP16 SYMM, TRSM).
+# CPU: process CPU time per call / wall time; the CPU only submits and sleeps, so it is below 1% of one core (older tables said 4-7%).
+  symm    335.0 GFLOPS     410 ms   CPU   0.43 ms ( 0.1%)
+  syrk    261.4 GFLOPS     263 ms   CPU   0.23 ms ( 0.1%)
+  syr2k   243.6 GFLOPS     564 ms   CPU   0.18 ms ( 0.0%)
+  trmm    250.4 GFLOPS     274 ms   CPU   0.43 ms ( 0.2%)
+  trsm    232.3 GFLOPS     296 ms   CPU   0.53 ms ( 0.2%)
+== n = 4096, float16
+  gemm    719.5 GFLOPS     191 ms   CPU   0.29 ms ( 0.1%)
+  symm    667.8 GFLOPS     206 ms   CPU   0.26 ms ( 0.1%)
+  syrk    495.7 GFLOPS     139 ms   CPU   0.31 ms ( 0.2%)
+  syr2k   485.0 GFLOPS     283 ms   CPU   0.30 ms ( 0.1%)
+  trmm    504.0 GFLOPS     136 ms   CPU   0.54 ms ( 0.4%)
+  trsm    450.9 GFLOPS     152 ms   CPU   0.78 ms ( 0.5%)
+# AC after: 1

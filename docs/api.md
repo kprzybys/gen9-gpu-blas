@@ -157,70 +157,85 @@ Tests: `python3 lib/test_blas.py` (all S functions, both layouts, Fortran, all o
 Z), `python3 lib/test_blas_d.py` (the same for D) and `python3 lib/test_blas_banded.py` (banded and packed, differential
 against OpenBLAS on three inputs).
 
-NumPy 1.26 (Ubuntu), float32, n = 4096 (`A @ B` etc.; CPU = % of one core):
+NumPy 1.26 / SciPy 1.11 (Ubuntu), ordinary NumPy arrays, best of 5 calls, median of 3 rounds; CPU = % of one core. float32 at
+n = 4096, float64 at n = 2048 (a DGEMM of n = 4096 is one 2.4 s dispatch, which exceeds the i915 preemption timeout of 640 ms
+and resets the GPU on the test machine; the BLAS layer then runs that call on the CPU). OpenBLAS runs with its default 8
+threads, the preload column with `OPENBLAS_NUM_THREADS=1`:
 
 | | OpenBLAS | libgen9blas_blas |
 |---|---|---|
-| `A @ B` (sgemm) | 1058 ms, 697% | **424 ms, 11%** |
-| `A.T @ A` (ssyrk) | 665 ms, 700% | 397 ms, 37% |
-| `scipy.linalg.blas.sgemm` | 1481 ms, 587% | 810 ms, 53% |
-| `A @ x` (sgemv, 64 MB copy) | 3 ms, 700% | 12 ms, 67% |
-| `A @ B` float64 (dgemm) | 2060 ms, 755% | 2650 ms, **10%** |
-| `A.T @ A` float64 | 1056 ms, 777% | 1749 ms, 14% |
-| `A @ x` float64 (128 MB copy) | 7 ms, 621% | 27 ms, 77% |
+| `A @ B` (sgemm) | 805-901 ms, 700-750% | **407 ms, 4-5%** |
+| `A.T @ A` (ssyrk) | 503-633 ms, 670-750% | 370 ms, 26% |
+| `scipy.linalg.blas.sgemm` | 1030-1240 ms, 600-655% | 770-805 ms, 51-54% |
+| `A @ x` (sgemv, 64 MB matrix) | 2.4 ms, 735-770% | 3.4 ms, 5-6% |
+| `A @ B` float64 (dgemm, n = 2048) | 220-267 ms, 700-750% | 315 ms, **3%** |
+| `A.T @ A` float64 (n = 2048) | 147-157 ms, 715-750% | 227-240 ms, 15-18% |
+| `A @ x` float64 (n = 2048, 32 MB) | 1.3 ms, 680-760% | 1.8 ms, 10% |
+
+Source: `bench/numpy_preload.py`, `results/numpy-preload-2026-11-12.txt` (it also lists the routing check with
+`GEN9BLAS_BLAS_INFO=1`: every measured call went to the GPU). The two OpenBLAS runs in the file differ by up to 10% because of the
+CPU power budget.
 
 Limitation: LAPACK inside OpenBLAS (e.g. `scipy.linalg.solve_triangular`, `np.linalg.solve`) calls its BLAS functions
 directly, bypassing the exported symbols, so the preload does not intercept them.
 
 ## Performance summary
 
-GEMM kernel, N >= 1024: FP16 715-765, FP16 accurate 645-660, FP32 364-369 GFLOPS. The full table is in
-[roadmap.md](roadmap.md) and [benchmarks.md](benchmarks.md).
+GEMM, N >= 1024: the bare HGEMM assembly kernel reaches 733-777 GFLOPS without and 605-731 with packing
+(`results/hgemm-compare-2026-11-11.txt`). Whole library call (`gen9blas.empty` arrays, packing included, `bench/gemm_sizes.py`,
+`results/gemm-sizes-2026-11-12.txt`): FP16 520-717, FP16 accurate 510-607, FP32 301-347 GFLOPS from N = 1024 to 4096 (N = 2048-4096:
+FP16 634-717, FP16 accurate 569-607, FP32 317-346). The full table is in [roadmap.md](roadmap.md) and [benchmarks.md](benchmarks.md).
 
 Level 3, whole call, `gen9blas.empty` arrays, n = 4096, GFLOPS from the standard formula (n³ for SYRK/TRMM/TRSM, 2n³ for GEMM),
 best of 5 (`python3 bench/level3_cpu.py 4096`; CPU = % of one core during the call):
 
 | n = 4096 | FP32 | FP16 | CPU |
 |---|---|---|---|
-| GEMM | 354-358 | 698 | 4-5% |
-| SYMM / SYR2K | 325-328 / 237-241 | 569-571 / 462-463 | 5-7% |
-| SYRK / TRMM | 269-271 / 259 | 507-510 / 467 | 5-7% |
-| TRSM (SciPy/OpenBLAS on the CPU for comparison: 107) | 249 | 394 | 5-7% |
+| GEMM | 347-353 | 716-720 | < 1% |
+| SYMM / SYR2K | 335-336 / 244-247 | 623-668 / 483-485 | < 1% |
+| SYRK / TRMM | 261-266 / 250 | 493-496 / 481-504 | < 1% |
+| TRSM (OpenBLAS on the CPU for comparison: 245, 766% CPU) | 226-232 | 406-451 | < 1% |
+
+Two runs, the range is given; `results/level3-whole-call-2026-11-12.txt` (OpenBLAS TRSM: `results/compare-l3-2026-11-11.txt`).
 
 FP64 (arrays float64; main kernel `dgemm_v` in OpenCL C, the rest derived from `sgemm.cl` by `lib/gen_dgemm.py`), n = 2048:
-DGEMM 56, DSYMM 54, DSYRK / DSYR2K / DTRMM / DTRSM 41-42 GFLOPS, CPU 5-9%. Peak FP64 of the GPU (FMA loop) is 90-94 GFLOPS;
-OpenBLAS DGEMM on the CPU reaches 71-83 GFLOPS at 760-780% CPU.
+DGEMM 56, DSYMM 55, DSYRK / DSYR2K / DTRMM / DTRSM 42-44 GFLOPS, CPU < 1%; OpenBLAS DGEMM on the CPU reaches 81 GFLOPS at
+745% CPU (`results/level3-fp64-2026-11-12.txt`). Peak FP64 of the GPU (FMA loop) is 90-94 GFLOPS
+(`results/arith-throughput-latency-2026-11-11.txt`). DGEMM at n = 4096 currently fails with a GPU reset (see above).
 
 Levels 1-2 (`python3 bench/l12_gen9blas.py float32|float16`; vectors 2^24, matrices 8192²; GB/s and CPU, `gen9blas.empty` arrays):
 
 | | FP32 GPU | FP16 GPU | FP32 NumPy/OpenBLAS on the CPU |
 |---|---|---|---|
-| axpy | 23.7 GB/s, 11% | 15.5 GB/s, 7% | 14.5 (SciPy saxpy, 1 thread) |
-| dot / nrm2 | 16.8 / 13.6, 8-9% | 8.5 / 7.2, 6-8% | 14.5 / 12.7, 100% |
-| iamax | 16.2, 11% | 8.1, 9% | 3.0, 100% |
-| gemv N / T | 22.4 / 25.5, 8% | 14.2 / 16.9, 7-8% | 24.0 / 19.8, **750-790%** |
-| ger | 17.3, 7% | 8.3, 4% | 4.7, 100% |
-| symv* | 17.9, 7% | 9.1, 7% | 45.6, 741% |
-| trmv N / T** | 22.8 / 15.2, 8-10% | 13.5 / 6.6, 6-10% | 21.2 / 23.5, 785% |
-| trsv N / T** | 4.9 / 7.8, **24-36%** | 2.3 / 4.0, 17-34% | 13.9 / 13.7, 100% |
-| syr / syr2 | 13.3 / 9.5, 6-7% | 6.4 / 4.6, 4-5% | 24.6 / 24.1, 780% |
+| axpy | 24.0 GB/s, 4% | 20.8 GB/s, 6% | 10.5 (SciPy saxpy, 1 thread) |
+| dot / nrm2 | 26.8 / 26.9, 2-5% | 19.5 / 18.3, 3-6% | 17.9 / 21.2, 100% |
+| iamax | 26.8, 4% | 18.7, 6% | 4.7, 100% |
+| gemv N / T | 28.4 / 28.5, 1-2% | 28.5 / 26.9, 2% | 26.6 / 20.1, **690-730%** |
+| ger | 17.5, 1% | 8.3, 1% | 6.2, 100% |
+| symv* | 47.3, 2% | 27.4, 2% | 51.9, 767% |
+| trmv N / T** | 25.0 / 23.7, 2% | 16.6 / 11.5, 2-3% | 23.5 / 27.2, 750-795% |
+| trsv N / T** | 10.3 / 11.8, 2% | 5.5 / 5.6, 2-4% | 16.6 / 20.4, 100% |
+| syr / syr2 | 13.4 / 9.7, 1% | 6.0 / 4.3, 1% | 25.9 / 23.3, 730-780% |
 
-\* SYMV: GB/s from the size of the whole matrix; the CPU reads the triangle once, the GPU twice (N and T passes).
-\*\* Triangle: GB/s from half of the matrix. TRSV: 2 kernel launches per block of 64 (n = 8192: 256), so the driver occupies
-the CPU while submitting; the GPU is slower than one CPU thread (a version without global synchronization was slower).
-These table values are from an earlier build; since then level 1 reductions, TRSV (blocks of 256) and SYMV (one pass) were
-sped up, see [roadmap.md](roadmap.md) and `bench/level12_speed.py`.
+Single run of `python3 bench/l12_gen9blas.py float32|float16` on mains power, `results/level12-2026-11-12.txt`. CPU % of one core
+is the process CPU time per call.
 
-FP16 on the CPU (NumPy) is 0.1-0.7 GB/s.
+\* SYMV: GB/s from the size of the whole matrix. The kernel now reads the triangle once, so 47 GB/s corresponds to about
+24 GB/s of actual reads. \*\* Triangle: GB/s from half of the matrix. TRSV: 2 kernel launches per block of 256, so the GPU is
+slower than one CPU thread (a version without global synchronization was slower).
 
-Batched GEMM (best of 5, `gen9blas.empty` arrays): FP16 59 (256 x 64³), 116 (64 x 128³), 225 (16 x 256³) GFLOPS; FP32 60 / 90 /
-149. With alpha = 1, beta = 0 and sizes that are a multiple of the tile the kernel writes straight to C (no epilogue).
+FP16 on the CPU (NumPy) is 0.1-1.0 GB/s (same file).
+
+Batched GEMM (best of 5, `gen9blas.empty` arrays, two runs, `bench/batched_gemm.py`, `results/batched-gemm-2026-11-12.txt`):
+FP16 99-103 (256 x 64³), 204-205 (64 x 128³), 320-325 (16 x 256³) GFLOPS; FP32 78 / 132-134 / 194-196. With alpha = 1, beta = 0 and sizes that are a multiple of the tile the kernel writes straight to C (no epilogue).
 
 CPU load: all the work is on the GPU; the CPU only submits and sleeps in `GEM_WAIT` (in NEO `clFinish` spins actively; with
 `GEN9BLAS_WAIT=busy` the NEO builds use `clFinish`). SYRK / SYR2K / TRMM / TRSM pack the data once, then run several kernel
 launches on fragments (sub-buffers) with a triangular epilogue; the number of bands is 4 (`GEN9BLAS_BLOCKS`). Fixed cost of a
-call (small data, `gen9blas.empty` arrays, from Python): ~145 µs wall, ~85 µs CPU, of which ~25 µs is the driver and ~50 µs
-the Python wrapper; from C, our part is ~3-4 µs and the rest is i915 and CPU C-states (`results/overhead-2026-11-12.txt`).
+call (axpy n = 4096, `gen9blas.empty` arrays, mains power, from Python): ~68 µs wall, ~27 µs CPU, of which ~56 µs wall / ~17 µs
+CPU is the library call through ctypes and ~11 µs / ~10 µs the Python wrapper (`bench/call_overhead.py`,
+`results/call-overhead-python-2026-11-12.txt`); from C, our part is ~3-4 µs and the rest is i915 and CPU C-states
+(`results/overhead-2026-11-12.txt`).
 
 ## Environment variables
 

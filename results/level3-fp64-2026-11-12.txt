@@ -1,0 +1,21 @@
+# Level 3 FP64 at n = 2048, gen9blas vs OpenBLAS DGEMM on the CPU, 2026-11-12
+# Command: for round in 1 2: bench/compare/l3 gen9blas <op> d 2048 (gemm symm syrk syr2k trmm trsm), then bench/compare/l3 openblas gemm d 2048    (build: make -C bench/compare l3)
+# Conditions: mains power (AC=1), 7.0.0-43-generic, gt_max_freq 1100 MHz, CPU governor powersave (EPP balance_performance); gpu mode = USM memory, best of 5 calls; OpenBLAS with its default 8 threads. [MEAS]
+# n = 4096 is not measured for FP64: DGEMM 4096 resets the GPU (i915 preemption timeout, see results/numpy-preload-2026-11-12.txt).
+# round 1
+gen9blas gemm  d n=2048  gpu   time=   306.21 ms     56.1 GFLOPS  CPU    0%  rel_err: avg=1.2e-17 max=6.8e-17  (first call 315 ms, 5 calls, median 307.33 ms, min 306.21 ms)
+gen9blas symm  d n=2048  gpu   time=   309.95 ms     55.4 GFLOPS  CPU    0%  rel_err: avg=1.1e-17 max=4.1e-17  (first call 332 ms, 5 calls, median 313.60 ms, min 309.95 ms)
+gen9blas syrk  d n=2048  gpu   time=   197.98 ms     43.4 GFLOPS  CPU    0%  rel_err: avg=1.1e-17 max=4.9e-17  (first call 212 ms, 5 calls, median 200.56 ms, min 197.98 ms)
+gen9blas syr2k d n=2048  gpu   time=   403.98 ms     42.5 GFLOPS  CPU    0%  rel_err: avg=4.0e-17 max=2.3e-16  (first call 433 ms, 5 calls, median 405.73 ms, min 403.98 ms)
+gen9blas trmm  d n=2048  gpu   time=   198.84 ms     43.2 GFLOPS  CPU    0%  rel_err: avg=4.3e-18 max=1.6e-16  (first call 213 ms, 5 calls, median 201.75 ms, min 198.84 ms)
+gen9blas trsm  d n=2048  gpu   time=   200.90 ms     42.8 GFLOPS  CPU    1%  rel_err: avg=1.2e-17 max=1.0e-16  (first call 217 ms, 5 calls, median 203.64 ms, min 200.90 ms)
+openblas gemm  d n=2048  gpu   time=   211.75 ms     81.1 GFLOPS  CPU  745%  rel_err: avg=3.4e-17 max=2.4e-16  (first call 235 ms, 5 calls, median 245.68 ms, min 211.75 ms)
+# round 2
+gen9blas gemm  d n=2048  gpu   time=   304.26 ms     56.5 GFLOPS  CPU    0%  rel_err: avg=1.2e-17 max=6.8e-17  (first call 318 ms, 5 calls, median 306.87 ms, min 304.26 ms)
+gen9blas symm  d n=2048  gpu   time=   311.91 ms     55.1 GFLOPS  CPU    0%  rel_err: avg=1.1e-17 max=4.1e-17  (first call 329 ms, 5 calls, median 313.36 ms, min 311.91 ms)
+gen9blas syrk  d n=2048  gpu   time=   197.14 ms     43.6 GFLOPS  CPU    0%  rel_err: avg=1.1e-17 max=4.9e-17  (first call 213 ms, 5 calls, median 198.49 ms, min 197.14 ms)
+gen9blas syr2k d n=2048  gpu   time=   404.48 ms     42.5 GFLOPS  CPU    0%  rel_err: avg=4.0e-17 max=2.3e-16  (first call 430 ms, 5 calls, median 407.31 ms, min 404.48 ms)
+gen9blas trmm  d n=2048  gpu   time=   199.99 ms     43.0 GFLOPS  CPU    0%  rel_err: avg=4.3e-18 max=1.6e-16  (first call 212 ms, 5 calls, median 201.89 ms, min 199.99 ms)
+gen9blas trsm  d n=2048  gpu   time=   202.00 ms     42.5 GFLOPS  CPU    1%  rel_err: avg=1.2e-17 max=1.0e-16  (first call 222 ms, 5 calls, median 205.30 ms, min 202.00 ms)
+openblas gemm  d n=2048  gpu   time=   212.14 ms     81.0 GFLOPS  CPU  743%  rel_err: avg=3.4e-17 max=2.4e-16  (first call 290 ms, 5 calls, median 242.71 ms, min 212.14 ms)
+# AC after: 1

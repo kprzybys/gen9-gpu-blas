@@ -1,0 +1,38 @@
+# Levels 1-2: bandwidth (GB/s from the data size of the formula) and CPU % of one core, FP32 GPU, FP16 GPU, FP32 NumPy/SciPy (OpenBLAS) on the CPU, 2026-11-12
+# Command: python3 bench/l12_gen9blas.py float32; python3 bench/l12_gen9blas.py float16    (vectors 2^24, matrices 8192 x 8192)
+# Conditions: mains power (AC=1), 7.0.0-43-generic, gt_max_freq 1100 MHz, CPU governor powersave (EPP balance_performance). Single run, best time of 5 calls, CPU = mean.
+# 'GPU usm' = gen9blas.empty arrays (the columns used in docs/api.md); 'GPU copy' = plain NumPy arrays; 'CPU (NumPy)' = NumPy / SciPy with default OpenBLAS threads (8), FP16 has no CPU BLAS. [MEAS]
+# Triangle routines (trmv, trsv): GB/s from half of the matrix; SYMV: from the whole matrix (the GPU reads it twice).
+== float32: vectors n = 16777216, matrices 8192 x 8192
+                        GPU usm           GPU copy        CPU (NumPy)
+  axpy          24.0 GB/s    4%    23.3 GB/s    2%    10.5 GB/s  100%
+  dot           26.8 GB/s    2%    20.4 GB/s    2%    17.9 GB/s  100%
+  nrm2          26.9 GB/s    5%    19.9 GB/s    3%    21.2 GB/s  100%
+  iamax         26.8 GB/s    4%    19.4 GB/s    3%     4.7 GB/s  100%
+  gemv N        28.4 GB/s    1%    21.5 GB/s    1%    26.6 GB/s  733%
+  gemv T        28.5 GB/s    2%    19.5 GB/s    2%    20.1 GB/s  693%
+  ger           17.5 GB/s    1%    17.4 GB/s    1%     6.2 GB/s  100%
+  symv          47.3 GB/s    2%    30.4 GB/s    1%    51.9 GB/s  767%
+  trmv N        25.0 GB/s    2%    19.5 GB/s    2%    23.5 GB/s  749%
+  trmv T        23.7 GB/s    2%    13.9 GB/s    1%    27.2 GB/s  795%
+  trsv N        10.3 GB/s    2%     8.7 GB/s    2%    16.6 GB/s  100%
+  trsv T        11.8 GB/s    2%    11.2 GB/s    2%    20.4 GB/s  100%
+  syr           13.4 GB/s    1%    13.0 GB/s    1%    25.9 GB/s  779%
+  syr2           9.7 GB/s    1%     9.6 GB/s    1%    23.3 GB/s  732%
+== float16: vectors n = 16777216, matrices 8192 x 8192
+                        GPU usm           GPU copy        CPU (NumPy)
+  axpy          20.8 GB/s    6%    19.5 GB/s    3%     0.5 GB/s  100%
+  dot           19.5 GB/s    3%    14.6 GB/s    3%     1.0 GB/s  100%
+  nrm2          18.3 GB/s    6%    14.7 GB/s    5%     0.4 GB/s  100%
+  iamax         18.7 GB/s    6%    13.9 GB/s    5%     0.8 GB/s  100%
+  gemv N        28.5 GB/s    2%    25.8 GB/s    2%     0.5 GB/s  100%
+  gemv T        26.9 GB/s    2%    19.2 GB/s    2%     0.1 GB/s  100%
+  ger            8.3 GB/s    1%     8.4 GB/s    1%     0.2 GB/s  100%
+  symv          27.4 GB/s    2%    21.7 GB/s    2%                  -
+  trmv N        16.6 GB/s    3%    14.3 GB/s    3%                  -
+  trmv T        11.5 GB/s    2%     7.2 GB/s    1%                  -
+  trsv N         5.5 GB/s    4%     4.1 GB/s    3%                  -
+  trsv T         5.6 GB/s    2%     5.3 GB/s    2%                  -
+  syr            6.0 GB/s    1%     5.9 GB/s    1%                  -
+  syr2           4.3 GB/s    1%     4.2 GB/s    0%                  -
+# AC after: 1

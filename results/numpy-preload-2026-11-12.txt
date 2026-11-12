@@ -1,0 +1,28 @@
+# NumPy / SciPy on the CPU (OpenBLAS) vs LD_PRELOAD=lib/libgen9blas_blas.so, 2026-11-12
+# Command: python3 bench/numpy_preload.py 4096 3     (check of the routing: python3 bench/numpy_preload.py check 4096)
+# Conditions: mains power (AC=1 before and after), 7.0.0-43-generic, UHD 620 gt_max_freq 1100 MHz, CPU governor powersave (intel_pstate active, EPP balance_performance), NumPy 1.26.4, SciPy 1.11.4.
+# Method: one child process per mode and round, modes alternating, 3 rounds; per case best of 5 calls after one warm-up call; CPU % = process CPU time (all threads) / wall time.
+#   OpenBLAS column: default OpenBLAS threads (8). Preload column: OPENBLAS_NUM_THREADS=1 set before NumPy is imported, GEN9BLAS_BLAS=auto (default).
+#   Ordinary NumPy arrays (userptr, no copy). Median over rounds, range in brackets. [MEAS]
+# float64 is at n = 2048, not 4096 [MEAS]: a DGEMM of n = 4096 (2.4 s in one dispatch) now resets the GPU on this machine
+#   (i915 'Resetting rcs0 for preemption time out', preempt_timeout_ms = 640; gen9blas_gemm returns an error, the BLAS layer then runs on the CPU).
+#   n = 2048 (0.3 s) works. DGEMM n = 3072 fails the same way.
+# Routing check (GEN9BLAS_BLAS_INFO=1, one call of each case; every S/D case went to the GPU; the single sdot -> CPU is not one of the measured operations and was not investigated):
+#       4 x dgemm -> GPU
+#       2 x dgemv -> GPU
+#       2 x dsyrk -> GPU
+#       1 x sdot -> CPU
+#       4 x sgemm -> GPU
+#       2 x sgemv -> GPU
+#       2 x ssyrk -> GPU
+
+float32 n = 4096, float64 n = 2048, median of 3 rounds (range in brackets), best-of-5 wall time per round
+case                                                 OpenBLAS (cpu)                  LD_PRELOAD libgen9blas_blas
+A @ B float32                 901 ms [813-904], CPU  711% [696-750]            407 ms [407-407], CPU    4% [3-5]
+A.T @ A float32               633 ms [506-671], CPU  670% [643-748]          370 ms [365-379], CPU   26% [26-27]
+scipy gemm float32          1244 ms [1099-1272], CPU  598% [566-631]          772 ms [768-825], CPU   51% [49-54]
+A @ x float32               2.42 ms [2.36-2.49], CPU  735% [706-796]         3.40 ms [3.36-3.44], CPU    5% [5-6]
+A @ B float64                 267 ms [250-274], CPU  700% [675-709]            315 ms [313-319], CPU    3% [2-3]
+A.T @ A float64               157 ms [147-168], CPU  715% [677-728]          227 ms [227-231], CPU   15% [14-17]
+scipy gemm float64            343 ms [314-395], CPU  698% [646-734]          421 ms [414-427], CPU   28% [28-28]
+A @ x float64               1.35 ms [1.24-3.70], CPU  680% [675-693]        1.78 ms [1.73-1.79], CPU   10% [5-11]

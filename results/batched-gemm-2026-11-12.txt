@@ -1,0 +1,13 @@
+# Batched GEMM (gen9blas.gemm_batched), FP16 and FP32, gen9blas.empty arrays, 2026-11-12
+# Command: python3 bench/batched_gemm.py    (alpha = 1, beta = 0; best of 5 calls after a warm-up call; GFLOPS = 2 M N K count / time) [MEAS]
+# Conditions: mains power (AC=1), 7.0.0-43-generic, gt_max_freq 1100 MHz, CPU governor powersave (EPP balance_performance). Two runs listed (run-to-run spread ~10%).
+# run 1
+case                     FP16         FP32
+256 x 64^3          99.0 GFLOPS    78.4 GFLOPS
+64 x 128^3         203.8 GFLOPS   132.1 GFLOPS
+16 x 256^3         320.0 GFLOPS   194.1 GFLOPS
+# run 2
+case                     FP16         FP32
+256 x 64^3         102.7 GFLOPS    78.1 GFLOPS
+64 x 128^3         204.9 GFLOPS   134.3 GFLOPS
+16 x 256^3         325.2 GFLOPS   196.4 GFLOPS

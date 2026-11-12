@@ -39,4 +39,4 @@ for n in [int(a) for a in sys.argv[1:]] or [2048, 4096]:
                 f()
                 wall.append(time.perf_counter() - t); cpu_t.append(time.process_time() - c)
             t, c = min(wall), sum(cpu_t) / len(cpu_t)
-            print(f"  {name:6s} {fl / t / 1e9:6.1f} GFLOPS  {t * 1e3:6.0f} ms   CPU {c * 1e3:6.0f} ms ({100 * c / np.mean(wall):3.0f}%)")
+            print(f"  {name:6s} {fl / t / 1e9:6.1f} GFLOPS  {t * 1e3:6.0f} ms   CPU {c * 1e3:6.2f} ms ({100 * c / np.mean(wall):4.1f}%)")

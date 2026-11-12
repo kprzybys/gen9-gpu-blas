@@ -1,0 +1,7 @@
+# Fixed cost of one gen9blas call from Python, 2026-11-12
+# Command: python3 bench/call_overhead.py 4096 2000 5    (axpy, n = 4096 float32, gen9blas.empty arrays; mean per call over 2000 calls, median of 5 alternating rounds) [MEAS]
+# Conditions: mains power (AC=1), 7.0.0-43-generic, gt_max_freq 1100 MHz, CPU governor powersave (EPP balance_performance). Complements results/overhead-2026-11-12.txt (the same call from C: 48 us wall, 14-17 us CPU on mains power).
+  gen9blas.axpy (Python wrapper + ctypes + library)    wall   67.6 us [65.2-71.0]   CPU   26.9 us
+  ctypes call of gen9blas_axpy, prepared pointers      wall   56.1 us [53.8-58.1]   CPU   16.6 us
+  Python wrapper part (difference)                     wall   11.4 us            CPU   10.3 us
+n = 4096 float32, 2000 calls per round, 5 rounds (alternating), median

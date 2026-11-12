@@ -1,0 +1,16 @@
+# Whole-call GEMM speed versus size: FP16, FP16 accurate, FP32 (gen9blas.empty arrays, packing included), 2026-11-12
+# Command: python3 bench/gemm_sizes.py    (best of 5 calls after a warm-up call; GFLOPS = 2 n^3 / time) [MEAS]
+# Conditions: mains power (AC=1), 7.0.0-43-generic, gt_max_freq 1100 MHz, CPU governor powersave (EPP balance_performance). Two runs listed.
+# Compare: the bare HGEMM assembly kernel without / with packing is 733-777 / 605-731 GFLOPS (results/hgemm-compare-2026-11-11.txt).
+# run 1
+     n       FP16  FP16 accurate       FP32   (GFLOPS)
+  1024      519.6          527.8      301.0
+  2048      645.7          587.3      317.0
+  3072      654.3          579.1      331.3
+  4096      716.7          606.5      346.6
+# run 2
+     n       FP16  FP16 accurate       FP32   (GFLOPS)
+  1024      530.2          509.9      309.8
+  2048      633.5          569.2      333.2
+  3072      691.6          606.3      344.1
+  4096      716.8          598.9      342.0

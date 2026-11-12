@@ -29,9 +29,9 @@ Implemented ([api.md](api.md)):
 | FMA peak, FP32 / FP16 / FP64 | ~410 / ~800 / 90-94 GFLOPS | `results/arith-throughput-latency-2026-11-11.txt` |
 | Memory bandwidth, GPU reading RAM | ~20-25 GB/s (L3 ~155 GB/s) | `results/memory-bandwidth-2026-11-11.txt` |
 | HGEMM assembly kernel (without / with packing) | 733-777 / 605-731 GFLOPS (N = 1024-4096) | `results/hgemm-compare-2026-11-11.txt` |
-| GEMM kernel in the library, N >= 1024 | FP16 715-765, FP16 accurate 645-660, FP32 364-369 GFLOPS | [api.md](api.md) |
-| Level 3 whole call, n = 4096 | GEMM FP32 354-358, FP16 698 GFLOPS; CPU 4-7% of one core | `results/compare-l3-2026-11-11.txt` |
-| FP64, n = 2048 | DGEMM 56, other routines 41-54 GFLOPS | [api.md](api.md) |
+| GEMM, whole library call | whole call N = 2048-4096: FP16 634-717, FP16 accurate 569-607, FP32 317-346 GFLOPS | `results/gemm-sizes-2026-11-12.txt` |
+| Level 3 whole call, n = 4096 | GEMM FP32 347-353, FP16 716-720 GFLOPS; CPU < 1% of one core | `results/level3-whole-call-2026-11-12.txt` |
+| FP64, n = 2048 | DGEMM 56, other routines 42-55 GFLOPS | `results/level3-fp64-2026-11-12.txt` |
 | Sustained load | HGEMM ~758 GFLOPS stable over 4000 runs (CPU drops to ~130 in the same test) | `results/long-run-2026-11-11.txt` |
 | Skinny GEMM, FP16 4096 x 4096 | M = 1-16: 1.5-3.2 ms (was 10.4-11.1 ms) | `results/skinny-gemm-rework-2026-11-12.txt` |
 | Fixed cost of a call | ~3-4 µs ours, rest i915 and CPU C-states | `results/overhead-2026-11-12.txt` |
@@ -97,8 +97,8 @@ to OpenBLAS at n = 1024 and in FP64. GEMM kernel against oneDNN 3.6: +7-14% FP32
 8. DGEMM in assembly (now 55 GFLOPS, FP64 peak 90-94, OpenBLAS CPU 71-83): `asm/gemm_gen.py` knows only `mad` (16) for FP16 / FP32;
    FP64 is `mad` (8) with shuffles, so it needs a new template and loop analysis.
 9. Levels 1-2: faster reductions (`dot` / `nrm2`), `axpy` in FP16, GEMV FP16 against FP32 (13-15 vs 22 GB/s was measured before the
-   block-read variant), the ~50 µs gaps between TRSV kernels, fewer TRSV launches with larger blocks, and the ~50 µs of Python
-   wrapper overhead per call.
+   block-read variant), the ~50 µs gaps between TRSV kernels, fewer TRSV launches with larger blocks, and the ~10 µs of Python
+   wrapper overhead per call (`results/call-overhead-python-2026-11-12.txt`).
 10. Dependencies between kernels in one command buffer instead of a barrier after each (fewer GPU stalls).
 11. Type conversion (`astype`) on the GPU in `gen9blas.py`; it runs on the CPU today.
 12. Measure levels 1-2 of the no-NEO build against the NEO build (only level 3 has been compared in full).
