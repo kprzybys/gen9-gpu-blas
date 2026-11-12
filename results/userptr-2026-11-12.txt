@@ -13,7 +13,7 @@ userptr (plain process memory, zero-copy by the CPU), 2026-11-12, UHD 620, Linux
     64 MB |      20054 / 12055         |      20185 / 12819         |       9090 / 127           |       8841   | OK
 
    Phases (PHASES=1, 64 MB input + 64 MB output, us CPU): create 5–12, execbuf 14 000–27 000 (pinning 32 768 pages:
-   ~0.45 us/page), wait 22–330, close 11–13. i915 source (v7.0, docs/sources/linux-i915): pin_user_pages_fast +
+   ~0.45 us/page), wait 22–330, close 11–13. i915 source (v7.0, third_party/linux-i915, see scripts/fetch_docs.sh): pin_user_pages_fast +
    sg_alloc_table + i915_gem_gtt_prepare_pages (dma_map through the IOMMU); no clflush (can_bypass_llc = false for KBL).
    Flags: I915_PARAM_HAS_USERPTR_PROBE = yes; READ_ONLY accepted; PROBE on a bad address: EFAULT. Overlapping
    userptr objects: accepted.

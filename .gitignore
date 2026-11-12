@@ -15,11 +15,9 @@ bench/clbench
 bench/gemm_clblast
 bench/hgemm
 bench/sgemm
-bench/pakowanie
 bench/packing
 bench/l12
 bench/overhead
-bench/narzut
 bench/compare/l3
 bench/compare/viennacl_skinny
 experiments/no-neo/*

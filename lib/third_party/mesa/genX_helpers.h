@@ -1,4 +1,4 @@
-/* Minimalny zamiennik genX_helpers.h z Mesy: adresy to zwykłe uint64_t (softpin, bez relokacji). */
+/* Minimal replacement for Mesa's genX_helpers.h: addresses are plain uint64_t (softpin, no relocations). */
 #pragma once
 #include <stdint.h>
 typedef void __gen_user_data;

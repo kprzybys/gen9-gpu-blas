@@ -2,7 +2,7 @@ ViennaCL 1.7.1 dense_blas test (OpenBenchmarking pts/viennacl-1.1.0) repeated on
 Sizes and method from examples/benchmarks/dense_blas.cpp: BLAS1 N = 10^7, GEMV 3840², GEMM 1976³; loop ≥ 1 s, mean call
 time. Medians of 3 runs (as PTS).
 - 2021: OpenBenchmarking result 2103278-IB-KABYLAKET61 (i7-8550U, UHD 620 KBL GT2 1150 MHz, NEO from Ubuntu 20.10, Linux kernel 5.8);
-  PTS recorded only FP32 vector and FP64; data: results/external/openbenchmarking-2103278-IB-KABYLAKET61/.
+  PTS recorded only FP32 vector and FP64; data: https://openbenchmarking.org/result/2103278-IB-KABYLAKET61.
 - ViennaCL today: the same program (ViennaCL 1.7.1 from GitHub, sha256 tar.gz dddb8d40…), our laptop (i5-8265U, UHD 620 WHL GT2),
   NEO (OpenCL), Linux kernel 7.0.0-43. The program also computes FP32 GEMV/GEMM (PTS did not record them).
 - libgen9blas: the same operations, sizes and method (bench/compare/viennacl_gen9blas.py), data in USM, without NEO (kcl).

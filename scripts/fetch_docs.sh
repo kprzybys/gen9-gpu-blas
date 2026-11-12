@@ -1,6 +1,6 @@
 #!/bin/sh
-# Odtwarza pobranie dokumentacji (stan 2026-11-11). PDF-y są w git LFS, ten skrypt służy do weryfikacji i aktualizacji.
-# Strona indeksu Intela blokuje automaty (403), ale pliki z cdrdv2.intel.com pobierają się bezpośrednio.
+# Fetches the reference documentation into third_party/ (not in git; state as of 2026-11-11). Files already present are kept.
+# Intel's index page blocks automated clients (403), but files from cdrdv2.intel.com download directly.
 set -e
 cd -P "$(dirname "$0")/.." && mkdir -p third_party && cd third_party
 UA="Mozilla/5.0 (X11; Linux x86_64)"
@@ -27,16 +27,16 @@ for e in cl_intel_subgroups cl_intel_subgroups_short cl_intel_subgroups_char cl_
   [ -f "khronos/$e.md" ] || curl -sfL "https://registry.khronos.org/OpenCL/extensions/intel/$e.html" | pandoc -f html -t gfm-raw_html --wrap=none -o "khronos/$e.md"
 done
 [ -f khronos/cl_intel_media_block_io.txt ] || curl -sfL -o khronos/cl_intel_media_block_io.txt https://registry.khronos.org/OpenCL/extensions/intel/cl_intel_media_block_io.txt
-# IGA + dokumentacja vISA z kompilatora w wersji zgodnej z zainstalowanym intel-igc-core (1.0.17537.24)
+# IGA + vISA documentation from the compiler, matching the installed intel-igc-core (1.0.17537.24)
 D=igc-1.0.17537.24
 if [ ! -d "$D" ]; then
   t=$(mktemp -d)
   git clone -q --filter=blob:none --sparse --depth 1 --branch igc-1.0.17537.24 https://github.com/intel/intel-graphics-compiler.git "$t"
   (cd "$t" && git sparse-checkout set visa/iga documentation)
   mkdir -p "$D"; cp -r "$t/visa/iga/IGALibrary" "$D/"; cp -r "$t/documentation/visa" "$D/visa-docs"; cp "$t/LICENSE.md" "$D/"
-  (cd "$t" && git log -1 --format='%H %cd') > "$D/WERSJA.txt"; rm -rf "$t"
+  (cd "$t" && git log -1 --format='%H %cd') > "$D/VERSION.txt"; rm -rf "$t"
 fi
-# Mesa (kompilator brw): walidator, konflikty banków, opóźnienia, asembler
+# Mesa (brw compiler): validator, bank conflicts, latencies, assembler
 M=mesa-25.2.8
 if [ ! -d "$M" ]; then
   t=$(mktemp -d)
@@ -46,9 +46,9 @@ if [ ! -d "$M" ]; then
   for f in brw_asm.c brw_asm.h brw_asm_internal.h brw_asm_tool.c brw_disasm.c brw_disasm.h brw_eu_compact.c brw_eu_defines.h \
            brw_eu_emit.c brw_eu_inst.h brw_eu_validate.c brw_gram.y brw_lex.l brw_opt_bank_conflicts.cpp brw_reg.h \
            brw_schedule_instructions.cpp brw_validate.cpp test_eu_validate.cpp brw_eu.h brw_eu.c; do cp "$t/src/intel/compiler/$f" "$M/"; done
-  (cd "$t" && git log -1 --format='mesa-25.2.8 %H %cd') > "$M/WERSJA.txt"; rm -rf "$t"
+  (cd "$t" && git log -1 --format='mesa-25.2.8 %H %cd') > "$M/VERSION.txt"; rm -rf "$t"
 fi
-# Mesa genxml: definicje komend i struktur Gen9 bit po bicie (gen90.xml importuje gen80 -> gen75 -> ... -> gen40)
+# Mesa genxml: bit-level definitions of Gen9 commands and structures (gen90.xml imports gen80 -> gen75 -> ... -> gen40)
 if [ ! -f "$M/genxml/gen90.xml" ]; then
   t=$(mktemp -d)
   git clone -q --filter=blob:none --sparse --depth 1 --branch mesa-25.2.8 https://gitlab.freedesktop.org/mesa/mesa.git "$t"
@@ -58,7 +58,7 @@ if [ ! -f "$M/genxml/gen90.xml" ]; then
     cp "$t/src/intel/genxml/$f" "$M/genxml/"; done
   rm -rf "$t"
 fi
-# intel-gpu-tools: gpgpu_fill (najmniejszy przykład jądra obliczeniowego Gen9 przez i915, bez NEO)
+# intel-gpu-tools: gpgpu_fill (the smallest example of a Gen9 compute kernel through i915, without NEO)
 I=igt-2.6
 if [ ! -d "$I" ]; then
   t=$(mktemp -d)
@@ -66,12 +66,12 @@ if [ ! -d "$I" ]; then
   (cd "$t" && git sparse-checkout set lib)
   mkdir -p "$I"
   for f in gpgpu_fill.c gpgpu_fill.h gpu_cmds.c gpu_cmds.h gen9_render.h gen8_media.h gen7_media.h intel_batchbuffer.h intel_reg.h; do cp "$t/lib/$f" "$I/"; done
-  cp "$t/COPYING" "$I/"; (cd "$t" && git log -1 --format='igt v2.6 %H %cd') > "$I/WERSJA.txt"; rm -rf "$t"
+  cp "$t/COPYING" "$I/"; (cd "$t" && git log -1 --format='igt v2.6 %H %cd') > "$I/VERSION.txt"; rm -rf "$t"
 fi
-echo gotowe
-# i915 z jądra Linuksa zgodnego z uruchomionym (7.0): userptr, przypinanie stron, execbuffer (BEZNEO.md 6g)
+# i915 from the Linux kernel matching the running one (7.0): userptr, page pinning, execbuffer (docs/no-neo.md 6g)
 L=linux-i915
 mkdir -p "$L"
 for f in gem/i915_gem_userptr.c gem/i915_gem_pages.c gem/i915_gem_object.c gem/i915_gem_execbuffer.c; do
   [ -f "$L/$(basename $f)" ] || curl -sfL -o "$L/$(basename $f)" "https://raw.githubusercontent.com/torvalds/linux/v7.0/drivers/gpu/drm/i915/$f"
 done
+echo done

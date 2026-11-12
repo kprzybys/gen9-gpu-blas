@@ -1,5 +1,5 @@
 """ViennaCL 1.7.1 dense_blas test (OpenBenchmarking profile pts/viennacl) repeated on libgen9blas: same operations, sizes,
-metrics and measurement method. Reference data: results/external/openbenchmarking-2103278-IB-KABYLAKET61/.
+metrics and measurement method. Reference data: https://openbenchmarking.org/result/2103278-IB-KABYLAKET61 (not redistributed here).
 
 Run: python3 bench/compare/viennacl_gen9blas.py [series]   (default 3 series, as in PTS)
 Method as in examples/benchmarks/dense_blas.cpp: the operation once as warm-up, then repeated until the total time is ≥ 1 s;
