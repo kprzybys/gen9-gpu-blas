@@ -1,0 +1,148 @@
+# Gen8 (Cherryview/Braswell) port: facts before code
+
+Status (2026-11-12): **research only, nothing has run on Gen8 hardware yet.** This file collects what has to change in
+kcl and in the kernels for a Gen8 Cherryview GPU, following the method of [performance-model.md](performance-model.md):
+facts with sources first, then one change at a time and a test. Work happens on the `gen8` branch; `main` stays Gen9-only
+until the Gen9 tests pass unchanged on both Gen9 machines.
+
+Conventions: **[SPEC]** Intel PRM for Cherryview/Braswell (`third_party/txt/intel-gfx-prm-osrc-chv-bsw-*`; **p. = the page
+number printed on the page**, the PDF page is higher by 35 in vol07, 4 in vol04, 17 in vol02a, 39 in vol02c, 12 in vol02d)
+or Mesa genxml; **[SW]** driver or compiler source (Linux v7.0 i915, Mesa 25.2.8, NEO 24.35.30872.36); **[MEAS]** read on the
+target machine (i915 getparam, topology query, debugfs, sysfs; no GPU work submitted); **[SCAN]** static scan with
+`scripts/chv_scan.py` (kernels compiled with `ocloc -device bdw`); **[EXP]** compiler experiment; **[HYP]** unconfirmed.
+All cited sources: `sh scripts/fetch_docs.sh`.
+
+## 1. Target hardware
+
+| Quantity | Value | Source |
+|---|---|---|
+| GPU | Cherryview/Braswell "HD Graphics 400", PCI 0x22b1 rev 0x35, graphics version 8 (Celeron N3010, 2 cores) | [MEAS] i915 debugfs `i915_capabilities` |
+| EU / threads / layout | 12 EU (1 slice, 2 subslices x 6 of 8 EU), 7 threads/EU = 84 threads; 42 per subslice | [MEAS] GETPARAM EU_TOTAL, topology query; [SPEC] vol04 p.5 (2x6) |
+| GPU clock | 200-600 MHz (RPe = RP1 = 320 MHz) | [MEAS] sysfs, `i915_frequency_info` |
+| Peak (600 MHz) | FP32 192 FLOP/clk = **115 GFLOPS**; FP16 384 = 230; **FP64 24 = 14.4** (1/8 of FP32) | [SPEC] vol04 p.5 |
+| L3 / SLM | 384 KB in 2 banks; SLM 0 or 128 KB; no LLC/L4 | [SPEC] vol04 p.5 |
+| Memory | one DDR3-1600 module, single channel: **12.8 GB/s** theoretical (UHD 620: 37.5) | [MEAS] dmidecode |
+| GPU address space | 32-bit per-context PPGTT: **4 GB** (Gen9: 48-bit) | [MEAS] `ppgtt-size: 32`, CONTEXT_PARAM_GTT_SIZE = 4096 MB |
+| CPU cache sharing | `has_llc: no`, `has_snoop: yes` | [MEAS] `i915_capabilities`; [SW] `i915_pci.c` (chv_info) |
+| IOMMU | off for the GPU (no DMAR table) | [MEAS] |
+| Timestamp counter | 12.5 MHz (80 ns/tick, 36 bits); Gen9: 12 MHz | [MEAS] GETPARAM CS_TIMESTAMP_FREQUENCY; [SW] `intel_gt_clock_utils.c:117`; [SPEC] vol02c p.1174 (width) |
+| Reset | per-engine reset (`reset=3`), hangcheck on; no GPU hang in this machine's kernel log | [MEAS] |
+
+## 2. Compiler
+
+- `ocloc` 24.35 (the version used for all Gen9 builds) knows Gen8 only as Broadwell: `-device bdw` works, `chv`, `bsw` and
+  `0x22b1` fail with "Cannot get HW Info" [EXP]. Its device list for Gen8 contains only `bdw` [EXP]; whether any NEO
+  release ever supported Cherryview was not checked.
+- The bdw output is a patch-token binary (`PTM.txt`, `*_KernelHeap.asm`), not zebin: `lib/gen_kernels.py`, which reads
+  `.ze_info`, cannot use it as it is [EXP].
+- **Scratch**: 8 kernels spill to scratch when built for bdw (`hgemm_16x32`, `hgemm_16x32g/kc/mx/p/q`, `hgemm_v`,
+  `gemv_n_f`; whl: only `hgemm_16x32kc`, `hgemm_16x32mx`). kcl has no scratch support and `lib/gen_kernels.py` marks
+  such kernels unsupported [SCAN].
+- `bench/gen_h.bin`, `gen_hd.bin`, `gen_s.bin` are Gen9 binaries and would need Gen8 versions.
+- Not evaluated: Beignet, the older Intel OpenCL stack, is said to have supported Cherryview [HYP, unchecked].
+
+## 3. Cherryview EU restrictions vs code compiled for Broadwell
+
+Cherryview adds rules that Broadwell does not have. When a source or destination is 64-bit (DF/Q/UQ) **or the instruction is
+an integer DWord x DWord `mul`** [SPEC vol07 p.823-824; SW `elk_eu_validate.c:1736-1830`, gated on `INTEL_PLATFORM_CHV`]:
+
+| # | Rule |
+|---|---|
+| R1 | Align1 regions: (a) source and destination horizontal strides aligned to the same qword; (b) VStride = Width x HStride; (c) equal subregister offsets (scalar source exempt). PRM examples of legal forms: `mov (4) r10.0:df r11.0<16;8,2>:f`, `mul (4) r10.0<2>:d r11.0<8;4,2>:d` |
+| R2 | no indirect addressing |
+| R3 | no ARF operands (accumulator, address, flag), no `mac`, no AccWrEn |
+| R4 | no DepCtrl |
+
+Further rules on the same `mul` [SPEC vol02a p.1078]: "[CHV, BSW-A]: DW * W is not supported outside MACH macro"
+(A stepping) and "[CHV, BSW]: When multiplying DW x DW, the dst cannot be accumulator"; the same page says 32x32 multiply
+is native. Mesa's Gen8 compiler nevertheless never emits DW x DW `mul` on Cherryview (`has_integer_dword_mul = false`,
+`intel_device_info.c:497`; Broadwell: true at 422) and lowers it to DW x UW sequences with a GRF destination
+(`elk_fs.cpp:3716-3731`, used from 3989) [SW].
+
+Scan of the six library programs (177 kernels) built for bdw with the options of `lib/gen_kernels.py`
+[SCAN, `python3 scripts/chv_scan.py DIR`]:
+
+| Hits | default build | with `IGC_VISAOptions=-noFP64bRegion` [EXP] |
+|---|---|---|
+| 64-bit, R1a stride (e.g. `mov (8\|M0) r68.0<1>:q r12.0<8;8,1>:d`, `mul q <- d x d`, `add q <- q + d`, `shl q <- d`) | 3523 | 0 |
+| 64-bit, R1c offset | 37 | 0 |
+| 64-bit, width-1 region `<2;1,0>:d` (qword-strided, but fails Mesa's literal R1b check) | 0 | 3509 |
+| 64-bit, R2 indirect (`psv_d`, `trsv_block_d`) | 2 | 2 |
+| 64-bit, R3: `math.invm` / `madm` with accumulators acc2-9 (FP64 division) | 363 | 363 |
+| DW x DW `mul` with non-scalar regions, R1a (mostly `mul` + `mach` triples emulating 64-bit multiplies in index code) | 1359 | 1359 |
+| DW x DW `mul`, R1b-w1 / R1c (`skinny_r4_h`) | 8 / 8 | 8 / 8 |
+| kernels with no hit (besides the width-1 regions) | **3** | **53** |
+
+- With `-noFP64bRegion` (a vISA option in IGC 1.0.17537.24) all 64-bit stride and offset violations become width-1
+  regions. Clean then: `dgemm_v`, `hgemm_16x32` (but it needs scratch), all packing and expand/epilog kernels, `trsm_L/Y/store`,
+  `copy16`, `gemv_t1b_f/d`. `sgemm_16x16p` and four `hgemm_16x32*` variants have a single DW x DW `mul`; GEMV/AXPY kernels
+  6-39 [SCAN].
+- The three kernels clean in the default build still contain scalar DW x DW `mul` (allowed by R1, but never emitted by
+  Mesa on Cherryview), so "clean" is not "known safe" [HYP].
+- `hgemm_16x32` on bdw computes in FP32 (`mad :f`) and uses FP16 only for conversions, so it would not get the 2x FP16
+  rate [SCAN + HYP].
+
+What a violation does on the hardware is **not documented**: wrong results, wrong addresses (page faults) or a hang are
+all possible [HYP]. Tried without effect [EXP]: `-force_stos_opt` (identical code), `-32` (still 3096 64-bit stride hits,
+changes the argument ABI), `mul24` in the source (still DW x DW), `IGC_ForceNoFP64bRegioning=1`,
+`IGC_VISAOptions="-platform CHV"`. Ways forward:
+
+1. **`-noFP64bRegion`** for all kernels (done above); open: does Cherryview accept the width-1 `<2;1,0>` form?
+2. **Index code without 64-bit multiplies and DW x DW `mul`** in the remaining kernels (e.g. 32-bit offsets, factors
+   known to fit 16 bits, which gives DW x UW with a GRF destination as in Mesa) [HYP].
+3. **Rewrite remaining instructions in the assembly** and reassemble with `ocloc asm -device bdw` (the project already
+   assembles kernels, see `asm/`); needs free registers [HYP].
+4. FP64 division (`math.invm`/`madm`, R3) and the two indirect 64-bit moves need a separate decision (drop the FP64
+   triangular solvers on Gen8 or rewrite them).
+5. A hardware test of a kernel against the CPU decides between the remaining unknowns.
+
+## 4. Driver (i915, Linux v7.0)
+
+| Topic | Fact | Source |
+|---|---|---|
+| CPU/GPU coherency | A GEM_CREATE object on a non-LLC platform is `I915_CACHE_NONE` (not coherent); i915 clflushes it when pages are acquired, and in execbuffer only when `cache_dirty` is set, which plain stores through a WB mmap do not do. **kcl as written may hand the GPU stale data**: batch, ISA and constants (`lib/kcl.c:423-433`) and data buffers | [SW] `i915_gem_shmem.c:589-605`, `i915_gem_object.c:169`, `i915_gem_pages.c:37-42`, `i915_gem_execbuffer.c:2119` |
+| Fix A | `I915_GEM_SET_CACHING(I915_CACHING_CACHED)`: allowed when the GPU can snoop (`!HAS_LLC && !HAS_SNOOP` -> ENODEV); gives PAT index 4 with `CHV_PPAT_SNOOP` (uncached is index 3, no snoop). That this makes CPU and GPU coherent in both directions is i915's model, not measured; the hardware never snoops PPGTT page tables and "some other special cycles" [HYP until tested] | [SW] `i915_gem_domain.c:356-364`, `intel_gtt.c:640-662` |
+| Fix B | `I915_MMAP_OFFSET_WC` for objects the CPU only writes (batch, ISA, dynamic state) | [SW] i915 mmap types |
+| Fix C | `SET_DOMAIN(CPU, write)` before CPU writes sets `cache_dirty`, so the next execbuffer clflushes | [SW] `i915_gem_domain.c:523`, `i915_gem_execbuffer.c:2119` |
+| userptr | already `I915_CACHE_LLC` (= snooped on non-LLC); read-only userptr supported on gen8 | [SW] `i915_gem_userptr.c:530`, `gen8_ppgtt.c:1025` |
+| Softpin >= 4 GB | fails with **EINVAL** (`range_overflows`); only ENOSPC is retried, nothing is moved silently. kcl starts at `1<<32` and never reuses addresses (`kbo_addr`), so it must allocate below 4 GB and reuse freed ranges | [SW] `i915_vma.c:854-858`, `i915_gem_execbuffer.c:816`; `lib/kcl.c:47, 68` |
+| Preemption | none on gen8 (`can_preempt`: `GRAPHICS_VER > 8`); a long kernel owns the engine until it ends | [SW] `intel_execlists_submission.c:3313-3316` |
+| Hang handling | heartbeat every 2.5 s raises the pulse priority (MIN, NORMAL, HEARTBEAT, BARRIER) and then resets the engine: about 10-12.5 s after the batch starts [derived from the code]. The 20 s request timeout is armed when the request is submitted, so batches queued behind a long one count too. 3 hangs within 120 s ban the context (execbuf then EIO) | [SW] `Kconfig.profile`, `intel_engine_heartbeat.c:183-196`, `i915_request.c:786`, `intel_reset.c:94-101`, `i915_gem_context_types.h:389`, `i915_gem_execbuffer.c:2560` |
+| MOCS | gen8 has no MOCS table (tables only for gen9+); the field is decoded directly: Cherryview [6:5] memory type (3 = WB), [4:3] target cache (3 = L3). kcl's `2<<1` = 0x04 means **uncached, no L3**; Mesa uses **0x78** on gen8 including Cherryview | [SW] `intel_mocs.c:503-508`, `isl/isl.c:205-224`; [SPEC] `gen80.xml:225-236`, vol02d p.236 |
+| LRI from a user batch | no command parser and no whitelist on gen8 render; the hardware allows 0x7034 (L3 config) and 0xE404 (TD_CTL2) from non-privileged batches; a disallowed LRI becomes a NOOP | [SW] `i915_cmd_parser.c:961-963`, `intel_workarounds.c:2157`; [SPEC] vol06 (text lines 1270-1290, 1332-1389) |
+
+## 5. Command stream differences (kcl emits, Gen9 -> Cherryview)
+
+| Command / field | Change | Source |
+|---|---|---|
+| all packs | generate `gen8_pack.h` from `gen80.xml` (`GFX8_*`) | [SPEC] genxml |
+| PIPELINE_SELECT | no Mask Bits (15:2 reserved); MEDIA_VFE_STATE must follow it immediately (WaSendDummyVFEafterPipelineSelect) | [SPEC] vol02a p.1104, vol16 |
+| STATE_BASE_ADDRESS | 16 DW instead of 19; no bindless fields | [SPEC] `gen80.xml:2741`, vol02a p.1127 |
+| PIPE_CONTROL | with Command Streamer Stall, one of RT cache flush, depth cache flush, stall at pixel scoreboard, depth stall, post-sync operation or DC flush must also be set (not in the KBL text). `lib/kcl.c:296-297` sets CS stall with invalidations only | [SPEC] vol02a p.1098 |
+| MEDIA_VFE_STATE | max threads 12 x 7 - 1 = **83** (kcl: `24 * 7 - 1`); scratch and URB fields unchanged, URB 0x782 fits (NEO uses it on gen8); Gen8-only Bypass Gateway Control (DW3 bit 6) left 0 like NEO | [SPEC] vol02a, vol04 p.5, `gen80.xml`; [SW] NEO `hw_cmds_generated_gen8.inl:711` |
+| INTERFACE_DESCRIPTOR_DATA | SLM size in 4 KB steps: 4K=1, 8K=2, 16K=4, 32K=8, 64K=16 (Gen9.5: 1K=1 ... 64K=7); a barrier must be allocated whenever SLM > 0; at most **42 threads per group** (kcl allows 64) | [SPEC] vol02d p.223; [SW] NEO `gfx_core_helper_gen8.cpp:20-38` |
+| L3CNTLREG 0x7034 | same layout; kcl's values 0x60000321 / 0x80000340 match rows of the Cherryview allocation tables (NEO uses them on Broadwell). Bit 9 (set in both) makes parity errors hang the GPU, and "s/w has to initialize URB or SLM to all 0's" once error detection is enabled | [SPEC] vol02c p.675-676, vol07 p.744; [SW] NEO `gen8/reg_configs.h` |
+| 0xE404 (TD_CTL2) | bit fields not documented for Cherryview; NEO does not program thread arbitration on gen8 -> do not emit it on gen8 | [SPEC] vol06; [SW] NEO `gen8/hw_cmds_base.h:45` |
+| timestamps | 12.5 MHz: `lib/kcl.c:350, 591` hardcode 12 MHz; take I915_PARAM_CS_TIMESTAMP_FREQUENCY | section 1 |
+| unchanged | GPGPU_WALKER, MEDIA_STATE_FLUSH, MEDIA_INTERFACE_DESCRIPTOR_LOAD, MI_LOAD_REGISTER_IMM, MI_BATCH_BUFFER_END, RENDER_SURFACE_STATE (differs only in Gen9 fields kcl does not use) | [SPEC] genxml diff |
+
+## 6. kcl changes (none made yet)
+
+1. Coherency on non-LLC parts: Fix A (SET_CACHING) for data objects, Fix A or B for batch, ISA and state (section 4).
+2. Address allocator below the GTT size (from CONTEXT_PARAM_GTT_SIZE) with reuse of freed ranges; useful on Gen9 too.
+3. A small per-generation table chosen from the chipset: pack prefix, PIPELINE_SELECT, STATE_BASE_ADDRESS, PIPE_CONTROL
+   flush bit, MOCS (0x78 on gen8), SLM encoding and barrier rule, VFE thread count (from EU_TOTAL), group limit (42),
+   no 0xE404 on gen8; private memory sized from EU_TOTAL (`lib/kcl.c:451` assumes 24 EU, harmless oversize).
+4. Timestamp frequency from getparam (on Gen9 it returns the current 12 MHz, so nothing changes there).
+5. Kernel build for bdw (patch-token reader, `-noFP64bRegion`), and the kernel questions of section 3; scratch-using
+   kernels stay unsupported like on Gen9.
+
+## 7. Open questions
+
+- Does Cherryview accept the width-1 `<2;1,0>` 64-bit regions, and how does it behave on DW x DW `mul` with non-scalar
+  regions? (decides how much of section 3 must be rewritten)
+- Are `math.invm`/`madm` usable at all on Cherryview (R3 forbids ARF with 64-bit types)?
+- Is the snooped mapping coherent for command-streamer fetches of batch and state, or must those use Fix B/C?
+- Does the snoop in the page table win over MOCS "uncached"? Bandwidth cost of snooping vs uncached + clflush?
+- L3 bit 9: must kcl zero SLM/URB after an L3 reconfiguration, or use the values without bit 9 (0x60000121 / 0x80000140)?
+- Do Cherryview GPU resets ever freeze the whole system (not searched)?

@@ -1,5 +1,5 @@
 #!/bin/sh
-# Fetches the reference documentation into third_party/ (not in git; state as of 2026-11-11). Files already present are kept.
+# Fetches the reference documentation into third_party/ (not in git; state as of 2026-11-12). Files already present are kept.
 # Intel's index page blocks automated clients (403), but files from cdrdv2.intel.com download directly.
 set -e
 cd -P "$(dirname "$0")/.." && mkdir -p third_party && cd third_party
@@ -37,8 +37,27 @@ aa1d9bc58ad40bf5ef914de8edcfbda825bfdd279944b719f4c406fda897a481  pdf/intel-gfx-
 432bda751f1ef8925ee65eec3f2dedc7359c88441a03cbdef601e5f62686cc9b  pdf/intel-gfx-prm-osrc-kbl-vol06-command_stream_programming.pdf
 22aa547d0b634af217917d71642791f522ace6a9567aed74451c040fb99a7bee  pdf/intel-gfx-prm-osrc-kbl-vol07-3d_media_gpgpu.pdf
 5a944ad0bf9b078816480017bae4c31bfb927678c525e0f35b25154464a59f14  pdf/the-compute-architecture-of-intel-processor-graphics-gen9-v1d0.pdf
+b7856dc37eaec700f536dd46d420566df988609af0ec8637e63c70f46eb79388  pdf/intel-gfx-prm-osrc-chv-bsw-vol01-preface.pdf
+8160b3ccec3e8ff4c8880e68c75860d424e21f1285c4a36b345bcd11b7bed23d  pdf/intel-gfx-prm-osrc-chv-bsw-vol02a-commandreference-instructions.pdf
+bb1aa4c3ae761da97bd062aed12da0f70d54486ebc62c8b2295c5600ee4070cf  pdf/intel-gfx-prm-osrc-chv-bsw-vol02b-commandreference-enumerations.pdf
+bd244693e90ec38f13a343c7d294dac639b5d4732ffa721b7d493311daa46825  pdf/intel-gfx-prm-osrc-chv-bsw-vol02c-commandreference-registers.pdf
+36c834f1de8031a8d1e816ff955b8a21947af452bb531fed6a4320eff8170a64  pdf/intel-gfx-prm-osrc-chv-bsw-vol02d-commandreference-structures.pdf
+9a366599bca17d80c89d5636c572c7f8af12f8844de8787b9acf63eee8147e6d  pdf/intel-gfx-prm-osrc-chv-bsw-vol03-gpu-overview.pdf
+70f66858160430030f76141ea5370a0f8517786821db4ee51ec773aa674583cb  pdf/intel-gfx-prm-osrc-chv-bsw-vol04-configurations.pdf
+ee33cf83538efdf4bb1edb89c5d00d16d7780b0fea3e7a04cdec5340690bd713  pdf/intel-gfx-prm-osrc-chv-bsw-vol05-memory-views.pdf
+69db0f8445fff568751dcc51b1623449ecfb8558e2a2f5fb0a6e1c3811b72f06  pdf/intel-gfx-prm-osrc-chv-bsw-vol06-command-stream-programming.pdf
+665b536f44bb73c64248bdca313faf8a9423b1f3b8359cb3e56c4345be6becc4  pdf/intel-gfx-prm-osrc-chv-bsw-vol07-3d-media-gpgpu.pdf
+6ef668518f386f85596cc6cbc817e827c376ebee2ea7af197e6aec85e8d894b8  pdf/intel-gfx-prm-osrc-chv-bsw-vol16-workarounds.pdf
 S
 }
+# Gen8 (Cherryview/Braswell, docs/gen8.md): the PRM from the x.org mirror (Intel's cdrdv2 IDs for CHV are not known);
+# no browser User-Agent here -- x.org answers it with 418
+for name in vol01-preface vol02a-commandreference-instructions vol02b-commandreference-enumerations \
+            vol02c-commandreference-registers vol02d-commandreference-structures vol03-gpu-overview vol04-configurations \
+            vol05-memory-views vol06-command-stream-programming vol07-3d-media-gpgpu vol16-workarounds; do
+  f=pdf/intel-gfx-prm-osrc-chv-bsw-$name.pdf
+  [ -f "$f" ] || curl -sfL -o "$f" "https://www.x.org/docs/intel/CHV/intel-gfx-prm-osrc-chv-bsw-$name.pdf"
+done
 sha256sum_check
 for p in pdf/*.pdf; do b=$(basename "$p" .pdf); [ -f "txt/$b.txt" ] || pdftotext -layout "$p" "txt/$b.txt"; done
 for e in cl_intel_subgroups cl_intel_subgroups_short cl_intel_subgroups_char cl_intel_required_subgroup_size cl_intel_spirv_subgroups; do
@@ -98,6 +117,19 @@ if [ ! -d "$N" ]; then
   done
   cp "$t/LICENSE.md" "$N/"; (cd "$t" && git log -1 --format='NEO 24.35.30872.36 %H %cd') > "$N/VERSION.txt"; rm -rf "$t"
 fi
+# NEO Gen8 (Broadwell) files: how NEO programmed the Gen8 compute pipeline (docs/gen8.md); NEO never supported Cherryview
+if [ ! -f "$N/shared/source/gen8/preamble_gen8.cpp" ]; then
+  t=$(mktemp -d)
+  git clone -q --filter=blob:none --sparse --depth 1 --branch 24.35.30872.36 https://github.com/intel/compute-runtime.git "$t"
+  (cd "$t" && git sparse-checkout set shared/source/gen8 shared/source/generated/gen8 opencl/source/gen8)
+  for d in shared/source/gen8 shared/source/generated/gen8 opencl/source/gen8; do mkdir -p "$N/$d"; cp -r "$t/$d/." "$N/$d/"; done
+  rm -rf "$t"
+fi
+# Mesa ISL (MOCS per generation), the Gen8 compiler "elk" (Cherryview EU rules) and device info (docs/gen8.md)
+for f in isl/isl.c compiler/elk/elk_eu_validate.c compiler/elk/elk_fs.cpp dev/intel_device_info.c dev/intel_device_info.h; do
+  d="$M/$(dirname "$f" | sed 's|^compiler/||')"; mkdir -p "$d"
+  [ -f "$d/$(basename "$f")" ] || curl -sfL -o "$d/$(basename "$f")" "https://gitlab.freedesktop.org/mesa/mesa/-/raw/mesa-25.2.8/src/intel/$f"
+done
 # intel-gpu-tools: gpgpu_fill (the smallest example of a Gen9 compute kernel through i915, without NEO)
 I=igt-2.6
 if [ ! -d "$I" ]; then
@@ -111,7 +143,12 @@ fi
 # i915 from the Linux kernel matching the running one (7.0): userptr, page pinning, execbuffer (docs/no-neo.md 6g)
 L=linux-i915
 mkdir -p "$L"
-for f in gem/i915_gem_userptr.c gem/i915_gem_pages.c gem/i915_gem_object.c gem/i915_gem_execbuffer.c; do
-  [ -f "$L/$(basename $f)" ] || curl -sfL -o "$L/$(basename $f)" "https://raw.githubusercontent.com/torvalds/linux/v7.0/drivers/gpu/drm/i915/$f"
+# Gen8 (docs/gen8.md): MOCS, heartbeat/preemption, CPU cache domains without LLC, 32-bit PPGTT, CHV device info, workarounds
+for f in gem/i915_gem_userptr.c gem/i915_gem_pages.c gem/i915_gem_object.c gem/i915_gem_execbuffer.c \
+         gem/i915_gem_domain.c gem/i915_gem_mman.c gt/intel_mocs.c gt/intel_engine_heartbeat.c gt/intel_execlists_submission.c \
+         gt/gen8_ppgtt.c gt/gen8_engine_cs.c gt/intel_workarounds.c i915_pci.c \
+         gem/i915_gem_shmem.c gem/i915_gem_context.c gem/i915_gem_context_types.h i915_vma.c i915_cmd_parser.c i915_request.c \
+         gt/intel_gtt.c gt/intel_gtt.h gt/intel_reset.c gt/intel_gt_clock_utils.c Kconfig.profile; do
+  [ -f "$L/$(basename $f)" ] || curl -sfL --max-time 120 -o "$L/$(basename $f)" "https://raw.githubusercontent.com/torvalds/linux/v7.0/drivers/gpu/drm/i915/$f"
 done
 echo done
