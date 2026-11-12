@@ -815,6 +815,9 @@ static cl_int enqueue_(cl_command_queue q, cl_kernel k, cl_uint dim, const size_
         if (kprofile_kernels && nmeas >= TS_MAX / 2 - 8 && kcl_wait()) return CL_OUT_OF_RESOURCES;
     }
     o_ind += dlen; nlaunch++;
+    // Gen8 has no preemption: a batch runs to its end, and i915's heartbeat resets the engine after ~10 s
+    // (docs/gen8.md section 4). One request per kernel keeps each request to one (band-split) launch.
+    if (dev.gen8 && submit()) return CL_OUT_OF_RESOURCES;
     static int each = -1; if (each < 0) each = getenv("KCL_WAIT_EACH") != NULL;   // diagnostics
     if (each && kcl_wait()) return CL_OUT_OF_RESOURCES;
     return CL_SUCCESS;
