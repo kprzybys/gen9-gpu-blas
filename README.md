@@ -210,4 +210,7 @@ See `CITATION.cff` (GitHub offers "Cite this repository" from it). Archived on Z
 
 ## AI assistance
 
-Developed with AI assistance (Claude, Anthropic).
+Developed with AI assistance (Claude Code, Anthropic). I decided the direction of the work: what knowledge to use and
+where to take it from, when to use web research and when to rely on what we already knew, when to test and when to
+stop; sometimes we brainstormed together. The AI carried out the tasks: gathering and aggregating knowledge, writing
+code, running tests, writing plans, and recording progress and the state of the work.
