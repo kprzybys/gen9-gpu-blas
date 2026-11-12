@@ -33,8 +33,15 @@ All cited sources: `sh scripts/fetch_docs.sh`.
 - `ocloc` 24.35 (the version used for all Gen9 builds) knows Gen8 only as Broadwell: `-device bdw` works, `chv`, `bsw` and
   `0x22b1` fail with "Cannot get HW Info" [EXP]. Its device list for Gen8 contains only `bdw` [EXP]; whether any NEO
   release ever supported Cherryview was not checked.
-- The bdw output is a patch-token binary (`PTM.txt`, `*_KernelHeap.asm`), not zebin: `lib/gen_kernels.py`, which reads
-  `.ze_info`, cannot use it as it is [EXP].
+- The bdw output is a patch-token binary (`PTM.txt`, `*_KernelHeap.asm`), not zebin, and `-internal_options
+  -cl-intel-enable-zebin` does not change that [EXP]. `lib/gen_kernels.py` therefore has a patch-token reader (token
+  layouts: IGC `patch_list.h`/`patch_shared.h`, mapping as in NEO `kernel_descriptor_from_patchtokens.cpp`);
+  `make -C lib kernels_gen8.c` builds the Gen8 table `kcl_programs_gen8` (the six `.cl` programs, `-noFP64bRegion`).
+- Check of the reader (`make -C lib check-patchtokens`): Gen9.5 compiled in both formats; of the kernels with identical
+  ISA, 235 have identical descriptors and 8 differ only in accepted ways (both readers' rules in
+  `lib/check_patchtokens.py`), 0 errors; 16 kernels get different code from the two compile paths and are not compared
+  [EXP]. Side finding: 6 Gen9 GEMV kernels (`gemv_n_*`, `gemv_nw_*`) declare 1 KB scratch in `.ze_info`
+  (`per_thread_memory_buffers`, not read by the zebin reader) but contain no scratch messages, so Gen9 is unaffected.
 - **Scratch**: 8 kernels spill to scratch when built for bdw (`hgemm_16x32`, `hgemm_16x32g/kc/mx/p/q`, `hgemm_v`,
   `gemv_n_f`; whl: only `hgemm_16x32kc`, `hgemm_16x32mx`). kcl has no scratch support and `lib/gen_kernels.py` marks
   such kernels unsupported [SCAN].
@@ -88,8 +95,13 @@ changes the argument ABI), `mul24` in the source (still DW x DW), `IGC_ForceNoFP
 `IGC_VISAOptions="-platform CHV"`. Ways forward:
 
 1. **`-noFP64bRegion`** for all kernels (done above); open: does Cherryview accept the width-1 `<2;1,0>` form?
-2. **Index code without 64-bit multiplies and DW x DW `mul`** in the remaining kernels (e.g. 32-bit offsets, factors
-   known to fit 16 bits, which gives DW x UW with a GRF destination as in Mesa) [HYP].
+2. **Index code without 64-bit multiplies and DW x DW `mul`** in the remaining kernels. Origin of the 1359 DW x DW hits
+   with `-noFP64bRegion` [SCAN]: 922 are `mul`/`mach` sequences emulating 64-bit multiplies (`size_t` index arithmetic,
+   e.g. `get_global_id()` times a leading dimension), 411 other 32-bit index multiplies (mostly GEMV, SYMV, skinny GEMM),
+   26 in the compiler's prolog of 23 kernels (linearising the 3-D local id for `get_sub_group_id()`). A test kernel
+   `a[i * ld]` gives [EXP]: `size_t i` 15 mul/mach, 6 hits; `int i` 2 hits; a `ushort` factor 0 hits (DW x UW with a GRF
+   destination, the Mesa recipe; stepping-A restriction above to be excluded); pointer increments instead of the
+   multiply 0 hits. So source changes can remove them, at the cost of touching most Gen9 kernels.
 3. **Rewrite remaining instructions in the assembly** and reassemble with `ocloc asm -device bdw` (the project already
    assembles kernels, see `asm/`); needs free registers [HYP].
 4. FP64 division (`math.invm`/`madm`, R3) and the two indirect 64-bit moves need a separate decision (drop the FP64

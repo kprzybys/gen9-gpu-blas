@@ -130,6 +130,19 @@ for f in isl/isl.c compiler/elk/elk_eu_validate.c compiler/elk/elk_fs.cpp dev/in
   d="$M/$(dirname "$f" | sed 's|^compiler/||')"; mkdir -p "$d"
   [ -f "$d/$(basename "$f")" ] || curl -sfL -o "$d/$(basename "$f")" "https://gitlab.freedesktop.org/mesa/mesa/-/raw/mesa-25.2.8/src/intel/$f"
 done
+# Patch-token binary format (what ocloc emits for -device bdw): token definitions from IGC, decoder from NEO (docs/gen8.md)
+P=patchtokens
+mkdir -p "$P"
+for f in patch_list.h patch_shared.h patch_g7.h patch_g8.h patch_g9.h; do
+  [ -f "$P/$f" ] || curl -sfL --max-time 120 -o "$P/$f" "https://raw.githubusercontent.com/intel/intel-graphics-compiler/igc-1.0.17537.24/IGC/AdaptorOCL/ocl_igc_shared/executable_format/$f"
+done
+for f in device_binary_format/patchtokens_decoder.cpp device_binary_format/patchtokens_decoder.h kernel/kernel_descriptor_from_patchtokens.cpp; do
+  [ -f "$P/$(basename $f)" ] || curl -sfL --max-time 120 -o "$P/$(basename $f)" "https://raw.githubusercontent.com/intel/compute-runtime/24.35.30872.36/shared/source/$f"
+done
+# Beignet 1.3.2: Intel's old OpenCL stack, the only one that supported Cherryview (L3 values, Gen8 GPGPU state)
+B=beignet-1.3.2
+mkdir -p "$B"
+[ -f "$B/intel_gpgpu.c" ] || curl -sfL --max-time 120 -o "$B/intel_gpgpu.c" "https://raw.githubusercontent.com/intel/beignet/Release_v1.3.2/src/intel/intel_gpgpu.c"
 # intel-gpu-tools: gpgpu_fill (the smallest example of a Gen9 compute kernel through i915, without NEO)
 I=igt-2.6
 if [ ! -d "$I" ]; then

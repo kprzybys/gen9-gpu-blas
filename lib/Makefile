@@ -9,6 +9,14 @@ all: libgen9blas.so libgen9blas_blas.so libgen9blas_neo.so libgen9blas_blas_neo.
 kernels.c: gen_kernels.py $(CL_SOURCES)
 	python3 gen_kernels.py ../bench .kernels > $@
 
+# Gen8 (Cherryview, compiled as Broadwell; docs/gen8.md): the .cl programs only, patch-token format
+kernels_gen8.c: gen_kernels.py $(filter %.cl,$(CL_SOURCES))
+	python3 gen_kernels.py ../bench .kernels_gen8 bdw > $@
+
+# Check of the patch-token reader against zebin on Gen9.5 (needs ocloc, no GPU)
+check-patchtokens:
+	python3 check_patchtokens.py .check_patchtokens
+
 libgen9blas.so: gen9blas.c gen9blas.h kcl.c kcl.h kcl_desc.h kernels.c $(GEN)/gen9_pack.h
 	gcc $(CFL) -I$(GEN) -o $@ gen9blas.c kcl.c kernels.c -lm
 
@@ -32,7 +40,7 @@ check: libgen9blas.so libgen9blas_blas.so
 	python3 test_long_launch.py
 
 clean:
-	rm -f libgen9blas.so libgen9blas_neo.so libgen9blas_blas.so libgen9blas_blas_neo.so kernels.c
+	rm -f libgen9blas.so libgen9blas_neo.so libgen9blas_blas.so libgen9blas_blas_neo.so kernels.c kernels_gen8.c
 
 # Full BLAS/CBLAS: S/D functions on the GPU, the rest through jumps to OpenBLAS (gen9blas_blas_forward.c generated from the symbol list).
 libgen9blas_blas.so: gen9blas.c gen9blas.h kcl.c kcl.h kcl_desc.h kernels.c gen9blas_blas.c gen9blas_blas_d.inc gen9blas_blas_forward.c
