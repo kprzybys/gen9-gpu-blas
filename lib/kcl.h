@@ -1,6 +1,6 @@
-// kcl: podzbiór OpenCL używany przez gen9blas.c, zaimplementowany bezpośrednio na i915 (bez NEO). Opis: ../BEZNEO.md.
-// Typy i stałe z nagłówków Khronosa; funkcje przemianowane na kcl_* (biblioteka nie eksportuje symboli cl*, więc
-// nie koliduje z prawdziwym OpenCL w tym samym procesie).
+// kcl: the OpenCL subset used by gen9blas.c, implemented directly on i915 (without NEO). Description: ../docs/no-neo.md.
+// Types and constants come from the Khronos headers; functions are renamed to kcl_* (the library does not export cl* symbols, so
+// it does not clash with a real OpenCL in the same process).
 #pragma once
 #define CL_TARGET_OPENCL_VERSION 300
 #include <CL/cl.h>
@@ -47,14 +47,14 @@ cl_int kcl_GetEventProfilingInfo(cl_event, cl_profiling_info, size_t, void *, si
 cl_int kcl_ReleaseEvent(cl_event);
 void *kcl_GetExtensionFunctionAddressForPlatform(cl_platform_id, const char *);
 
-// Zamiast clCreateProgramWithSource/Binary + clBuildProgram: program wbudowany (kernels.c), wybierany po nazwie
-// pliku i opcjach kompilacji (opcje = NULL: binarka z asemblera). Zwraca CL_SUCCESS albo CL_INVALID_PROGRAM.
-cl_int kcl_program(const char *plik, const char *opcje, cl_program *wynik);
-// Zwykła pamięć procesu [ptr, ptr+n) dla jąder bez kopii (userptr i915, obiekty trzymane między wywołaniami; zapis:
-// GPU pisze do obszaru). Zwraca cl_mem dla clSetKernelArg (ważny do ustawienia argumentu w bieżącej operacji) albo
-// NULL (wtedy kopia przez CPU). KCL_USERPTR_MB: limit przypiętej pamięci (domyślnie 1024).
-cl_mem kcl_userptr(const void *ptr, size_t n, int zapis);
-// Początek operacji (funkcji BLAS): obszary jednej operacji ze wspólnymi stronami idą przez jeden obiekt userptr.
+// Instead of clCreateProgramWithSource/Binary + clBuildProgram: a built-in program (kernels.c), selected by file
+// name and build options (options = NULL: binary from the assembler). Returns CL_SUCCESS or CL_INVALID_PROGRAM.
+cl_int kcl_program(const char *file, const char *options, cl_program *out);
+// Ordinary process memory [ptr, ptr+n) for zero-copy kernels (i915 userptr, objects kept between calls; wr: the
+// GPU writes to the region). Returns a cl_mem for clSetKernelArg (valid until the argument is set in the current operation) or
+// NULL (then copy through the CPU). KCL_USERPTR_MB: limit of pinned memory (default 1024).
+cl_mem kcl_userptr(const void *ptr, size_t n, int wr);
+// Start of an operation (BLAS function): regions of one operation that share pages go through one userptr object.
 void kcl_new_operation(void);
-// Wysłanie bieżącego bufora komend i czekanie na koniec całej pracy (śpi w jądrze Linuksa, GEM_WAIT).
+// Submit the current batch buffer and wait for all work to finish (sleeps in the Linux kernel, GEM_WAIT).
 cl_int kcl_wait(void);
