@@ -33,3 +33,4 @@ experiments/no-neo/*
 experiments/isa/out/
 asm/out/
 asm/*.d/
+lib/test_gen8_probe
