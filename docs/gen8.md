@@ -1,6 +1,6 @@
 # Gen8 (Cherryview/Braswell) port: facts before code
 
-Status (2026-11-12): **implemented on the `gen8` branch (section 6), nothing has run on Gen8 hardware yet.** This file collects what has to change in
+Status (2026-11-13): **implemented on the `gen8` branch (section 6); FP32 and FP64 GEMM, TRSM and level-1 kernels run correctly on the Cherryview (sections 6a, 6b).** This file collects what has to change in
 kcl and in the kernels for a Gen8 Cherryview GPU, following the method of [performance-model.md](performance-model.md):
 facts with sources first, then one change at a time and a test. Work happens on the `gen8` branch; `main` stays Gen9-only
 until the Gen9 tests pass unchanged on both Gen9 machines.
@@ -204,6 +204,19 @@ Analysis (offline, 2026-11-12):
   reciprocal refined by three Newton steps plus a quotient correction, DF mul/fma only; divisor in the FP32 range). Scan
   of the Gen8 build [SCAN]: no QWord messages and no R2/R3/R4 hits in any FP32 or FP64 kernel; only the FP16
   `trsm_inv*_h` kernels keep them (FP16 is not used on Gen8).
+
+## 6b. FP64 after the fix (2026-11-13, `lib/test_gen8_smoke.py`) [MEAS]
+
+| Step | Kernels | Result |
+|---|---|---|
+| dcopy n = 64, 65 | `copy16_d` (hung before the fix) | correct |
+| daxpy n = 64, 4096, 2^20 | `axpy_d` | error 0 |
+| DGEMM n = 16, 64, 256 | `pkd_a`, `pkd_b`, `dgemm_v` | max relative error 1e-16 .. 4e-16 |
+| DTRSM n = 64 | `trsm_inv0..3_d` (emulated division), `trsm_L/Y/store_d`, DGEMM, `gen9blas_epilog_trid` | relative residual 1.1e-16 |
+
+No reset, machine and services unaffected. With this, FP32 and FP64 run on the Cherryview through the whole
+GEMM/TRSM path and the level-1 kernels tried so far. Not yet run: the full test suites (`make check` assumes FP16), the
+remaining level-2 kernels, performance measurements.
 
 ## 7. Open questions
 
