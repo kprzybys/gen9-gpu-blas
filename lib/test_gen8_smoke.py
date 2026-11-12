@@ -4,6 +4,8 @@
   axpy   FP32 axpy (axpy_f: adds vector DW x DW multiplies in index code)
   sgemm  SGEMM n = 16, 64, 100, 256 and batched (2 matrices): packing pkf_a/pkf_b, sgemm_v, epilogue
   dcopy  FP64 copy, n from the command line (default 64): copy16_d, A64 qword gather/scatter + DF moves, no multiplies
+  daxpy  FP64 axpy (axpy_d), n = 64, 4096, 2^20
+  dtrsm  FP64 TRSM n = 64 (trsm_inv*_d: emulated FP64 division on Gen8)
   dgemm  small DGEMM (pkd_a hung on the first run, docs/gen8.md 6a -- run only on purpose)
 Run one step: KCL_PROFILE_KERNELS=1 python3 test_gen8_smoke.py <step>   (prints which kernels ran)
 """
@@ -59,6 +61,23 @@ elif step == "dcopy":
     good = np.array_equal(x, y)
     ok &= good
     print(f"dcopy n={n}: {'OK' if good else 'WRONG'}")
+elif step == "daxpy":
+    for n in (64, 4096, 1 << 20):
+        x = rng.standard_normal(n)
+        y = rng.standard_normal(n)
+        ref = 0.5 * x + y
+        g.axpy(0.5, x, y)
+        err = float(np.max(np.abs(y - ref)))
+        ok &= err < 1e-14
+        print(f"daxpy n={n}: max abs err {err:.2e} {'OK' if err < 1e-14 else 'WRONG'}")
+elif step == "dtrsm":
+    n = 64
+    A = np.tril(rng.standard_normal((n, n))) + n * np.eye(n)
+    B = rng.standard_normal((n, n))
+    X = g.trsm(A, B.copy())
+    err = float(np.max(np.abs(A @ X - B)) / np.max(np.abs(B)))
+    ok &= err < 1e-12
+    print(f"dtrsm n={n}: max rel residual {err:.1e} {'OK' if err < 1e-12 else 'WRONG'}")
 elif step == "dgemm":
     for dt, tol in ((np.float64, 1e-12),):
         for n in (16, 64, 256):
