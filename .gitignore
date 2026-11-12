@@ -1,0 +1,34 @@
+# third-party documents and sources (fetched locally by scripts/fetch_docs.sh, not redistributed)
+/third_party/
+# build outputs
+*.so
+*.o
+lib/kernels.c
+lib/.kernels/
+lib/gen9blas_blas_d.inc
+lib/gen9blas_blas_forward.c
+bench/dgemm.cl
+__pycache__/
+*.pyc
+# compiled benchmark and experiment programs
+bench/clbench
+bench/gemm_clblast
+bench/hgemm
+bench/sgemm
+bench/pakowanie
+bench/packing
+bench/l12
+bench/overhead
+bench/narzut
+bench/compare/l3
+bench/compare/viennacl_skinny
+experiments/no-neo/*
+!experiments/no-neo/*.c
+!experiments/no-neo/*.h
+!experiments/no-neo/*.py
+!experiments/no-neo/*.cl
+!experiments/no-neo/Makefile
+!experiments/no-neo/compile_flags.txt
+experiments/isa/out/
+asm/out/
+asm/*.d/

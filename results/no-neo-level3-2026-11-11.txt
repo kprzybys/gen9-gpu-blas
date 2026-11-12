@@ -1,0 +1,91 @@
+# Poziom 3: libgen9blas bez NEO (kcl, i915) wobec libgen9blas_neo (NEO), bench/level3_cpu.py, OPENBLAS_NUM_THREADS=1, 2026-11-11
+### libgen9blas.so n=1024
+== n = 1024, float32
+  gemm    287.0 GFLOPS       7 ms   CPU      1 ms (  7%)
+  symm    269.0 GFLOPS       8 ms   CPU      0 ms (  5%)
+  syrk    189.3 GFLOPS       6 ms   CPU      0 ms (  5%)
+  syr2k   181.3 GFLOPS      12 ms   CPU      0 ms (  3%)
+  trmm    174.7 GFLOPS       6 ms   CPU      0 ms (  5%)
+  trsm     96.4 GFLOPS      11 ms   CPU      0 ms (  3%)
+== n = 1024, float16
+  gemm    534.6 GFLOPS       4 ms   CPU      0 ms (  3%)
+  symm    473.3 GFLOPS       5 ms   CPU      0 ms (  3%)
+  syrk    299.3 GFLOPS       4 ms   CPU      0 ms (  6%)
+  syr2k   287.0 GFLOPS       7 ms   CPU      0 ms (  4%)
+  trmm    248.4 GFLOPS       4 ms   CPU      1 ms ( 13%)
+  trsm    123.7 GFLOPS       9 ms   CPU      0 ms (  4%)
+### libgen9blas_neo.so n=1024
+== n = 1024, float32
+  gemm    292.1 GFLOPS       7 ms   CPU      0 ms (  5%)
+  symm    203.4 GFLOPS      11 ms   CPU      1 ms ( 10%)
+  syrk    187.4 GFLOPS       6 ms   CPU      1 ms ( 14%)
+  syr2k   177.3 GFLOPS      12 ms   CPU      1 ms (  8%)
+  trmm    156.2 GFLOPS       7 ms   CPU      2 ms ( 23%)
+  trsm     86.0 GFLOPS      12 ms   CPU      3 ms ( 28%)
+== n = 1024, float16
+  gemm    508.9 GFLOPS       4 ms   CPU      1 ms ( 12%)
+  symm    408.5 GFLOPS       5 ms   CPU      1 ms ( 17%)
+  syrk    279.2 GFLOPS       4 ms   CPU      1 ms ( 23%)
+  syr2k   274.3 GFLOPS       8 ms   CPU      1 ms ( 18%)
+  trmm    225.8 GFLOPS       5 ms   CPU      2 ms ( 34%)
+  trsm    107.3 GFLOPS      10 ms   CPU      4 ms ( 36%)
+### libgen9blas.so n=2048
+== n = 2048, float32
+  gemm    341.2 GFLOPS      50 ms   CPU      1 ms (  2%)
+  symm    322.5 GFLOPS      53 ms   CPU      0 ms (  0%)
+  syrk    246.0 GFLOPS      35 ms   CPU      0 ms (  0%)
+  syr2k   233.7 GFLOPS      74 ms   CPU      0 ms (  0%)
+  trmm    233.1 GFLOPS      37 ms   CPU      0 ms (  1%)
+  trsm    183.3 GFLOPS      47 ms   CPU      0 ms (  1%)
+== n = 2048, float16
+  gemm    672.0 GFLOPS      26 ms   CPU      0 ms (  0%)
+  symm    601.3 GFLOPS      29 ms   CPU      0 ms (  1%)
+  syrk    437.3 GFLOPS      20 ms   CPU      0 ms (  1%)
+  syr2k   413.2 GFLOPS      42 ms   CPU      0 ms (  0%)
+  trmm    406.1 GFLOPS      21 ms   CPU      0 ms (  2%)
+  trsm    277.1 GFLOPS      31 ms   CPU      0 ms (  1%)
+### libgen9blas_neo.so n=2048
+== n = 2048, float32
+  gemm    339.4 GFLOPS      51 ms   CPU      2 ms (  3%)
+  symm    281.4 GFLOPS      61 ms   CPU      2 ms (  4%)
+  syrk    238.9 GFLOPS      36 ms   CPU      1 ms (  4%)
+  syr2k   230.8 GFLOPS      74 ms   CPU      3 ms (  5%)
+  trmm    222.7 GFLOPS      39 ms   CPU      2 ms (  5%)
+  trsm    174.8 GFLOPS      49 ms   CPU      5 ms ( 10%)
+== n = 2048, float16
+  gemm    662.7 GFLOPS      26 ms   CPU      1 ms (  3%)
+  symm    429.4 GFLOPS      40 ms   CPU      1 ms (  3%)
+  syrk    426.4 GFLOPS      20 ms   CPU      1 ms (  5%)
+  syr2k   404.4 GFLOPS      42 ms   CPU      2 ms (  4%)
+  trmm    375.2 GFLOPS      23 ms   CPU      1 ms (  5%)
+  trsm    256.5 GFLOPS      33 ms   CPU      3 ms (  9%)
+### libgen9blas.so n=4096
+== n = 4096, float32
+  gemm    349.4 GFLOPS     393 ms   CPU      0 ms (  0%)
+  symm    334.1 GFLOPS     411 ms   CPU      0 ms (  0%)
+  syrk    265.8 GFLOPS     259 ms   CPU      0 ms (  0%)
+  syr2k   239.7 GFLOPS     573 ms   CPU      0 ms (  0%)
+  trmm    250.0 GFLOPS     275 ms   CPU      0 ms (  0%)
+  trsm    247.2 GFLOPS     278 ms   CPU      0 ms (  0%)
+== n = 4096, float16
+  gemm    719.7 GFLOPS     191 ms   CPU      0 ms (  0%)
+  symm    588.5 GFLOPS     234 ms   CPU      0 ms (  0%)
+  syrk    515.7 GFLOPS     133 ms   CPU      0 ms (  0%)
+  syr2k   486.4 GFLOPS     283 ms   CPU      0 ms (  0%)
+  trmm    495.3 GFLOPS     139 ms   CPU      0 ms (  0%)
+  trsm    438.1 GFLOPS     157 ms   CPU      0 ms (  0%)
+### libgen9blas_neo.so n=4096
+== n = 4096, float32
+  gemm    349.2 GFLOPS     394 ms   CPU     14 ms (  4%)
+  symm    322.3 GFLOPS     426 ms   CPU     15 ms (  4%)
+  syrk    258.0 GFLOPS     266 ms   CPU     10 ms (  4%)
+  syr2k   235.8 GFLOPS     583 ms   CPU     24 ms (  4%)
+  trmm    247.6 GFLOPS     277 ms   CPU     11 ms (  4%)
+  trsm    242.3 GFLOPS     284 ms   CPU     14 ms (  5%)
+== n = 4096, float16
+  gemm    718.7 GFLOPS     191 ms   CPU      6 ms (  3%)
+  symm    569.1 GFLOPS     242 ms   CPU      8 ms (  3%)
+  syrk    496.8 GFLOPS     138 ms   CPU      5 ms (  3%)
+  syr2k   458.3 GFLOPS     300 ms   CPU     10 ms (  3%)
+  trmm    469.9 GFLOPS     146 ms   CPU      6 ms (  4%)
+  trsm    416.9 GFLOPS     165 ms   CPU      7 ms (  4%)

@@ -1,0 +1,24 @@
+# GEMM oneDNN v3.6 (GPU) wobec gen9blas, 2026-11-11, bench/compare/onednn.sh
+onednn --mode=P --matmul --engine=gpu 1024x1024:1024x1024 min 6.2205 ms 345.227 GFLOPS
+onednn --mode=P --matmul --engine=gpu --dt=f16:f16:f16 1024x1024:1024x1024 min 3.05525 ms 702.883 GFLOPS
+gen9blas      gemm  s n=1024  gpu        7.09 ms    303.0 GFLOPS  CPU    6%  blad sr=1.7e-08 max=1.4e-07  (1. wywolanie 18 ms, 5 wywolan)
+gen9blas      gemm  h n=1024  gpu        4.80 ms    447.6 GFLOPS  CPU    8%  blad sr=1.3e-04 max=9.8e-04  (1. wywolanie 12 ms, 5 wywolan)
+gen9blas      gemm  x n=1024  gpu        4.82 ms    445.5 GFLOPS  CPU    8%  blad sr=2.9e-05 max=1.3e-04  (1. wywolanie 13 ms, 5 wywolan)
+onednn --mode=P --matmul --engine=gpu 2048x2048:2048x2048 min 53.6156 ms 320.427 GFLOPS
+onednn --mode=P --matmul --engine=gpu --dt=f16:f16:f16 2048x2048:2048x2048 min 112.565 ms 152.622 GFLOPS
+gen9blas      gemm  s n=2048  gpu       50.29 ms    341.6 GFLOPS  CPU    7%  blad sr=1.6e-08 max=1.2e-07  (1. wywolanie 78 ms, 5 wywolan)
+gen9blas      gemm  h n=2048  gpu       27.16 ms    632.4 GFLOPS  CPU    6%  blad sr=1.4e-04 max=7.9e-04  (1. wywolanie 45 ms, 5 wywolan)
+gen9blas      gemm  x n=2048  gpu       30.46 ms    564.1 GFLOPS  CPU    4%  blad sr=2.0e-05 max=7.5e-05  (1. wywolanie 50 ms, 5 wywolan)
+onednn --mode=P --matmul --engine=gpu 3000x3000:3000x3000 min 165.971 ms 325.358 GFLOPS
+onednn --mode=P --matmul --engine=gpu --dt=f16:f16:f16 3000x3000:3000x3000 min 267.778 ms 201.659 GFLOPS
+gen9blas      gemm  s n=3000  gpu      162.27 ms    332.8 GFLOPS  CPU    4%  blad sr=1.6e-08 max=6.6e-08  (1. wywolanie 228 ms, 5 wywolan)
+gen9blas      gemm  h n=3000  gpu       83.81 ms    644.3 GFLOPS  CPU    5%  blad sr=1.4e-04 max=7.3e-04  (1. wywolanie 114 ms, 5 wywolan)
+gen9blas      gemm  x n=3000  gpu       93.07 ms    580.2 GFLOPS  CPU    5%  blad sr=1.8e-05 max=6.8e-05  (1. wywolanie 126 ms, 5 wywolan)
+onednn --mode=P --matmul --engine=gpu 4096x4096:4096x4096 min 414.19 ms 331.826 GFLOPS
+onednn --mode=P --matmul --engine=gpu --dt=f16:f16:f16 4096x4096:4096x4096 min 1142.35 ms 120.312 GFLOPS
+gen9blas      gemm  s n=4096  gpu      399.98 ms    343.6 GFLOPS  CPU    5%  blad sr=1.6e-08 max=7.8e-08  (1. wywolanie 504 ms, 5 wywolan)
+gen9blas      gemm  h n=4096  gpu      196.64 ms    698.9 GFLOPS  CPU    5%  blad sr=1.4e-04 max=8.5e-04  (1. wywolanie 244 ms, 5 wywolan)
+gen9blas      gemm  x n=4096  gpu      222.51 ms    617.7 GFLOPS  CPU    5%  blad sr=1.5e-05 max=5.6e-05  (1. wywolanie 273 ms, 5 wywolan)
+== poprawność oneDNN (benchdnn --mode=C)
+tests:1 passed:1 skipped:0 mistrusted:0 unimplemented:0 invalid_arguments:0 failed:0 listed:0
+tests:1 passed:1 skipped:0 mistrusted:0 unimplemented:0 invalid_arguments:0 failed:0 listed:0

@@ -1,0 +1,13 @@
+# 2026-11-11T03:58:25+01:00 opoznienie zaleznego OWord block read (1 watek SIMD8, 128 B), krok 4160 B; ns i takty GPU @1100 MHz
+# clbench liczy 8 work-itemow x n, wiec opoznienie = 8 / (Gop/s) ns
+      16 KB     133 ns     147 taktow
+      64 KB     133 ns     147 taktow
+     256 KB     133 ns     147 taktow
+     512 KB     133 ns     147 taktow
+    1024 KB     200 ns     220 taktow
+    2048 KB     267 ns     293 taktow
+    4096 KB     400 ns     440 taktow
+    8192 KB     400 ns     440 taktow
+   16384 KB     400 ns     440 taktow
+   65536 KB     400 ns     440 taktow
+  262144 KB     400 ns     440 taktow

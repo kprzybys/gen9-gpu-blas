@@ -1,0 +1,41 @@
+GEMV N (row-major y = A·x) -- krok 3, 2026-11-12, zasilanie sieciowe. bench/gemv_n.py [usm|zwykla]: warianty na przemian
+w osobnych procesach (GEN9BLAS_GEMV_N=stary|grupowy), 3 rundy, mediana GB/s (bajty A + x + y / czas wywołania z Pythona).
+
+Hipoteza przed pomiarem: dawny gemv_n (subgrupa = 4 wiersze, ~170 wątków -> ~700 stron 4 KB naraz) traci na TLB; wariant
+grupowy (16 subgrup na te same 4 wiersze, 1 strona na wiersz naraz) -> 17–20 GB/s jak gemv T / axpy.
+
+Wynik: na USM dawny wariant NIE był wolny (22–26 GB/s przy n ≥ 4096); wolny był tylko na zwykłej pamięci (userptr):
+pamięć: zwykla
+     M      N  stary GB/s  grupowy GB/s
+  1024   1024         6.9          12.6
+  2048   2048         8.6          13.1
+  4096   4096        10.5          18.9
+  8192   8192        11.1          21.0
+   256  65536        17.5          16.5
+ 65536    256        18.4           8.9
+ 16384    512        16.0          13.0
+  8192   1024        11.7          15.4
+  4096   2048        10.4          16.1
+ 51866   1280        14.1          18.9
+  1280   5120        10.9          15.5
+pamięć: usm
+     M      N  stary GB/s  grupowy GB/s
+  1024   1024        15.2          16.5
+  2048   2048        15.1          17.2
+  4096   4096        22.5          24.2
+  8192   8192        25.5          26.5
+   256  65536        16.8          18.5
+ 65536    256        24.6           9.2
+ 16384    512        21.6          15.0
+  8192   1024        19.6          22.1
+  4096   2048        19.5          22.4
+ 51866   1280        25.5          24.7
+  1280   5120        18.0          19.2
+
+Wniosek: hipoteza TLB trafna tylko dla userptr (strony procesu 4 KB; obiekty GEM -- USM -- z adresem wyrównanym do 64 KB
+mogą mieć większe strony w PPGTT). WDROŻONE: wariant grupowy przy N >= 1024 (zwykła 1,3–2×, USM -5..+20%), dawny przy
+N <= 512 (grupowy 1,3–2,8× wolniejszy: za mało kolumn na 16 subgrup).
+Inne funkcje poziomu 2, n = 4096, USM / zwykła [GB/s]: gemv N 24,6 / 19,7, gemv T 22,4 / 16,6, ger 16,9 / 16,6,
+symv 34,7 / 27,4, trmv 18,2 / 14,8 (przez gemv N), syr 13,0 / 12,7 -- pozostała strata zwykłej pamięci 0–26%.
+Poprawność: test_l12, test_blas OK; dodatkowo gemv N = 1024, 1500, 4099, 2050 (β ≠ 0, krok x = 2) i trmv n = 1024, 1500
+(U/L, diag) wobec NumPy float64: błąd ≤ 2e-7.

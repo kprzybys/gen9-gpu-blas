@@ -1,0 +1,12 @@
+# 2026-11-11T03:57:26+01:00 przepustowosc odczytow blokowych (Gop/s = GB/s), global 16384, local 64, SIMD8
+      64 KB  owb: 117.25 Gop/s   owb2: 156.38 Gop/s   media: 154.45 Gop/s
+     128 KB  owb: 117.24 Gop/s   owb2: 158.88 Gop/s   media: 154.04 Gop/s
+     256 KB  owb: 117.18 Gop/s   owb2: 158.52 Gop/s   media: 153.25 Gop/s
+     512 KB  owb: 116.74 Gop/s   owb2: 158.38 Gop/s   media: 153.81 Gop/s
+    1024 KB  owb: 116.29 Gop/s   owb2: 155.25 Gop/s   media: 153.83 Gop/s
+    2048 KB  owb: 116.05 Gop/s   owb2: 155.94 Gop/s   media: 152.77 Gop/s
+    4096 KB  owb: 101.20 Gop/s   owb2: 155.70 Gop/s   media: 82.90 Gop/s
+    8192 KB  owb: 62.04 Gop/s    owb2: 64.43 Gop/s    media: 65.53 Gop/s
+   16384 KB  owb: 58.16 Gop/s    owb2: 60.14 Gop/s    media: 29.60 Gop/s
+   65536 KB  owb: 26.37 Gop/s    owb2: 27.29 Gop/s    media: 33.85 Gop/s
+  262144 KB  owb: 18.48 Gop/s    owb2: 19.90 Gop/s    media: 19.53 Gop/s

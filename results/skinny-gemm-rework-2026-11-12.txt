@@ -1,0 +1,131 @@
+Przebudowa chudego GEMM A·Wᵀ (wagi ciągłe wzdłuż K), 2026-11-12, zasilanie sieciowe. Punkt wyjścia: commit 40a71dc
+(chudy_k1/k4/k8, odczyty blokowe FP16). Kryterium (STATUS): FP16 4096² M ≤ 8 ≤ 1,8 ms, M = 16 ≤ 3 ms, bez regresji M = 1.
+
+== DIAGNOZA Z ASEMBLERA (lib/.kernels/p3.d/.text.chudy_k4_h.asm, ścieżka blokowa) ==
+- Pętla: 165 instrukcji na 64 użyteczne FMA (16 dot4): mad 48, mul 32, mov 48, add 25, send 8.
+  * dot(w, a) + s nie jest łączone w akumulator: mul + 3 mad + add na dot4 zamiast 4 mad;
+  * działania mieszane hf->f (mov, mul) Gen9 dzieli na 2 × SIMD8 (ograniczenie trybu mieszanego);
+  * konwersje: 4·(RW+MT) na przebieg.
+- Wątek: K = 4096, 16 subgrup na grupę co 64 k -> tylko 4 przebiegi pętli; prolog ~118 instrukcji, epilog ~316
+  (sub_group_reduce_add na każdy akumulator, zapisy SLM, bariera, sumowanie 16 części).
+  Razem ~1100 instrukcji na wątek, z czego ~256 mad użytecznych -> ~25% szczytu FMA. Pomiar: 110–120 GFLOPS = 27–29%
+  z 410 [POM]. Model (koszt instrukcji, nie pamięć) wyjaśnia pomiar.
+- Ruch A z L3 = (N/RW)·M·K·e: k8 (RW = 2) przy M = 16: 268 MB -> 1,7–2,3 ms przy 116–156 GB/s (odczyt blokowy z L3 [POM]).
+
+== WARIANT (jeden): chudy_r<MT>, SIMD8, RW = 8 wierszy wag, S = 4 subgrupy na grupę ==
+- SIMD8: float na lane = 1 GRF (w SIMD16 = 2) -> 64 akumulatory (RW·MT = 8·8) mieszczą się w 128 GRF; tryb mieszany
+  hf->f natywnie SIMD8 (bez dzielenia). Lane czyta 8 B (FP16: 4 k, FP32: 2 k) -> komunikat 64 B = 1 linia.
+- Akumulacja jawnym fma po składowych (bez dot), konwersja składowa po składowej (mniej żywych rejestrów).
+- S = 4 subgrupy co 8·KL k, krok 32·KL: K = 4096 FP16 -> 32 przebiegi (było 4); wątków 2048 przy N = 4096 (zapas
+  na 168 wątków sprzętowych, ogon ≤ 1/12).
+- Epilog: redukcja transpozycyjna w subgrupie (shuffle_xor, 64 -> 8 wartości na lane, lane = wiersz wag), potem
+  SLM [4][64], bariera, 32 work-itemy sumują po 4 części. ~300 instrukcji na wątek wobec ~32 × 340 w pętli (< 3%).
+- Tylko ścieżka blokowa: sak = 1, K % (32·KL) = 0, wyrównanie 16 B; inaczej dawne jądra. M = 1 zostaje na chudy_k1.
+  MT = 4 dla M = 2–4, MT = 8 dla M = 5–16 (M > 8: kafle po 8, kafel M najszybszy w siatce -> drugi odczyt wag z LLC).
+
+== PRZEWIDYWANIE (FP16, N = K = 4096, USM) ==
+Pętla (SIMD8, MT = 8): 256 mad + 64 konwersje + 16 send + ~10 adresy/pętla -> ~77% instrukcji to FMA;
+MT = 4: 128 / (128 + 48 + ~10) ~ 70%. Opóźnienia i obsadzenie [HIP] 0,7–0,9 -> F ≈ 200–285 GFLOPS (MT = 8),
+180–260 (MT = 4).
+Ruch: wagi 32 MB z RAM (22–25 GB/s -> 1,3–1,5 ms); A z L3: (N/8)·M·K·2 = 4 MB·M... M = 8: 32 MB, M = 16: 64 MB (< 0,5 ms).
+  M = 2–4:  max(1,3–1,5 pamięć; 0,5 obliczenia)            -> 1,4–1,7 ms  (dziś 1,9–2,0)
+  M = 8:    max(1,3–1,5; 268 MFLOP / 200–285 = 0,94–1,34)   -> 1,4–1,8 ms  (dziś 3,1)
+  M = 16:   537 MFLOP / 200–285 = 1,9–2,7 ms (+ drugi odczyt wag z LLC, nakłada się) -> 2,0–2,8 ms (dziś 4,9)
+FP32: wagi 64 MB -> 2,6–2,9 ms dla M ≤ 8 (pamięć), M = 16: 2,6–3,0.
+Ryzyko [HIP]: S = 4 przy RW = 8 to ~42 grupy × 8 wierszy = ~340 strumieni odczytu naraz (dziś ~20) -- jeśli M = 2–4
+nie dojdzie do 20+ GB/s wag, brak w modelu = liczba strumieni (mikrotest: gemv po wierszach z różną liczbą wierszy na grupę).
+Ryzyko: spill (gen_kernels.py odrzuci) -> wtedy RW = 4 dla MT = 8.
+
+== PRZEBIEG ==
+1. Pierwsza wersja (S = 4, FP16 ushort4): asembler pętli blokowej FP16 r8: 293 instrukcje, 256 mad (87%) -- konwersje
+   hf->f weszły w mad trybu mieszanego (lepiej niż przewidywane 77%).
+2. chudy_r8 liczył źle przez kcl (wiersze wag 0–3 = sumy wiersza r + 3), przez NEO dobrze: float s[8][8] (256 B na lane)
+   IGC umieścił w pamięci prywatnej (private_size 2048, per_thread_memory_buffers scratch); s[8][4] (128 B) przechodziło
+   do rejestrów. kcl nie konfiguruje scratch. Naprawa: osobne wektory s0..s7 (float8). Jawne liczby rozwinięcia nie pomagały.
+   gemv_n/gemv_nw też deklarują private_size 256, ale nie sięgają do scratch -- dlatego generator nie odrzuca samego
+   private_size (do zrobienia: sprawdzanie dostępów do scratch w asm).
+3. Spill w FP16 r8: surowe ushort4 = 1 GRF na składową; ścieżka zapasowa bez wyrównania (odczyty po 2 B) w tym samym
+   jądrze przelewała rejestry. Wyrównanie sprawdza teraz host (adres GPU ma to samo przesunięcie w stronie co host:
+   USM, userptr kcl; bufor roboczy wyrównany); surowe dane jako uint2.
+4. Pomiar S = 4: obliczenia szybkie (FP16 M = 16: 167–208 GFLOPS), ale wagi tylko 14–18 GB/s przy M = 2–8 (czas
+   niezależny od M) -> ryzyko z przewidywania się potwierdziło. Test S (subgrupy na grupę = bajty ciągiem z wiersza na
+   krok grupy): FP32 S = 4/8/16 -> 4096² M = 2: 4,06/3,89/3,50 ms, 11008×4096: 10,3/9,4/7,9 ms (22,8 GB/s);
+   FP16 KL = 2 (32 B na komunikat) zysk mniejszy; FP16 KL = 4 (uint2, 64 B) S = 16: M = 2 1,58 ms (21 GB/s).
+   Wybór: S = 16, KL = 8 B na lane (FP16 4, FP32 2), MT = 4 dla M ≤ 4, 8 dla M > 4 (MT = 4 dla M = 8 nie lepsze).
+
+== WYNIK (S = 16; 3 serie na przemian z dawną ścieżką GEN9BLAS_SKINNY_R=0, mediany ms, USM, zasilanie sieciowe) ==
+typ     N     K  M   dawne ms [min-max]       nowe ms [min-max]     przysp.  GFLOPS  GB/s wag
+H  4096  4096  1     1.515 [1.46-1.78]     1.687 [1.57-1.85]    0.90x      20   19.9
+H  4096  4096  2     2.271 [2.26-2.28]     1.553 [1.54-1.61]    1.46x      43   21.6
+H  4096  4096  4     2.296 [1.86-2.30]     1.679 [1.60-1.90]    1.37x      80   20.0
+H  4096  4096  8     2.936 [2.55-2.98]     1.905 [1.79-2.17]    1.54x     141   17.6
+H  4096  4096 16     4.918 [4.87-4.93]     3.191 [2.92-3.20]    1.54x     168   10.5
+H 11008  4096  1     3.706 [3.68-3.74]     3.755 [3.49-3.77]    0.99x      24   24.0
+H 11008  4096  2     4.696 [4.55-4.73]     3.732 [3.52-3.74]    1.26x      48   24.2
+H 11008  4096  4     4.343 [4.28-4.73]     3.707 [3.63-3.91]    1.17x      97   24.3
+H 11008  4096  8     6.499 [6.00-6.55]     4.210 [4.08-4.44]    1.54x     171   21.4
+H 11008  4096 16    11.692 [11.37-12.86]     7.211 [7.10-7.21]    1.62x     200   12.5
+H  4096 11008  1     3.830 [3.63-3.90]     3.743 [3.72-3.76]    1.02x      24   24.1
+H  4096 11008  2     4.147 [4.06-4.22]     4.507 [4.39-4.75]    0.92x      40   20.0
+H  4096 11008  4     4.448 [4.34-4.54]     4.351 [4.28-4.39]    1.02x      83   20.7
+H  4096 11008  8     6.403 [6.39-6.46]     4.798 [4.73-4.93]    1.33x     150   18.8
+H  4096 11008 16    11.541 [11.52-11.97]     6.410 [6.39-6.54]    1.80x     225   14.1
+H  2048  2048  1     0.638 [0.64-0.88]     0.655 [0.63-0.68]    0.97x      13   12.8
+H  2048  2048  2     0.862 [0.82-1.31]     0.603 [0.59-0.72]    1.43x      28   13.9
+H  2048  2048  4     1.325 [0.82-1.33]     0.614 [0.61-0.62]    2.16x      55   13.7
+H  2048  2048  8     1.220 [1.10-1.59]     0.744 [0.71-0.76]    1.64x      90   11.3
+H  2048  2048 16     1.839 [1.77-2.17]     1.260 [1.06-1.41]    1.46x     107    6.7
+S  4096  4096  1     3.230 [2.95-3.24]     3.067 [3.06-3.08]    1.05x      11   21.9
+S  4096  4096  2     3.462 [3.23-3.48]     3.374 [3.33-3.52]    1.03x      20   19.9
+S  4096  4096  4     3.522 [3.42-3.69]     3.481 [3.22-3.52]    1.01x      39   19.3
+S  4096  4096  8     4.696 [4.61-4.96]     3.471 [3.23-3.48]    1.35x      77   19.3
+S  4096  4096 16     6.884 [6.76-7.05]     4.107 [3.81-4.15]    1.68x     131   16.3
+S 11008  4096  1     7.495 [7.44-7.62]     7.415 [7.35-7.49]    1.01x      12   24.3
+S 11008  4096  2     8.027 [7.95-8.24]     8.117 [8.10-8.12]    0.99x      22   22.2
+S 11008  4096  4     8.807 [8.77-8.97]     8.323 [8.13-8.39]    1.06x      43   21.7
+S 11008  4096  8    12.540 [12.42-12.57]     8.117 [8.00-8.54]    1.54x      89   22.2
+S 11008  4096 16    18.133 [17.90-18.16]     9.873 [9.68-9.97]    1.84x     146   18.3
+S  4096 11008  1     7.232 [7.04-7.45]     7.035 [7.00-7.20]    1.03x      13   25.6
+S  4096 11008  2     7.649 [7.51-7.70]    10.413 [9.15-11.21]    0.73x      17   17.3
+S  4096 11008  4     7.875 [7.83-8.02]    11.355 [9.30-11.49]    0.69x      32   15.9
+S  4096 11008  8    11.691 [11.61-12.08]    10.498 [9.07-11.79]    1.11x      69   17.2
+S  4096 11008 16    20.123 [20.07-20.42]    11.129 [10.85-11.77]    1.81x     130   16.2
+S  2048  2048  1     0.955 [0.95-0.96]     0.977 [0.97-0.99]    0.98x       9   17.2
+S  2048  2048  2     1.275 [1.06-1.28]     1.055 [0.89-1.36]    1.21x      16   15.9
+S  2048  2048  4     1.124 [1.10-1.56]     0.960 [0.93-1.02]    1.17x      35   17.5
+S  2048  2048  8     1.526 [1.50-1.95]     0.997 [0.99-1.01]    1.53x      67   16.8
+S  2048  2048 16     2.702 [2.33-2.71]     1.158 [1.14-1.64]    2.33x     116   14.5
+(M = 1 w obu kolumnach to to samo jądro chudy_k1 -- różnice to rozrzut.)
+Po pomiarze: M ≤ 4 przy wierszu wag > 16 KB zostaje na dawnym jądrze (wiersz FP32 K = 11008: 0,7×).
+
+== PRZEWIDYWANIE A POMIAR ==
+- FP16 4096²: M = 2–4 1,55–1,68 ms (przewidywane 1,4–1,7) -- trafione, ale dopiero po S = 16; M = 8 1,9 ms (1,79–2,17;
+  przewidywane 1,4–1,8, kryterium 1,8) -- blisko, nie spełnione; M = 16 3,19 ms (przewidywane 2,0–2,8, kryterium 3) -- nie.
+- Obliczenia: 168–225 GFLOPS przy M = 16 (przewidywane 200–285) -- dolna granica.
+- Braki modelu:
+  (a) przepustowość wag zależy od bajtów czytanych ciągiem z wiersza na krok grupy (S·64 B): 256 B -> 14–18 GB/s,
+      512 B -> ~19–20, 1 KB -> 21–24 [POM]; dawne jądra czytały 2–4 KB;
+  (b) przy długich wierszach (44 KB) i 8 wierszach na grupę przepustowość spada (FP32 K = 11008: 16–17 GB/s) [HIP strony/TLB];
+  (c) M = 8–16: czas bliżej sumy t_pam + t_obl niż maksimum (4096² FP16 M = 8: 1,4 + 0,64 ≈ 1,9-2,0 ms) -- wątek
+      ładuje, czeka, liczy; za mało nakładania [HIP]. Kierunek: wcześniejsze ładowanie (rejestry: przy 64 akumulatorach brak
+      miejsca na podwójny bufor), A w SLM (zwalnia 16 GRF na podwójny bufor wag).
+
+== PORÓWNANIE ETAPÓW (A·Wᵀ, USM, mediany ms; granica pamięci FP16 4096²: 32 MB / 22–25 GB/s = 1,3–1,5 ms) ==
+Etapy: (0) dawna ścieżka z pakowaniem wag; (1) chudy GEMM wersja 3 (results/skinny-gemm-2026-11-12.txt);
+(2) odczyty blokowe FP16 (commit 40a71dc; kolumna „dawne” z pomiaru końcowego); (3) przebudowa chudy_r (ten plik).
+FP16 4096²        (0)     (1)     (2)     (3)    (0)->(3)
+  M = 1          10,38    1,85    1,52    1,52*   6,8×     * to samo jądro co (2)
+  M = 2          10,81    2,35    2,27    1,55    7,0×
+  M = 4          11,12    2,43    2,30    1,68    6,6×
+  M = 8          11,00    3,92    2,94    1,90    5,8×
+  M = 16         10,77    6,83    4,92    3,19    3,4×
+FP16 11008×4096
+  M = 1          28,24    4,31    3,71    3,71*   7,6×
+  M = 8          27,09    9,00    6,50    4,21    6,4×
+  M = 16         28,13   16,27   11,69    7,21    3,9×
+FP32 4096²
+  M = 1          14,15    3,10    3,23    3,07*   4,6×
+  M = 4          13,89    3,73    3,52    3,48    4,0×
+  M = 8          14,05    4,89    4,70    3,47    4,0×
+  M = 16         13,89    6,93    6,88    4,11    3,4×
+Etap (3) wobec (2): M = 2–16 1,2–1,8× (FP16 4096² M = 8: 1,54×, M = 16: 1,54×); M ≤ 4 przy wierszu > 16 KB bez zmian.

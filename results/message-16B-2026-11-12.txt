@@ -1,0 +1,39 @@
+Szerokość dostępu na lane a przepustowość (słabości z testu ViennaCL), 2026-11-12, zasilanie sieciowe, USM, 1 wątek CPU.
+
+== STAN I HIPOTEZA ==
+Pomiar (wektory 10^7, gemv 3840²): COPY FP16 13,4 / FP32 23,4 / FP64 17,2 GB/s; AXPY 20,2 / 22,6 / 22,2; gemv N (wiersze)
+FP64 21,9–23,2 GB/s (ViennaCL 25,3), wariant gemv_n/gemv_nw bez znaczenia (±5%), FP16 ~15.
+ISA (ocloc disasm, copy_d i axpy_d): te same komunikaty -- untyped surface read/write xyzw (16 B na lane), dwa na
+4 elementy FP64 (32 B na lane). Hipoteza: komunikat SIMD16 powinien obejmować ciągłe pełne linie 64 B, czyli 16 B na
+lane: przy 32 B na lane każdy z dwóch komunikatów pokrywa połowę każdej linii (zapis bez wcześniejszego odczytu ->
+doczytanie linii, ~1,5× ruchu: 23,4/1,5 ≈ 16 GB/s, zmierzone 17,2); przy 8 B na lane (FP16) komunikat ma tylko 128 B.
+
+== PRZEWIDYWANIE ==
+1. COPY z 16 B na lane w każdym typie (FP16: 8 el., FP32: 4, FP64: 2): FP64 i FP16 ~23 GB/s (jak FP32).
+2. gemv po wierszach (gemv_nw) z 16 B na lane: FP64 22 -> 24–25 GB/s, FP16 15 -> ~20 GB/s; FP32 bez zmian.
+
+== WYNIK ==
+Test ViennaCL (mediany 3 serii, GB/s): dCOPY: 17.4 -> 23.6; hCOPY: 14.2 -> 21.2; dGEMV-T: 21.6 -> 24.1; hGEMV-T: 15.4 -> 16.5; sCOPY: 23.2 -> 23.5; sGEMV-T: 23.0 -> 23.3.
+1. COPY 16 B na lane: FP64 17,4 -> 24,2 GB/s (przewidywanie ~23: trafione). FP16 jądrem copy16_h (8 el., 16 B): tylko
+   16,1 -- ISA: SIMD8, 8 × „byte gathering read 32b” (kompilator rozbija vload8 half na odczyty bajtowe po 4 B, jak
+   przy pakowaniu, MODEL.md). Kopia nie zależy od typu -> FP16 (n parzyste, adresy wyrównane do 4 B) idzie jądrem FP32
+   (n/2 słów): 22,0 GB/s. Poprawność: n parzyste/nieparzyste, wycinki przesunięte o 2 B, USM i zwykła.
+2. gemv po wierszach 16 B na lane: FP64 21,6 -> 24,3 (przewidywanie 24–25: trafione; ViennaCL 25,3). FP16 z 8 el. na
+   lane: 15,4 -> 11,1 (ten sam problem kompilatora) -> FP16 zostaje przy 4 el. (8 B): 15–16,5 GB/s.
+3. Przegląd: inne jądra poziomów 1–2 najpierw czytają wektor docelowy (axpy, scal, rot, swap), więc niepełne zapisy
+   linii dotyczyły tylko kopii. GEMM: epilog to mały ułamek czasu (FP64 1976³ ograniczone obliczeniami).
+4. Błąd po drodze (złapany testem test_l12): host liczył liczbę work-itemów jako 16/bajty elementu, a jądro FP16 ma 4
+   elementy -- kopia FP16 przy n nieparzystym kopiowała połowę; poprawione (gw = GW z level12.cl).
+Do zrobienia: FP16 gemv/COPY bez obejścia -- odczyty blokowe (intel_sub_group_block_read) albo ręczne komunikaty; FP16
+gemv dziś 15–16,5 GB/s wobec 22–24 w FP32/FP64.
+
+== KROK 1 (później 2026-11-12): FP16 gemv odczytami blokowymi -- PRZEWIDYWANIE ==
+intel_sub_group_block_read_us8: subgrupa czyta ciągłe 256 B jednym komunikatem blokowym (OWord block), więc kompilator
+nie rozbije go na bajtowe odczyty; lane dostaje elementy co 16 (kolejność bez znaczenia dla iloczynu skalarnego).
+Warunek: adres wyrównany do 16 B (sprawdzany raz na grupę; inaczej dawna ścieżka). Dotyczy gemv po wierszach (gemv_nw,
+tryb 0 = pełna macierz). Przewidywanie: FP16 gemv po wierszach 15–16,5 -> 20–23 GB/s (jak FP32).
+== KROK 1 -- WYNIK ==
+gemv po wierszach FP16 (gemv_nw, odczyt blokowy us8): 3840² 21,8, 4096² 20,7, 4096×11008 25,2 GB/s (było 15–16,5;
+przewidywanie 20–23: trafione). gemv T FP16 (nowe gemv_t1b, odczyt blokowy us4, lane = kolumny co 16): USM 19,6–23,2
+GB/s (było 15,4), zwykła 15,4–17,1. Małe/krzywe rozmiary (1000², 4099×17) idą ścieżką zwykłą. Błędy 2–5e-4 jak dawniej;
+test_l12 OK. Wniosek do modelu: dla FP16 odczyty blokowe (intel_sub_group_block_read_us*) omijają bajtowe odczyty kompilatora.

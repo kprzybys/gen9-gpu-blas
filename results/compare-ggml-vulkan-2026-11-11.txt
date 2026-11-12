@@ -1,0 +1,9 @@
+# GEMM ggml (llama.cpp 2cbe0ec, 2026-11-11) backend Vulkan (Mesa ANV) na UHD 620, test-backend-ops perf -o MUL_MAT -b Vulkan0
+# Lokalna łata w ~/src/llama.cpp/tests/test-backend-ops.cpp: GEN9BLAS_KWADRAT=1 -> przypadki n x n (type_a f32/f16, type_b f32, wynik f32).
+# ggml_vulkan: 0 = Intel(R) UHD Graphics 620 (WHL GT2) (Intel open-source Mesa driver) | uma: 1 | fp16: 1 | int dot: 0 | matrix cores: none
+# Czas: wall-clock na wywołanie grafu (us/run), GFLOPS = 2n³ / czas
+n=1024 f32: 15160 us  142 GFLOPS | f16 (A f16, B f32): 16790 us  128 GFLOPS
+n=2048 f32: 130824 us 131 GFLOPS | f16: 154256 us 111 GFLOPS
+n=3000 f32: 485740 us 111 GFLOPS | f16: 585254 us  92 GFLOPS
+n=4096: nie mierzone (wynik jasny, każdy przebieg > 1 s)
+gen9blas (całe wywołanie, USM): FP32 303-344, FP16 H 448-699, HD 446-618 GFLOPS

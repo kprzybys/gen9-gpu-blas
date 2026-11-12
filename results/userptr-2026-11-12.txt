@@ -1,0 +1,43 @@
+userptr (zwykła pamięć procesu bez kopii przez CPU), 2026-11-12, UHD 620, jądro 7.0.0-42, IOMMU włączone dla GPU (grupa 0: DMA-FQ)
+
+1. Mikrotest experiments/no-neo/userptr.c (jądro kopiuj b[i] = a[i] + 1, wejście S i wyjście S; mediana; CPU = CLOCK_PROCESS_CPUTIME_ID)
+   kopia: memcpy do bufora GEM, jądro, memcpy z powrotem (jak dawniej gen9blas dla tablic spoza USM)
+   up co wywołanie: GEM_USERPTR, execbuf (przypięcie stron), GEM_CLOSE w każdym wywołaniu
+   up raz: obiekt utworzony raz, wielokrotne użycie
+
+       S | kopia: czas / CPU [us]     | up co wywolanie            | up raz utworzony           | samo jadro   | spr.
+0.0625 MB |         50 / 21            |         90 / 56            |         45 / 9             |         45   | OK
+     1 MB |        368 / 154           |        519 / 225           |        227 / 16            |        220   | OK
+     4 MB |       1489 / 659           |       2106 / 1283          |        733 / 61            |        744   | OK
+    16 MB |       5228 / 3177          |       6113 / 3673          |       2393 / 53            |       2388   | OK
+    64 MB |      20054 / 12055         |      20185 / 12819         |       9090 / 127           |       8841   | OK
+
+   Fazy (FAZY=1, 64 MB wejścia + 64 MB wyjścia, us CPU): create 5–12, execbuf 14 000–27 000 (przypięcie 32 768 stron:
+   ~0,45 us/stronę), wait 22–330, close 11–13. Źródło i915 (v7.0, docs/zrodla/linux-i915): pin_user_pages_fast +
+   sg_alloc_table + i915_gem_gtt_prepare_pages (dma_map przez IOMMU); clflush nie (can_bypass_llc = false dla KBL).
+   Flagi: I915_PARAM_HAS_USERPTR_PROBE = tak; READ_ONLY przyjęte; PROBE na złym adresie: EFAULT. Nakładające się
+   obiekty userptr: przyjęte.
+
+2. Biblioteka (bench/compare/userptr.sh: 3 rundy na przemian, osobne procesy, mediany; OPENBLAS_NUM_THREADS=1)
+   kopia = GEN9BLAS_NO_USERPTR=1 (dawna ścieżka), userptr = domyślnie; „te same”: te same tablice NumPy w kolejnych
+   wywołaniach; „nowe”: nowe tablice przed każdym wywołaniem (malloc zwykle oddaje te same adresy -> obiekt z pamięci
+   podręcznej, jądro Linuksa przypina strony od nowa)
+
+przypadek                |   kopia: czas / CPU [ms] |  userptr: czas / CPU [ms] | czas  | CPU
+sgemm n=256 te same      |      0.525 /     0.230   |      0.607 /     0.211    | 1.16× | 0.92×
+sgemm n=1024 te same     |      9.096 /     2.032   |      7.416 /     0.402    | 0.82× | 0.20×
+sgemm n=2048 te same     |     68.022 /     7.253   |     61.362 /     0.466    | 0.90× | 0.06×
+sgemm n=4096 te same     |    429.280 /    27.788   |    413.335 /     0.471    | 0.96× | 0.02×
+hgemm n=2048 te same     |     39.929 /     4.192   |     36.642 /     0.500    | 0.92× | 0.12×
+sgemm n=1024 nowe        |     16.675 /     1.776   |     14.903 /     0.471    | 0.89× | 0.27×
+sgemm n=4096 nowe        |    415.459 /    13.698   |    407.157 /     4.517    | 0.98× | 0.33×
+axpy n=1e+06 te same     |      3.995 /     3.405   |      0.774 /     0.254    | 0.19× | 0.07×
+dot n=1e+06 te same      |      2.993 /     2.511   |      0.722 /     0.259    | 0.24× | 0.10×
+axpy n=1e+07 te same     |     33.604 /    28.320   |      5.132 /     0.256    | 0.15× | 0.01×
+dot n=1e+07 te same      |     23.218 /    19.840   |      4.090 /     0.264    | 0.18× | 0.01×
+axpy n=1e+07 nowe        |     16.782 /    11.914   |      8.937 /     4.108    | 0.53× | 0.34×
+gemv 4096 te same        |      9.545 /     6.872   |      6.183 /     0.223    | 0.65× | 0.03×
+
+   sgemm n=256: czas 0,93× w pierwszej serii, 1,16× w drugiej -- w granicach szumu (CPU 0,90–0,92×).
+   Pierwsza seria przed poprawką grupowania (axpy/dot n = 1e6: tablice na stercie ze wspólną stroną -> obiekt-suma
+   tworzony od nowa w każdym wywołaniu): axpy 0,96× czasu / 0,94× CPU, dot 0,60× / 0,49× -- po poprawce 0,19× / 0,07×.

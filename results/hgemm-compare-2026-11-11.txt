@@ -1,0 +1,15 @@
+# 2026-11-11T04:14:16+01:00  GFLOPS (najlepszy z 5); 'z pak.' = łącznie z pakowaniem A i B na GPU
+     N |       asm   asm+pak |   OCL-C p      +pak | OCL-C img |   CLB hg   CLB sg |  OBLAS32
+   256 |     520.2     279.2 |     408.8     265.1 |     403.9 |     77.2     91.4 |    316.0
+   512 |     666.8     500.6 |     545.6     448.6 |     553.2 |    220.5    268.4 |    280.5
+  1024 |     751.1     605.2 |     616.9     531.7 |     622.3 |    103.1    285.1 |    280.3
+  1536 |     747.3     651.2 |     626.2     557.6 |     592.2 |    107.9     93.3 |    303.9
+  2048 |     732.6     646.8 |     623.7     572.8 |      62.1 |    224.2     67.8 |    325.3
+  3072 |     771.5     710.6 |     650.2     612.6 |      32.6 |    228.7     65.1 |    310.5
+  4096 |     777.3     731.2 |     654.2     615.7 |      32.1 |    242.6     43.8 |    307.0
+# blad wzgledny (N=2048) asm: sr=1.28e-04 max=8.49e-04
+# blad wzgledny (N=2048) CLBlast hgemm: sr=1.28e-04 max=8.49e-04
+# moc, tryb ciagly ~4 s, N=2048:
+#   asm:               moc: GPU 1093 MHz, Render 100%, GPU 17.6 W, Package 33.0 W  (7 probek)
+#   CLBlast hgemm:     moc: GPU 1102 MHz, Render 98%, GPU 14.2 W, Package 26.3 W  (6 probek)
+#   OpenBLAS f32:      moc: GPU 327 MHz, Render 0%, GPU 0.6 W, Package 36.2 W  (5 probek)

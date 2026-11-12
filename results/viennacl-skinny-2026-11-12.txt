@@ -1,0 +1,36 @@
+Chudy GEMM FP32 C = A·Wᵀ (W: N×K wierszowo): ViennaCL 1.7.1 (OpenCL/NEO, bench/compare/viennacl_skinny.cpp) wobec
+libgen9blas (kcl, USM, gen9blas.sgemm / gen9blas.gemv z Pythona), 2026-11-12, zasilanie sieciowe, 2 serie na przemian, mediany ms.
+ViennaCL nie ma FP16. GEMV: y = W·x (M = 1).
+operacja  N      K      M   ViennaCL ms   libgen9blas ms   libgen9blas szybsze   GB/s wag ViennaCL / libgen9blas
+gemv   4096   4096   1       3.154       3.224        1.0×         21.3 /  20.8
+gemm   4096   4096   1      44.343       3.428       12.9×          1.5 /  19.6
+gemm   4096   4096   2      49.834       3.881       12.8×          1.3 /  17.3
+gemm   4096   4096   4      43.399       3.738       11.6×          1.5 /  18.0
+gemm   4096   4096   8      53.098       3.697       14.4×          1.3 /  18.2
+gemm   4096   4096  16      54.384       4.059       13.4×          1.2 /  16.5
+gemv  11008   4096   1       7.771       9.250        0.8×         23.2 /  19.5
+gemm  11008   4096   1     114.963       8.620       13.3×          1.6 /  20.9
+gemm  11008   4096   2     122.913       9.400       13.1×          1.5 /  19.2
+gemm  11008   4096   4     111.136       9.957       11.2×          1.6 /  18.1
+gemm  11008   4096   8     105.267       9.747       10.8×          1.7 /  18.5
+gemm  11008   4096  16     131.282      10.964       12.0×          1.4 /  16.4
+gemv   4096  11008   1       7.632       7.652        1.0×         23.6 /  23.6
+gemm   4096  11008   1      30.944       8.326        3.7×          5.8 /  21.7
+gemm   4096  11008   2      30.235       8.675        3.5×          6.0 /  20.8
+gemm   4096  11008   4      31.290       9.347        3.3×          5.8 /  19.3
+gemm   4096  11008   8      30.476      10.370        2.9×          5.9 /  17.4
+gemm   4096  11008  16      32.977      10.782        3.1×          5.5 /  16.7
+gemv   2048   2048   1       0.784       1.091        0.7×         21.4 /  15.4
+gemm   2048   2048   1      13.652       1.043       13.1×          1.2 /  16.1
+gemm   2048   2048   2      13.999       1.074       13.0×          1.2 /  15.6
+gemm   2048   2048   4      15.042       1.033       14.6×          1.1 /  16.2
+gemm   2048   2048   8      14.420       1.085       13.3×          1.2 /  15.5
+gemm   2048   2048  16      15.169       1.268       12.0×          1.1 /  13.2
+
+Wnioski:
+- GEMM przy M = 1–16: ViennaCL 30–135 ms (1,1–6 GB/s wag) -- jego GEMM liczy kafle pełnej wysokości (jak nasza dawna
+  ścieżka z pakowaniem), więc czas prawie nie zależy od M; libgen9blas 1,0–11 ms (13–22 GB/s): 2,9–14,6× szybciej.
+- GEMV (M = 1, odpowiednik chudego GEMM w ViennaCL): remis przy 4096² i 4096×11008 (1,0×); libgen9blas wolniejsze przy
+  11008×4096 (0,8×) i 2048² (0,7×; 1,09 wobec 0,78 ms) -- do sprawdzenia (część to wywołanie z Pythona, ~0,03–0,1 ms).
+- Zamiast M osobnych GEMV: libgen9blas M = 16 (FP32 4096²: 4,06 ms) kosztuje 1,3× jednego GEMV ViennaCL (3,15 ms);
+  16 wywołań GEMV w ViennaCL to ~50 ms, czyli ~12× dłużej.
