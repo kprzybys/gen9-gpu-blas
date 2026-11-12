@@ -180,8 +180,12 @@ Analysis (offline, 2026-11-12):
   only instruction forms it uses that no completed kernel used are A64 qword gather/scatter messages and `mov :df`
   [SCAN]. The CHV PRM defines A64 QWord scattered messages (vol07 p.129, 193), but Mesa never emits them [HYP: the
   candidate cause].
-- Next: give `pkf_a`/`pkf_b` the plain layout in the Gen8 build and re-run SGEMM (no new risk); then FP64 copy
-  (`copy16_d`: qword messages without multiplies), which may hang, to test the qword-message candidate.
+- Fixed (`GEN8_PLAIN_PACK` in the bdw build of `bench/sgemm.cl`) and re-run 2026-11-13 [MEAS]: SGEMM n = 16, 64, 100,
+  256 and batched 2 x 64 correct (max relative error 1e-7 .. 6e-7; kernels `pkf_a`, `pkf_b`, `sgemm_v`,
+  `gen9blas_epilog_fb`, `skinny_*`), no reset. This confirms the layout diagnosis and that these kernels, including their
+  DW x DW multiplies and the `mul`/`mach` sequence with non-zero batch index, execute correctly on the Cherryview.
+- Next (may hang, needs a decision): FP64 copy (`copy16_d`: A64 qword messages without multiplies) to test the
+  qword-message candidate for the DGEMM hang.
 
 ## 7. Open questions
 
