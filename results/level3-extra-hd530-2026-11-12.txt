@@ -1,0 +1,447 @@
+# Level 3 extras on the HD 530: batched GEMM, skinny GEMM, DGEMM, 10-minute HGEMM run, 2026-11-12
+# Machine: Intel HD Graphics 530 (Skylake-S GT2, Gen9, PCI 0x1912, 24 EU), Core i5-6500 (4 cores), DDR4-2133 2 channels (2 x 8 GB,
+#   34.1 GB/s theoretical), desktop without a monitor, Ubuntu 26.04.1, Linux 7.0.0-34-generic, i915, Python 3.14.4, NumPy 2.3.5,
+#   OpenBLAS 0.3.32. Code at fb1e1e2; lib/kernels.c built on the UHD 620 (-device whl), md5 02e260eb5c20ceabb31ea0335da2255e.
+# IOMMU: enabled for other devices (DMA-FQ), NOT for the GPU (no graphics DMAR unit; 00:02.0 in no IOMMU group). The UHD 620
+#   laptop has the GPU behind the IOMMU (DMA-FQ). GPU under load: 1000 MHz (max 1050). CPU governor powersave, EPP balance_performance.
+# The machine runs its own services (about 30% of one core in total); every run at nice 19 / ionice idle, OPENBLAS_NUM_THREADS=1.
+#   No display on this GPU. First file for this machine: results/skylake-hd530-2026-11-12.txt.
+
+## Summary
+# - Batched GEMM (python3 bench/batched_gemm.py): 0.70-0.89 of the UHD 620; small matrices lose most (256 x 64^3 FP16
+#   71.8 vs 99.0-102.7 GFLOPS) -- per-call cost dominates there and it is higher on this machine (see
+#   results/userptr-overhead-hd530-2026-11-12.txt, section 1) [MEAS; the link is a hypothesis].
+# - Skinny GEMM (python3 bench/skinny_gemm.py usm): FP16 4096^2 M = 1 / 8 / 16: 2.11 / 2.44 / 3.49 ms vs 1.69 / 1.91 / 3.19 ms
+#   on the UHD 620 (results/skinny-gemm-rework-2026-11-12.txt) = 0.80 / 0.78 / 0.91 -- memory-bound, like levels 1-2 [MEAS].
+#   The large FP16 error at M >= 32 (~2e-2) is the plain FP16 path, the same as on the laptop (results/skinny-gemm-2026-11-12.txt).
+# - DGEMM whole call: 50.5-50.7 GFLOPS at n = 2048 and 4096 (laptop: 56.1 at n = 2048, 53.7 at n = 4096) = 0.90-0.94, about the
+#   clock ratio; rel. error 3-4e-15 [MEAS].
+# - 10 minutes of HGEMM n = 2048: 606.5-608.6 GFLOPS the whole time, GPU at 1000 MHz in every sample, package 46 -> 56 C [MEAS].
+#   No throttling. Final rel. error 1.1e-2 (plain FP16 accumulation over K = 2048, expected for this path).
+
+## 1. Batched GEMM [MEAS]
+  case                     FP16         FP32
+  256 x 64^3          71.8 GFLOPS    69.3 GFLOPS
+  64 x 128^3         176.5 GFLOPS   118.5 GFLOPS
+  16 x 256^3         280.8 GFLOPS   174.9 GFLOPS
+
+## 2. Skinny GEMM, usm [MEAS]
+  # memory usm ; time [ms] / weight GB/s / GFLOPS / CPU [ms] / error
+  H W N=  4096 K=  4096 M=   1     2.107 ms    15.9 GB/s     15.9 GFLOPS  CPU  0.490 ms  err 3.8e-04
+  H B N=  4096 K=  4096 M=   1     2.265 ms    14.8 GB/s     14.8 GFLOPS  CPU  0.533 ms  err 3.5e-04
+  H W N=  4096 K=  4096 M=   2     2.151 ms    15.6 GB/s     31.2 GFLOPS  CPU  0.470 ms  err 3.6e-04
+  H B N=  4096 K=  4096 M=   2     2.352 ms    14.3 GB/s     28.5 GFLOPS  CPU  0.573 ms  err 3.4e-04
+  H W N=  4096 K=  4096 M=   4     2.235 ms    15.0 GB/s     60.1 GFLOPS  CPU  0.527 ms  err 3.2e-04
+  H B N=  4096 K=  4096 M=   4     2.227 ms    15.1 GB/s     60.3 GFLOPS  CPU  0.444 ms  err 3.6e-04
+  H W N=  4096 K=  4096 M=   8     2.435 ms    13.8 GB/s    110.2 GFLOPS  CPU  0.554 ms  err 3.7e-04
+  H B N=  4096 K=  4096 M=   8     3.041 ms    11.0 GB/s     88.3 GFLOPS  CPU  0.531 ms  err 3.1e-04
+  H W N=  4096 K=  4096 M=  16     3.493 ms     9.6 GB/s    153.7 GFLOPS  CPU  0.531 ms  err 3.4e-04
+  H B N=  4096 K=  4096 M=  16     4.340 ms     7.7 GB/s    123.7 GFLOPS  CPU  0.535 ms  err 3.6e-04
+  H W N=  4096 K=  4096 M=  32    12.419 ms     2.7 GB/s     86.5 GFLOPS  CPU  0.657 ms  err 2.9e-02
+  H B N=  4096 K=  4096 M=  32     8.035 ms     4.2 GB/s    133.6 GFLOPS  CPU  0.510 ms  err 2.0e-02
+  H W N=  4096 K=  4096 M=  64    13.838 ms     2.4 GB/s    155.2 GFLOPS  CPU  0.599 ms  err 2.6e-02
+  H B N=  4096 K=  4096 M=  64     9.409 ms     3.6 GB/s    228.2 GFLOPS  CPU  0.483 ms  err 2.2e-02
+  H W N=  4096 K=  4096 M= 128    17.017 ms     2.0 GB/s    252.4 GFLOPS  CPU  0.485 ms  err 2.4e-02
+  H B N=  4096 K=  4096 M= 128    12.640 ms     2.7 GB/s    339.8 GFLOPS  CPU  0.482 ms  err 2.1e-02
+  H W N=  4096 K=  4096 M= 256    23.584 ms     1.4 GB/s    364.2 GFLOPS  CPU  0.487 ms  err 2.2e-02
+  H B N=  4096 K=  4096 M= 256    19.219 ms     1.7 GB/s    447.0 GFLOPS  CPU  0.400 ms  err 2.2e-02
+  H W N=  1024 K=  1024 M=   1     0.234 ms     8.9 GB/s      8.9 GFLOPS  CPU  0.084 ms  err 3.3e-04
+  H B N=  1024 K=  1024 M=   1     0.243 ms     8.6 GB/s      8.6 GFLOPS  CPU  0.084 ms  err 2.5e-04
+  H W N=  1024 K=  1024 M=   2     0.213 ms     9.8 GB/s     19.6 GFLOPS  CPU  0.082 ms  err 2.8e-04
+  H B N=  1024 K=  1024 M=   2     0.328 ms     6.4 GB/s     12.8 GFLOPS  CPU  0.184 ms  err 2.9e-04
+  H W N=  1024 K=  1024 M=   4     0.371 ms     5.7 GB/s     22.6 GFLOPS  CPU  0.227 ms  err 2.9e-04
+  H B N=  1024 K=  1024 M=   4     0.367 ms     5.7 GB/s     22.9 GFLOPS  CPU  0.213 ms  err 3.7e-04
+  H W N=  1024 K=  1024 M=   8     0.452 ms     4.6 GB/s     37.1 GFLOPS  CPU  0.246 ms  err 3.4e-04
+  H B N=  1024 K=  1024 M=   8     0.394 ms     5.3 GB/s     42.6 GFLOPS  CPU  0.154 ms  err 3.5e-04
+  H W N=  1024 K=  1024 M=  16     0.450 ms     4.7 GB/s     74.6 GFLOPS  CPU  0.075 ms  err 3.3e-04
+  H B N=  1024 K=  1024 M=  16     0.531 ms     4.0 GB/s     63.2 GFLOPS  CPU  0.146 ms  err 3.5e-04
+  H W N=  1024 K=  1024 M=  32     1.374 ms     1.5 GB/s     48.8 GFLOPS  CPU  0.420 ms  err 9.9e-03
+  H B N=  1024 K=  1024 M=  32     1.200 ms     1.7 GB/s     55.9 GFLOPS  CPU  0.470 ms  err 7.6e-03
+  H W N=  1024 K=  1024 M=  64     1.538 ms     1.4 GB/s     87.3 GFLOPS  CPU  0.458 ms  err 9.6e-03
+  H B N=  1024 K=  1024 M=  64     1.242 ms     1.7 GB/s    108.1 GFLOPS  CPU  0.440 ms  err 8.3e-03
+  H W N=  1024 K=  1024 M= 128     1.886 ms     1.1 GB/s    142.3 GFLOPS  CPU  0.505 ms  err 1.1e-02
+  H B N=  1024 K=  1024 M= 128     1.539 ms     1.4 GB/s    174.4 GFLOPS  CPU  0.457 ms  err 9.2e-03
+  H W N=  1024 K=  1024 M= 256     2.347 ms     0.9 GB/s    228.8 GFLOPS  CPU  0.493 ms  err 1.0e-02
+  H B N=  1024 K=  1024 M= 256     2.067 ms     1.0 GB/s    259.8 GFLOPS  CPU  0.477 ms  err 1.2e-02
+  H W N=  2048 K=  2048 M=   1     0.696 ms    12.0 GB/s     12.0 GFLOPS  CPU  0.240 ms  err 2.7e-04
+  H B N=  2048 K=  2048 M=   1     0.767 ms    10.9 GB/s     10.9 GFLOPS  CPU  0.280 ms  err 3.0e-04
+  H W N=  2048 K=  2048 M=   2     0.734 ms    11.4 GB/s     22.9 GFLOPS  CPU  0.292 ms  err 2.7e-04
+  H B N=  2048 K=  2048 M=   2     0.914 ms     9.2 GB/s     18.3 GFLOPS  CPU  0.344 ms  err 2.9e-04
+  H W N=  2048 K=  2048 M=   4     0.834 ms    10.1 GB/s     40.3 GFLOPS  CPU  0.339 ms  err 2.5e-04
+  H B N=  2048 K=  2048 M=   4     1.010 ms     8.3 GB/s     33.2 GFLOPS  CPU  0.390 ms  err 2.5e-04
+  H W N=  2048 K=  2048 M=   8     1.037 ms     8.1 GB/s     64.7 GFLOPS  CPU  0.384 ms  err 2.4e-04
+  H B N=  2048 K=  2048 M=   8     1.094 ms     7.7 GB/s     61.4 GFLOPS  CPU  0.374 ms  err 2.5e-04
+  H W N=  2048 K=  2048 M=  16     1.425 ms     5.9 GB/s     94.2 GFLOPS  CPU  0.410 ms  err 2.5e-04
+  H B N=  2048 K=  2048 M=  16     1.509 ms     5.6 GB/s     88.9 GFLOPS  CPU  0.433 ms  err 4.6e-04
+  H W N=  2048 K=  2048 M=  32     3.472 ms     2.4 GB/s     77.3 GFLOPS  CPU  0.466 ms  err 1.3e-02
+  H B N=  2048 K=  2048 M=  32     2.476 ms     3.4 GB/s    108.4 GFLOPS  CPU  0.491 ms  err 1.6e-02
+  H W N=  2048 K=  2048 M=  64     4.242 ms     2.0 GB/s    126.6 GFLOPS  CPU  0.580 ms  err 1.8e-02
+  H B N=  2048 K=  2048 M=  64     3.034 ms     2.8 GB/s    177.0 GFLOPS  CPU  0.505 ms  err 1.3e-02
+  H W N=  2048 K=  2048 M= 128     5.079 ms     1.7 GB/s    211.4 GFLOPS  CPU  0.509 ms  err 1.6e-02
+  H B N=  2048 K=  2048 M= 128     3.920 ms     2.1 GB/s    273.9 GFLOPS  CPU  0.495 ms  err 1.2e-02
+  H W N=  2048 K=  2048 M= 256     6.725 ms     1.2 GB/s    319.3 GFLOPS  CPU  0.499 ms  err 1.7e-02
+  H B N=  2048 K=  2048 M= 256     5.549 ms     1.5 GB/s    387.0 GFLOPS  CPU  0.498 ms  err 1.5e-02
+  H W N=  8192 K=  8192 M=   1     6.195 ms    21.7 GB/s     21.7 GFLOPS  CPU  0.376 ms  err 2.8e-04
+  H B N=  8192 K=  8192 M=   1     6.669 ms    20.1 GB/s     20.1 GFLOPS  CPU  0.475 ms  err 2.7e-04
+  H W N=  8192 K=  8192 M=   2     6.697 ms    20.0 GB/s     40.1 GFLOPS  CPU  0.474 ms  err 2.5e-04
+  H B N=  8192 K=  8192 M=   2     6.726 ms    20.0 GB/s     39.9 GFLOPS  CPU  0.471 ms  err 4.3e-04
+  H W N=  8192 K=  8192 M=   4     6.712 ms    20.0 GB/s     80.0 GFLOPS  CPU  0.432 ms  err 2.5e-04
+  H B N=  8192 K=  8192 M=   4     6.716 ms    20.0 GB/s     79.9 GFLOPS  CPU  0.475 ms  err 2.7e-04
+  H W N=  8192 K=  8192 M=   8     7.255 ms    18.5 GB/s    148.0 GFLOPS  CPU  0.475 ms  err 2.3e-04
+  H B N=  8192 K=  8192 M=   8    12.259 ms    10.9 GB/s     87.6 GFLOPS  CPU  0.557 ms  err 2.4e-04
+  H W N=  8192 K=  8192 M=  16    10.446 ms    12.8 GB/s    205.6 GFLOPS  CPU  0.491 ms  err 3.1e-04
+  H B N=  8192 K=  8192 M=  16    23.852 ms     5.6 GB/s     90.0 GFLOPS  CPU  0.515 ms  err 4.7e-04
+  H W N=  8192 K=  8192 M=  32    46.843 ms     2.9 GB/s     91.7 GFLOPS  CPU  0.477 ms  err 3.7e-02
+  H B N=  8192 K=  8192 M=  32    52.942 ms     2.5 GB/s     81.1 GFLOPS  CPU  0.529 ms  err 3.4e-02
+  H W N=  8192 K=  8192 M=  64    52.168 ms     2.6 GB/s    164.7 GFLOPS  CPU  0.659 ms  err 3.7e-02
+  H B N=  8192 K=  8192 M=  64    59.667 ms     2.2 GB/s    144.0 GFLOPS  CPU  0.529 ms  err 2.9e-02
+  H W N=  8192 K=  8192 M= 128    64.833 ms     2.1 GB/s    265.0 GFLOPS  CPU  0.485 ms  err 3.5e-02
+  H B N=  8192 K=  8192 M= 128    71.988 ms     1.9 GB/s    238.6 GFLOPS  CPU  0.529 ms  err 3.0e-02
+  H W N=  8192 K=  8192 M= 256    89.635 ms     1.5 GB/s    383.3 GFLOPS  CPU  0.485 ms  err 2.8e-02
+  H B N=  8192 K=  8192 M= 256    97.491 ms     1.4 GB/s    352.4 GFLOPS  CPU  0.448 ms  err 3.3e-02
+  H W N= 11008 K=  4096 M=   1     4.214 ms    21.4 GB/s     21.4 GFLOPS  CPU  0.465 ms  err 3.1e-04
+  H B N= 11008 K=  4096 M=   1     4.622 ms    19.5 GB/s     19.5 GFLOPS  CPU  0.458 ms  err 3.6e-04
+  H W N= 11008 K=  4096 M=   2     4.265 ms    21.1 GB/s     42.3 GFLOPS  CPU  0.468 ms  err 3.3e-04
+  H B N= 11008 K=  4096 M=   2     4.611 ms    19.6 GB/s     39.1 GFLOPS  CPU  0.443 ms  err 3.1e-04
+  H W N= 11008 K=  4096 M=   4     4.282 ms    21.1 GB/s     84.2 GFLOPS  CPU  0.471 ms  err 2.9e-04
+  H B N= 11008 K=  4096 M=   4     4.772 ms    18.9 GB/s     75.6 GFLOPS  CPU  0.441 ms  err 3.0e-04
+  H W N= 11008 K=  4096 M=   8     4.953 ms    18.2 GB/s    145.7 GFLOPS  CPU  0.561 ms  err 3.4e-04
+  H B N= 11008 K=  4096 M=   8     8.613 ms    10.5 GB/s     83.8 GFLOPS  CPU  0.537 ms  err 3.3e-04
+  H W N= 11008 K=  4096 M=  16     7.976 ms    11.3 GB/s    180.9 GFLOPS  CPU  0.561 ms  err 3.4e-04
+  H B N= 11008 K=  4096 M=  16    16.603 ms     5.4 GB/s     86.9 GFLOPS  CPU  0.534 ms  err 3.3e-04
+  H W N= 11008 K=  4096 M=  32    30.546 ms     3.0 GB/s     94.5 GFLOPS  CPU  0.539 ms  err 2.2e-02
+  H B N= 11008 K=  4096 M=  32    29.295 ms     3.1 GB/s     98.5 GFLOPS  CPU  0.505 ms  err 1.9e-02
+  H W N= 11008 K=  4096 M=  64    34.549 ms     2.6 GB/s    167.0 GFLOPS  CPU  0.533 ms  err 2.0e-02
+  H B N= 11008 K=  4096 M=  64    32.996 ms     2.7 GB/s    174.9 GFLOPS  CPU  0.553 ms  err 2.3e-02
+  H W N= 11008 K=  4096 M= 128    43.259 ms     2.1 GB/s    266.8 GFLOPS  CPU  0.503 ms  err 2.2e-02
+  H B N= 11008 K=  4096 M= 128    41.319 ms     2.2 GB/s    279.4 GFLOPS  CPU  0.548 ms  err 2.0e-02
+  H W N= 11008 K=  4096 M= 256    59.535 ms     1.5 GB/s    387.8 GFLOPS  CPU  0.487 ms  err 2.2e-02
+  H B N= 11008 K=  4096 M= 256    57.722 ms     1.6 GB/s    399.9 GFLOPS  CPU  0.480 ms  err 2.7e-02
+  H W N=  4096 K= 11008 M=   1     4.417 ms    20.4 GB/s     20.4 GFLOPS  CPU  0.557 ms  err 2.9e-04
+  H B N=  4096 K= 11008 M=   1     4.695 ms    19.2 GB/s     19.2 GFLOPS  CPU  0.496 ms  err 4.1e-04
+  H W N=  4096 K= 11008 M=   2     4.936 ms    18.3 GB/s     36.5 GFLOPS  CPU  0.472 ms  err 2.5e-04
+  H B N=  4096 K= 11008 M=   2     4.781 ms    18.9 GB/s     37.7 GFLOPS  CPU  0.591 ms  err 2.8e-04
+  H W N=  4096 K= 11008 M=   4     5.375 ms    16.8 GB/s     67.1 GFLOPS  CPU  0.475 ms  err 3.7e-04
+  H B N=  4096 K= 11008 M=   4     4.715 ms    19.1 GB/s     76.5 GFLOPS  CPU  0.447 ms  err 4.1e-04
+  H W N=  4096 K= 11008 M=   8     5.266 ms    17.1 GB/s    137.0 GFLOPS  CPU  0.474 ms  err 4.4e-04
+  H B N=  4096 K= 11008 M=   8     6.893 ms    13.1 GB/s    104.7 GFLOPS  CPU  0.476 ms  err 3.9e-04
+  H W N=  4096 K= 11008 M=  16     7.375 ms    12.2 GB/s    195.7 GFLOPS  CPU  0.474 ms  err 4.0e-04
+  H B N=  4096 K= 11008 M=  16    10.418 ms     8.7 GB/s    138.5 GFLOPS  CPU  0.485 ms  err 3.8e-04
+  H W N=  4096 K= 11008 M=  32    57.821 ms     1.6 GB/s     49.9 GFLOPS  CPU  0.482 ms  err 2.6e-02
+  H B N=  4096 K= 11008 M=  32    19.083 ms     4.7 GB/s    151.2 GFLOPS  CPU  0.505 ms  err 3.7e-02
+  H W N=  4096 K= 11008 M=  64    62.116 ms     1.5 GB/s     92.9 GFLOPS  CPU  0.497 ms  err 2.7e-02
+  H B N=  4096 K= 11008 M=  64    23.517 ms     3.8 GB/s    245.4 GFLOPS  CPU  0.558 ms  err 2.8e-02
+  H W N=  4096 K= 11008 M= 128    71.645 ms     1.3 GB/s    161.1 GFLOPS  CPU  0.485 ms  err 3.5e-02
+  H B N=  4096 K= 11008 M= 128    32.056 ms     2.8 GB/s    360.1 GFLOPS  CPU  0.524 ms  err 3.0e-02
+  H W N=  4096 K= 11008 M= 256    88.607 ms     1.0 GB/s    260.5 GFLOPS  CPU  0.560 ms  err 4.9e-02
+  H B N=  4096 K= 11008 M= 256    49.522 ms     1.8 GB/s    466.2 GFLOPS  CPU  0.476 ms  err 3.1e-02
+  H W N=  5120 K=  1280 M=   1     1.270 ms    10.3 GB/s     10.3 GFLOPS  CPU  0.448 ms  err 3.3e-04
+  H B N=  5120 K=  1280 M=   1     1.250 ms    10.5 GB/s     10.5 GFLOPS  CPU  0.407 ms  err 3.2e-04
+  H W N=  5120 K=  1280 M=   2     1.253 ms    10.5 GB/s     20.9 GFLOPS  CPU  0.476 ms  err 3.2e-04
+  H B N=  5120 K=  1280 M=   2     1.373 ms     9.5 GB/s     19.1 GFLOPS  CPU  0.496 ms  err 3.2e-04
+  H W N=  5120 K=  1280 M=   4     1.235 ms    10.6 GB/s     42.5 GFLOPS  CPU  0.466 ms  err 3.4e-04
+  H B N=  5120 K=  1280 M=   4     1.330 ms     9.9 GB/s     39.4 GFLOPS  CPU  0.438 ms  err 2.9e-04
+  H W N=  5120 K=  1280 M=   8     1.489 ms     8.8 GB/s     70.4 GFLOPS  CPU  0.467 ms  err 3.1e-04
+  H B N=  5120 K=  1280 M=   8     1.440 ms     9.1 GB/s     72.8 GFLOPS  CPU  0.408 ms  err 3.1e-04
+  H W N=  5120 K=  1280 M=  16     2.187 ms     6.0 GB/s     95.9 GFLOPS  CPU  0.436 ms  err 2.6e-04
+  H B N=  5120 K=  1280 M=  16     2.208 ms     5.9 GB/s     95.0 GFLOPS  CPU  0.502 ms  err 3.1e-04
+  H W N=  5120 K=  1280 M=  32     5.026 ms     2.6 GB/s     83.5 GFLOPS  CPU  0.491 ms  err 1.1e-02
+  H B N=  5120 K=  1280 M=  32     3.465 ms     3.8 GB/s    121.0 GFLOPS  CPU  0.482 ms  err 1.2e-02
+  H W N=  5120 K=  1280 M=  64     5.583 ms     2.3 GB/s    150.3 GFLOPS  CPU  0.483 ms  err 1.3e-02
+  H B N=  5120 K=  1280 M=  64     4.035 ms     3.2 GB/s    207.9 GFLOPS  CPU  0.475 ms  err 1.2e-02
+  H W N=  5120 K=  1280 M= 128     6.958 ms     1.9 GB/s    241.1 GFLOPS  CPU  0.466 ms  err 1.3e-02
+  H B N=  5120 K=  1280 M= 128     5.372 ms     2.4 GB/s    312.3 GFLOPS  CPU  0.480 ms  err 1.3e-02
+  H W N=  5120 K=  1280 M= 256     9.526 ms     1.4 GB/s    352.3 GFLOPS  CPU  0.496 ms  err 1.2e-02
+  H B N=  5120 K=  1280 M= 256     8.015 ms     1.6 GB/s    418.6 GFLOPS  CPU  0.516 ms  err 1.3e-02
+  H W N= 51866 K=  1280 M=   1     6.646 ms    20.0 GB/s     20.0 GFLOPS  CPU  0.506 ms  err 3.2e-04
+  H B N= 51866 K=  1280 M=   1     7.689 ms    17.3 GB/s     17.3 GFLOPS  CPU  0.473 ms  err 3.1e-04
+  H W N= 51866 K=  1280 M=   2     5.789 ms    22.9 GB/s     45.9 GFLOPS  CPU  0.477 ms  err 2.9e-04
+  H B N= 51866 K=  1280 M=   2     8.103 ms    16.4 GB/s     32.8 GFLOPS  CPU  0.483 ms  err 2.8e-04
+  H W N= 51866 K=  1280 M=   4     5.803 ms    22.9 GB/s     91.5 GFLOPS  CPU  0.474 ms  err 2.7e-04
+  H B N= 51866 K=  1280 M=   4     8.273 ms    16.1 GB/s     64.2 GFLOPS  CPU  0.522 ms  err 2.9e-04
+  H W N= 51866 K=  1280 M=   8     8.469 ms    15.7 GB/s    125.4 GFLOPS  CPU  0.469 ms  err 2.8e-04
+  H B N= 51866 K=  1280 M=   8    15.394 ms     8.6 GB/s     69.0 GFLOPS  CPU  0.514 ms  err 2.7e-04
+  H W N= 51866 K=  1280 M=  16    15.584 ms     8.5 GB/s    136.3 GFLOPS  CPU  0.458 ms  err 2.6e-04
+  H B N= 51866 K=  1280 M=  16    30.485 ms     4.4 GB/s     69.7 GFLOPS  CPU  0.538 ms  err 2.6e-04
+  H W N= 51866 K=  1280 M=  32    43.214 ms     3.1 GB/s     98.3 GFLOPS  CPU  0.545 ms  err 1.4e-02
+  H B N= 51866 K=  1280 M=  32    27.794 ms     4.8 GB/s    152.9 GFLOPS  CPU  0.539 ms  err 1.3e-02
+  H W N= 51866 K=  1280 M=  64    50.084 ms     2.7 GB/s    169.7 GFLOPS  CPU  0.508 ms  err 1.4e-02
+  H B N= 51866 K=  1280 M=  64    34.858 ms     3.8 GB/s    243.8 GFLOPS  CPU  0.584 ms  err 1.4e-02
+  H W N= 51866 K=  1280 M= 128    64.590 ms     2.1 GB/s    263.1 GFLOPS  CPU  0.506 ms  err 1.6e-02
+  H B N= 51866 K=  1280 M= 128    49.527 ms     2.7 GB/s    343.2 GFLOPS  CPU  0.480 ms  err 1.4e-02
+  H W N= 51866 K=  1280 M= 256    93.145 ms     1.4 GB/s    364.9 GFLOPS  CPU  0.354 ms  err 1.3e-02
+  H B N= 51866 K=  1280 M= 256    77.862 ms     1.7 GB/s    436.6 GFLOPS  CPU  0.490 ms  err 1.4e-02
+  S W N=  4096 K=  4096 M=   1     3.508 ms    19.1 GB/s      9.6 GFLOPS  CPU  0.466 ms  err 1.3e-07
+  S B N=  4096 K=  4096 M=   1     3.768 ms    17.8 GB/s      8.9 GFLOPS  CPU  0.534 ms  err 6.1e-07
+  S W N=  4096 K=  4096 M=   2     3.682 ms    18.2 GB/s     18.2 GFLOPS  CPU  0.407 ms  err 1.7e-07
+  S B N=  4096 K=  4096 M=   2     3.615 ms    18.6 GB/s     18.6 GFLOPS  CPU  0.384 ms  err 5.0e-07
+  S W N=  4096 K=  4096 M=   4     3.808 ms    17.6 GB/s     35.2 GFLOPS  CPU  0.470 ms  err 1.6e-07
+  S B N=  4096 K=  4096 M=   4     3.737 ms    18.0 GB/s     35.9 GFLOPS  CPU  0.471 ms  err 5.6e-07
+  S W N=  4096 K=  4096 M=   8     3.809 ms    17.6 GB/s     70.5 GFLOPS  CPU  0.374 ms  err 1.8e-07
+  S B N=  4096 K=  4096 M=   8     5.699 ms    11.8 GB/s     47.1 GFLOPS  CPU  0.476 ms  err 5.5e-07
+  S W N=  4096 K=  4096 M=  16     4.498 ms    14.9 GB/s    119.4 GFLOPS  CPU  0.485 ms  err 1.8e-07
+  S B N=  4096 K=  4096 M=  16     9.810 ms     6.8 GB/s     54.7 GFLOPS  CPU  0.523 ms  err 5.5e-07
+  S W N=  4096 K=  4096 M=  32    15.642 ms     4.3 GB/s     68.6 GFLOPS  CPU  0.614 ms  err 2.5e-06
+  S B N=  4096 K=  4096 M=  32    11.665 ms     5.8 GB/s     92.0 GFLOPS  CPU  0.532 ms  err 2.0e-06
+  S W N=  4096 K=  4096 M=  64    18.537 ms     3.6 GB/s    115.8 GFLOPS  CPU  0.472 ms  err 2.7e-06
+  S B N=  4096 K=  4096 M=  64    14.525 ms     4.6 GB/s    147.8 GFLOPS  CPU  0.461 ms  err 2.8e-06
+  S W N=  4096 K=  4096 M= 128    24.785 ms     2.7 GB/s    173.3 GFLOPS  CPU  0.517 ms  err 2.6e-06
+  S B N=  4096 K=  4096 M= 128    20.852 ms     3.2 GB/s    206.0 GFLOPS  CPU  0.493 ms  err 3.1e-06
+  S W N=  4096 K=  4096 M= 256    37.687 ms     1.8 GB/s    227.9 GFLOPS  CPU  0.497 ms  err 3.9e-06
+  S B N=  4096 K=  4096 M= 256    33.724 ms     2.0 GB/s    254.7 GFLOPS  CPU  0.480 ms  err 2.7e-06
+  S W N=  1024 K=  1024 M=   1     0.371 ms    11.3 GB/s      5.7 GFLOPS  CPU  0.139 ms  err 1.4e-07
+  S B N=  1024 K=  1024 M=   1     0.283 ms    14.8 GB/s      7.4 GFLOPS  CPU  0.117 ms  err 2.2e-07
+  S W N=  1024 K=  1024 M=   2     0.227 ms    18.4 GB/s     18.4 GFLOPS  CPU  0.093 ms  err 1.2e-07
+  S B N=  1024 K=  1024 M=   2     0.283 ms    14.8 GB/s     14.8 GFLOPS  CPU  0.122 ms  err 1.8e-07
+  S W N=  1024 K=  1024 M=   4     0.234 ms    17.9 GB/s     35.8 GFLOPS  CPU  0.097 ms  err 1.7e-07
+  S B N=  1024 K=  1024 M=   4     0.305 ms    13.7 GB/s     27.5 GFLOPS  CPU  0.133 ms  err 1.7e-07
+  S W N=  1024 K=  1024 M=   8     0.323 ms    13.0 GB/s     51.9 GFLOPS  CPU  0.122 ms  err 1.1e-07
+  S B N=  1024 K=  1024 M=   8     0.420 ms    10.0 GB/s     39.9 GFLOPS  CPU  0.172 ms  err 2.0e-07
+  S W N=  1024 K=  1024 M=  16     0.481 ms     8.7 GB/s     69.8 GFLOPS  CPU  0.143 ms  err 1.6e-07
+  S B N=  1024 K=  1024 M=  16     0.564 ms     7.4 GB/s     59.5 GFLOPS  CPU  0.198 ms  err 2.2e-07
+  S W N=  1024 K=  1024 M=  32     1.179 ms     3.6 GB/s     56.9 GFLOPS  CPU  0.219 ms  err 9.7e-07
+  S B N=  1024 K=  1024 M=  32     1.018 ms     4.1 GB/s     65.9 GFLOPS  CPU  0.218 ms  err 1.1e-06
+  S W N=  1024 K=  1024 M=  64     1.883 ms     2.2 GB/s     71.3 GFLOPS  CPU  0.500 ms  err 1.6e-06
+  S B N=  1024 K=  1024 M=  64     1.698 ms     2.5 GB/s     79.0 GFLOPS  CPU  0.485 ms  err 1.1e-06
+  S W N=  1024 K=  1024 M= 128     2.421 ms     1.7 GB/s    110.9 GFLOPS  CPU  0.505 ms  err 1.2e-06
+  S B N=  1024 K=  1024 M= 128     2.208 ms     1.9 GB/s    121.6 GFLOPS  CPU  0.515 ms  err 1.3e-06
+  S W N=  1024 K=  1024 M= 256     3.307 ms     1.3 GB/s    162.4 GFLOPS  CPU  0.529 ms  err 1.2e-06
+  S B N=  1024 K=  1024 M= 256     2.995 ms     1.4 GB/s    179.2 GFLOPS  CPU  0.453 ms  err 1.3e-06
+  S W N=  2048 K=  2048 M=   1     1.286 ms    13.1 GB/s      6.5 GFLOPS  CPU  0.389 ms  err 1.5e-07
+  S B N=  2048 K=  2048 M=   1     1.636 ms    10.3 GB/s      5.1 GFLOPS  CPU  0.607 ms  err 2.0e-07
+  S W N=  2048 K=  2048 M=   2     1.477 ms    11.4 GB/s     11.4 GFLOPS  CPU  0.523 ms  err 1.6e-07
+  S B N=  2048 K=  2048 M=   2     1.451 ms    11.6 GB/s     11.6 GFLOPS  CPU  0.437 ms  err 2.4e-07
+  S W N=  2048 K=  2048 M=   4     1.328 ms    12.6 GB/s     25.3 GFLOPS  CPU  0.432 ms  err 1.8e-07
+  S B N=  2048 K=  2048 M=   4     1.514 ms    11.1 GB/s     22.2 GFLOPS  CPU  0.465 ms  err 1.9e-07
+  S W N=  2048 K=  2048 M=   8     1.558 ms    10.8 GB/s     43.1 GFLOPS  CPU  0.545 ms  err 1.5e-07
+  S B N=  2048 K=  2048 M=   8     1.665 ms    10.1 GB/s     40.3 GFLOPS  CPU  0.483 ms  err 2.5e-07
+  S W N=  2048 K=  2048 M=  16     1.623 ms    10.3 GB/s     82.7 GFLOPS  CPU  0.476 ms  err 1.8e-07
+  S B N=  2048 K=  2048 M=  16     2.007 ms     8.4 GB/s     66.9 GFLOPS  CPU  0.535 ms  err 2.4e-07
+  S W N=  2048 K=  2048 M=  32     4.758 ms     3.5 GB/s     56.4 GFLOPS  CPU  0.516 ms  err 1.8e-06
+  S B N=  2048 K=  2048 M=  32     3.817 ms     4.4 GB/s     70.3 GFLOPS  CPU  0.494 ms  err 1.7e-06
+  S W N=  2048 K=  2048 M=  64     5.343 ms     3.1 GB/s    100.5 GFLOPS  CPU  0.507 ms  err 2.0e-06
+  S B N=  2048 K=  2048 M=  64     4.426 ms     3.8 GB/s    121.3 GFLOPS  CPU  0.473 ms  err 2.3e-06
+  S W N=  2048 K=  2048 M= 128     6.976 ms     2.4 GB/s    153.9 GFLOPS  CPU  0.466 ms  err 1.9e-06
+  S B N=  2048 K=  2048 M= 128     6.019 ms     2.8 GB/s    178.4 GFLOPS  CPU  0.454 ms  err 1.7e-06
+  S W N=  2048 K=  2048 M= 256    10.213 ms     1.6 GB/s    210.3 GFLOPS  CPU  0.444 ms  err 1.8e-06
+  S B N=  2048 K=  2048 M= 256     9.283 ms     1.8 GB/s    231.3 GFLOPS  CPU  0.434 ms  err 2.0e-06
+  S W N=  8192 K=  8192 M=   1    12.186 ms    22.0 GB/s     11.0 GFLOPS  CPU  0.495 ms  err 1.4e-07
+  S B N=  8192 K=  8192 M=   1    12.475 ms    21.5 GB/s     10.8 GFLOPS  CPU  0.491 ms  err 1.2e-06
+  S W N=  8192 K=  8192 M=   2    13.007 ms    20.6 GB/s     20.6 GFLOPS  CPU  0.503 ms  err 1.7e-07
+  S B N=  8192 K=  8192 M=   2    12.677 ms    21.2 GB/s     21.2 GFLOPS  CPU  0.486 ms  err 1.6e-06
+  S W N=  8192 K=  8192 M=   4    13.747 ms    19.5 GB/s     39.1 GFLOPS  CPU  0.460 ms  err 2.0e-07
+  S B N=  8192 K=  8192 M=   4    12.788 ms    21.0 GB/s     42.0 GFLOPS  CPU  0.535 ms  err 1.2e-06
+  S W N=  8192 K=  8192 M=   8    14.253 ms    18.8 GB/s     75.3 GFLOPS  CPU  0.511 ms  err 2.2e-07
+  S B N=  8192 K=  8192 M=   8    23.596 ms    11.4 GB/s     45.5 GFLOPS  CPU  0.518 ms  err 1.4e-06
+  S W N=  8192 K=  8192 M=  16    18.007 ms    14.9 GB/s    119.3 GFLOPS  CPU  0.511 ms  err 2.3e-07
+  S B N=  8192 K=  8192 M=  16    46.863 ms     5.7 GB/s     45.8 GFLOPS  CPU  0.585 ms  err 1.2e-06
+  S W N=  8192 K=  8192 M=  32   106.093 ms     2.5 GB/s     40.5 GFLOPS  CPU  0.513 ms  err 4.1e-06
+  S B N=  8192 K=  8192 M=  32    58.139 ms     4.6 GB/s     73.9 GFLOPS  CPU  0.529 ms  err 3.5e-06
+  S W N=  8192 K=  8192 M=  64   117.383 ms     2.3 GB/s     73.2 GFLOPS  CPU  0.505 ms  err 3.5e-06
+  S B N=  8192 K=  8192 M=  64    69.644 ms     3.9 GB/s    123.3 GFLOPS  CPU  0.538 ms  err 3.9e-06
+  S W N=  8192 K=  8192 M= 128   142.942 ms     1.9 GB/s    120.2 GFLOPS  CPU  0.537 ms  err 4.0e-06
+  S B N=  8192 K=  8192 M= 128    95.318 ms     2.8 GB/s    180.2 GFLOPS  CPU  0.674 ms  err 3.5e-06
+  S W N=  8192 K=  8192 M= 256   195.328 ms     1.4 GB/s    175.9 GFLOPS  CPU  0.562 ms  err 4.1e-06
+  S B N=  8192 K=  8192 M= 256   147.126 ms     1.8 GB/s    233.5 GFLOPS  CPU  0.516 ms  err 4.3e-06
+  S W N= 11008 K=  4096 M=   1     8.191 ms    22.0 GB/s     11.0 GFLOPS  CPU  0.486 ms  err 1.7e-07
+  S B N= 11008 K=  4096 M=   1     8.479 ms    21.3 GB/s     10.6 GFLOPS  CPU  0.446 ms  err 8.6e-07
+  S W N= 11008 K=  4096 M=   2     8.897 ms    20.3 GB/s     20.3 GFLOPS  CPU  0.514 ms  err 1.9e-07
+  S B N= 11008 K=  4096 M=   2     8.488 ms    21.2 GB/s     21.2 GFLOPS  CPU  0.532 ms  err 9.4e-07
+  S W N= 11008 K=  4096 M=   4     8.891 ms    20.3 GB/s     40.6 GFLOPS  CPU  0.494 ms  err 2.0e-07
+  S B N= 11008 K=  4096 M=   4     8.482 ms    21.3 GB/s     42.5 GFLOPS  CPU  0.512 ms  err 1.1e-06
+  S W N= 11008 K=  4096 M=   8     9.105 ms    19.8 GB/s     79.2 GFLOPS  CPU  0.502 ms  err 1.9e-07
+  S B N= 11008 K=  4096 M=   8    16.328 ms    11.0 GB/s     44.2 GFLOPS  CPU  0.407 ms  err 1.1e-06
+  S W N= 11008 K=  4096 M=  16    10.700 ms    16.9 GB/s    134.8 GFLOPS  CPU  0.491 ms  err 2.0e-07
+  S B N= 11008 K=  4096 M=  16    31.884 ms     5.7 GB/s     45.3 GFLOPS  CPU  0.523 ms  err 1.0e-06
+  S W N= 11008 K=  4096 M=  32    39.162 ms     4.6 GB/s     73.7 GFLOPS  CPU  0.539 ms  err 2.7e-06
+  S B N= 11008 K=  4096 M=  32    33.316 ms     5.4 GB/s     86.6 GFLOPS  CPU  0.454 ms  err 2.5e-06
+  S W N= 11008 K=  4096 M=  64    47.378 ms     3.8 GB/s    121.8 GFLOPS  CPU  0.536 ms  err 3.0e-06
+  S B N= 11008 K=  4096 M=  64    41.415 ms     4.4 GB/s    139.4 GFLOPS  CPU  0.528 ms  err 3.4e-06
+  S W N= 11008 K=  4096 M= 128    64.418 ms     2.8 GB/s    179.2 GFLOPS  CPU  0.488 ms  err 2.6e-06
+  S B N= 11008 K=  4096 M= 128    58.446 ms     3.1 GB/s    197.5 GFLOPS  CPU  0.499 ms  err 2.7e-06
+  S W N= 11008 K=  4096 M= 256   106.073 ms     1.7 GB/s    217.6 GFLOPS  CPU  7.789 ms  err 2.5e-06
+  S B N= 11008 K=  4096 M= 256   100.321 ms     1.8 GB/s    230.1 GFLOPS  CPU  7.841 ms  err 2.9e-06
+  S W N=  4096 K= 11008 M=   1     8.168 ms    22.1 GB/s     11.0 GFLOPS  CPU  0.476 ms  err 1.3e-07
+  S B N=  4096 K= 11008 M=   1     8.533 ms    21.1 GB/s     10.6 GFLOPS  CPU  0.481 ms  err 8.0e-07
+  S W N=  4096 K= 11008 M=   2     8.725 ms    20.7 GB/s     20.7 GFLOPS  CPU  0.492 ms  err 1.7e-07
+  S B N=  4096 K= 11008 M=   2     8.638 ms    20.9 GB/s     20.9 GFLOPS  CPU  0.476 ms  err 6.5e-07
+  S W N=  4096 K= 11008 M=   4     9.086 ms    19.9 GB/s     39.7 GFLOPS  CPU  0.482 ms  err 1.7e-07
+  S B N=  4096 K= 11008 M=   4     8.807 ms    20.5 GB/s     41.0 GFLOPS  CPU  0.436 ms  err 7.8e-07
+  S W N=  4096 K= 11008 M=   8     9.710 ms    18.6 GB/s     74.3 GFLOPS  CPU  0.484 ms  err 1.8e-07
+  S B N=  4096 K= 11008 M=   8    15.026 ms    12.0 GB/s     48.0 GFLOPS  CPU  0.523 ms  err 9.2e-07
+  S W N=  4096 K= 11008 M=  16    12.119 ms    14.9 GB/s    119.1 GFLOPS  CPU  0.546 ms  err 2.0e-07
+  S B N=  4096 K= 11008 M=  16    28.959 ms     6.2 GB/s     49.8 GFLOPS  CPU  0.575 ms  err 7.5e-07
+  S W N=  4096 K= 11008 M=  32   112.734 ms     1.6 GB/s     25.6 GFLOPS  CPU  0.483 ms  err 3.9e-06
+  S B N=  4096 K= 11008 M=  32    29.398 ms     6.1 GB/s     98.2 GFLOPS  CPU  0.558 ms  err 4.2e-06
+  S W N=  4096 K= 11008 M=  64   120.932 ms     1.5 GB/s     47.7 GFLOPS  CPU  0.502 ms  err 4.6e-06
+  S B N=  4096 K= 11008 M=  64    37.445 ms     4.8 GB/s    154.1 GFLOPS  CPU  0.539 ms  err 4.0e-06
+  S W N=  4096 K= 11008 M= 128   137.898 ms     1.3 GB/s     83.7 GFLOPS  CPU  0.486 ms  err 4.1e-06
+  S B N=  4096 K= 11008 M= 128    54.579 ms     3.3 GB/s    211.5 GFLOPS  CPU  0.425 ms  err 4.7e-06
+  S W N=  4096 K= 11008 M= 256   172.491 ms     1.0 GB/s    133.8 GFLOPS  CPU  0.497 ms  err 4.5e-06
+  S B N=  4096 K= 11008 M= 256    89.266 ms     2.0 GB/s    258.6 GFLOPS  CPU  0.490 ms  err 4.1e-06
+  S W N=  5120 K=  1280 M=   1     1.751 ms    15.0 GB/s      7.5 GFLOPS  CPU  0.448 ms  err 1.6e-07
+  S B N=  5120 K=  1280 M=   1     1.853 ms    14.1 GB/s      7.1 GFLOPS  CPU  0.471 ms  err 2.4e-07
+  S W N=  5120 K=  1280 M=   2     1.844 ms    14.2 GB/s     14.2 GFLOPS  CPU  0.538 ms  err 1.5e-07
+  S B N=  5120 K=  1280 M=   2     1.997 ms    13.1 GB/s     13.1 GFLOPS  CPU  0.587 ms  err 3.1e-07
+  S W N=  5120 K=  1280 M=   4     1.613 ms    16.2 GB/s     32.5 GFLOPS  CPU  0.388 ms  err 1.2e-07
+  S B N=  5120 K=  1280 M=   4     1.816 ms    14.4 GB/s     28.9 GFLOPS  CPU  0.400 ms  err 2.9e-07
+  S W N=  5120 K=  1280 M=   8     1.870 ms    14.0 GB/s     56.1 GFLOPS  CPU  0.502 ms  err 1.9e-07
+  S B N=  5120 K=  1280 M=   8     2.020 ms    13.0 GB/s     51.9 GFLOPS  CPU  0.351 ms  err 2.4e-07
+  S W N=  5120 K=  1280 M=  16     2.356 ms    11.1 GB/s     89.0 GFLOPS  CPU  0.524 ms  err 1.7e-07
+  S B N=  5120 K=  1280 M=  16     3.183 ms     8.2 GB/s     65.9 GFLOPS  CPU  0.478 ms  err 2.8e-07
+  S W N=  5120 K=  1280 M=  32     6.551 ms     4.0 GB/s     64.0 GFLOPS  CPU  0.509 ms  err 1.8e-06
+  S B N=  5120 K=  1280 M=  32     5.026 ms     5.2 GB/s     83.4 GFLOPS  CPU  0.487 ms  err 1.2e-06
+  S W N=  5120 K=  1280 M=  64     7.783 ms     3.4 GB/s    107.8 GFLOPS  CPU  0.519 ms  err 1.6e-06
+  S B N=  5120 K=  1280 M=  64     6.191 ms     4.2 GB/s    135.5 GFLOPS  CPU  0.476 ms  err 1.5e-06
+  S W N=  5120 K=  1280 M= 128    10.180 ms     2.6 GB/s    164.8 GFLOPS  CPU  0.462 ms  err 1.3e-06
+  S B N=  5120 K=  1280 M= 128     8.632 ms     3.0 GB/s    194.4 GFLOPS  CPU  0.458 ms  err 1.4e-06
+  S W N=  5120 K=  1280 M= 256    15.182 ms     1.7 GB/s    221.0 GFLOPS  CPU  0.462 ms  err 1.9e-06
+  S B N=  5120 K=  1280 M= 256    13.620 ms     1.9 GB/s    246.4 GFLOPS  CPU  0.453 ms  err 1.6e-06
+  S W N= 51866 K=  1280 M=   1    11.054 ms    24.0 GB/s     12.0 GFLOPS  CPU  0.494 ms  err 2.0e-07
+  S B N= 51866 K=  1280 M=   1    14.095 ms    18.8 GB/s      9.4 GFLOPS  CPU  0.558 ms  err 1.2e-06
+  S W N= 51866 K=  1280 M=   2    10.827 ms    24.5 GB/s     24.5 GFLOPS  CPU  0.592 ms  err 1.6e-07
+  S B N= 51866 K=  1280 M=   2    14.368 ms    18.5 GB/s     18.5 GFLOPS  CPU  0.542 ms  err 1.4e-06
+  S W N= 51866 K=  1280 M=   4    10.818 ms    24.5 GB/s     49.1 GFLOPS  CPU  0.465 ms  err 1.5e-07
+  S B N= 51866 K=  1280 M=   4    14.632 ms    18.1 GB/s     36.3 GFLOPS  CPU  0.534 ms  err 1.4e-06
+  S W N= 51866 K=  1280 M=   8    11.431 ms    23.2 GB/s     92.9 GFLOPS  CPU  0.508 ms  err 2.3e-07
+  S B N= 51866 K=  1280 M=   8    28.565 ms     9.3 GB/s     37.2 GFLOPS  CPU  0.528 ms  err 1.8e-06
+  S W N= 51866 K=  1280 M=  16    15.992 ms    16.6 GB/s    132.8 GFLOPS  CPU  0.501 ms  err 1.8e-07
+  S B N= 51866 K=  1280 M=  16    57.290 ms     4.6 GB/s     37.1 GFLOPS  CPU  0.526 ms  err 1.8e-06
+  S W N= 51866 K=  1280 M=  32    58.240 ms     4.6 GB/s     73.0 GFLOPS  CPU  0.550 ms  err 1.9e-06
+  S B N= 51866 K=  1280 M=  32    42.495 ms     6.2 GB/s    100.0 GFLOPS  CPU  0.491 ms  err 1.7e-06
+  S W N= 51866 K=  1280 M=  64    71.658 ms     3.7 GB/s    118.6 GFLOPS  CPU  0.446 ms  err 1.5e-06
+  S B N= 51866 K=  1280 M=  64    55.922 ms     4.7 GB/s    152.0 GFLOPS  CPU  0.553 ms  err 1.6e-06
+  S W N= 51866 K=  1280 M= 128    98.783 ms     2.7 GB/s    172.0 GFLOPS  CPU  0.493 ms  err 1.5e-06
+  S B N= 51866 K=  1280 M= 128    83.425 ms     3.2 GB/s    203.7 GFLOPS  CPU  0.503 ms  err 1.7e-06
+  S W N= 51866 K=  1280 M= 256   184.019 ms     1.4 GB/s    184.7 GFLOPS  CPU 30.400 ms  err 1.7e-06
+  S B N= 51866 K=  1280 M= 256   171.598 ms     1.5 GB/s    198.1 GFLOPS  CPU 33.753 ms  err 1.8e-06
+
+## 3. DGEMM, gen9blas.empty arrays, best of 5 after a warm-up, 2 rounds (one-off script; error from rows 0-3 against NumPy) [MEAS]
+  round 1  dgemm n= 2048    50.5 GFLOPS    339.9 ms  rel err rows 0-3 3.4e-15
+  round 1  dgemm n= 4096    50.6 GFLOPS   2716.6 ms  rel err rows 0-3 3.7e-15
+  round 2  dgemm n= 2048    50.7 GFLOPS    339.1 ms  rel err rows 0-3 3.3e-15
+  round 2  dgemm n= 4096    50.6 GFLOPS   2717.0 ms  rel err rows 0-3 4.1e-15
+
+## 4. HGEMM n = 2048 in a loop for 600 s; every 5 s: GFLOPS over the interval, gt_act_freq, package temperature [MEAS]
+     t[s]   GFLOPS  gpu_MHz  temp_C
+        5    606.5     1000    46.0
+       10    608.5     1000    46.0
+       15    607.9     1000    47.0
+       20    607.8     1000    48.0
+       25    607.3     1050    47.0
+       30    608.1     1050    47.0
+       35    607.8     1000    48.0
+       40    608.3     1000    49.0
+       45    606.9     1000    49.0
+       50    608.7     1000    49.0
+       55    608.1     1000    48.0
+       60    608.3     1000    49.0
+       65    607.9     1000    50.0
+       70    608.7     1050    49.0
+       75    607.2     1050    50.0
+       80    608.8     1000    50.0
+       85    608.0     1000    50.0
+       90    607.7     1000    51.0
+       95    607.7     1000    50.0
+      100    608.1     1000    51.0
+      105    607.7     1000    52.0
+      110    608.0     1050    50.0
+      115    608.6     1000    50.0
+      120    608.1     1000    50.0
+      125    607.0     1000    51.0
+      130    608.2     1000    51.0
+      135    607.4     1000    51.0
+      140    608.0     1000    51.0
+      145    608.3     1000    51.0
+      150    608.5     1000    51.0
+      155    608.3     1000    51.0
+      160    606.6     1000    51.0
+      165    608.1     1000    51.0
+      170    607.9     1000    51.0
+      175    608.6     1000    51.0
+      180    608.0     1000    52.0
+      185    607.3     1000    52.0
+      190    608.7     1000    52.0
+      195    607.7     1000    52.0
+      200    608.2     1000    52.0
+      205    608.1     1000    52.0
+      210    607.7     1000    52.0
+      215    608.1     1000    53.0
+      220    607.7     1000    52.0
+      225    607.0     1000    53.0
+      230    608.0     1000    52.0
+      235    607.8     1000    53.0
+      241    607.3     1000    53.0
+      246    608.5     1000    53.0
+      251    607.9     1050    52.0
+      256    608.4     1000    53.0
+      261    607.7     1000    53.0
+      266    606.6     1000    53.0
+      271    608.7     1000    53.0
+      276    607.8     1000    53.0
+      281    607.6     1000    54.0
+      286    608.4     1000    53.0
+      291    607.9     1000    53.0
+      296    607.1     1000    53.0
+      301    608.7     1000    53.0
+      306    606.8     1000    53.0
+      311    607.8     1000    53.0
+      316    607.9     1000    53.0
+      321    607.4     1000    53.0
+      326    608.7     1000    54.0
+      331    607.8     1000    54.0
+      336    607.4     1000    54.0
+      341    607.2     1000    53.0
+      346    608.2     1000    55.0
+      351    607.6     1000    54.0
+      356    607.3     1000    54.0
+      361    607.6     1000    54.0
+      366    607.8     1000    54.0
+      371    607.7     1000    54.0
+      376    607.7     1000    55.0
+      381    607.6     1000    54.0
+      386    607.2     1000    54.0
+      391    607.8     1000    55.0
+      396    607.4     1000    55.0
+      401    607.9     1000    54.0
+      406    608.0     1000    55.0
+      411    607.8     1000    54.0
+      416    608.0     1000    55.0
+      421    608.4     1000    55.0
+      426    607.1     1000    54.0
+      431    608.4     1000    55.0
+      436    607.5     1000    55.0
+      441    607.5     1000    55.0
+      446    608.4     1000    55.0
+      451    608.0     1000    55.0
+      456    608.1     1000    55.0
+      461    608.0     1000    55.0
+      466    608.1     1000    55.0
+      471    606.9     1000    55.0
+      476    607.5     1000    55.0
+      481    607.9     1000    55.0
+      486    607.6     1000    55.0
+      491    608.1     1000    55.0
+      496    608.5     1050    54.0
+      501    607.8     1050    54.0
+      506    607.6     1000    55.0
+      511    608.4     1000    55.0
+      516    607.0     1000    55.0
+      521    608.3     1000    55.0
+      526    607.9     1050    54.0
+      531    607.6     1000    55.0
+      536    607.6     1000    55.0
+      541    606.8     1000    55.0
+      546    607.3     1000    55.0
+      551    607.6     1050    54.0
+      556    607.4     1000    55.0
+      561    608.4     1000    55.0
+      566    607.0     1000    56.0
+      571    608.6     1000    56.0
+      576    607.4     1000    55.0
+      581    607.8     1000    56.0
+      586    608.1     1000    56.0
+      591    607.9     1000    56.0
+      596    607.8     1000    56.0
+      601    607.8     1000    56.0
+  rel err rows 0-1: 1.1e-02

@@ -1,0 +1,91 @@
+# userptr and fixed call cost on the HD 530 (GPU without IOMMU), 2026-11-12
+# Machine: Intel HD Graphics 530 (Skylake-S GT2, Gen9, PCI 0x1912, 24 EU), Core i5-6500 (4 cores), DDR4-2133 2 channels (2 x 8 GB,
+#   34.1 GB/s theoretical), desktop without a monitor, Ubuntu 26.04.1, Linux 7.0.0-34-generic, i915, Python 3.14.4, NumPy 2.3.5,
+#   OpenBLAS 0.3.32. Code at fb1e1e2; lib/kernels.c built on the UHD 620 (-device whl), md5 02e260eb5c20ceabb31ea0335da2255e.
+# IOMMU: enabled for other devices (DMA-FQ), NOT for the GPU (no graphics DMAR unit; 00:02.0 in no IOMMU group). The UHD 620
+#   laptop has the GPU behind the IOMMU (DMA-FQ). GPU under load: 1000 MHz (max 1050). CPU governor powersave, EPP balance_performance.
+# The machine runs its own services (about 30% of one core in total); every run at nice 19 / ionice idle, OPENBLAS_NUM_THREADS=1.
+#   No display on this GPU. First file for this machine: results/skylake-hd530-2026-11-12.txt.
+
+## Summary
+# - Page pinning (userptr execbuf, 64 MB in + 64 MB out = 32 768 pages, PHASES=1): first call 14.7-15.7 ms CPU (~0.46 us/page,
+#   like the UHD 620), following calls 2.9-3.7 ms (~0.09-0.11 us/page; one outlier 9.2 ms) [MEAS]. On the UHD 620 (GPU behind
+#   the IOMMU) all four calls were 14-27 ms (~0.45 us/page, results/userptr-2026-11-12.txt) [MEAS]. The laptop file does not
+#   separate the first call from the rest, so the comparison of warm calls is the one that holds: about 4-5x cheaper here.
+#   Attribution to the IOMMU (dma_map per page) is a hypothesis: the CPUs differ too, but memcpy (copy column below) is
+#   slower here than on the laptop, so a faster CPU does not explain it. Why the first call costs the same here is unknown.
+# - Library: "new" cases (pages pinned again) use 0.6x the CPU of the laptop: sgemm n=4096 new 2.83 vs 4.52 ms, axpy n=1e7
+#   new 2.29 vs 4.11 ms [MEAS]. userptr vs copy ratios are otherwise like on the laptop.
+# - Fixed call cost (axpy n=4096 from C): 59-64 us wall / 26-30 us CPU; execbuf 12-14 us, GEM_WAIT 40 us wall / 6-7 us CPU,
+#   command building 5-6 us, userptr lookup 0.5 us [MEAS]. Laptop on mains: 48 us / 14-17 us CPU, execbuf 8 us, GEM_WAIT
+#   35 / 3.9 us, building 2.4 us (results/overhead-2026-11-12.txt) -- this desktop CPU at powersave is slower per call;
+#   not investigated (the governor/C-states differ; no root here).
+
+## 1. Fixed call cost: KCL_PHASES=1 bench/overhead 4096 5000 [plain|usm], 2 rounds [MEAS]
+  == round 1 plain
+  kcl phase EnqueueNDRange         5050 x  wall     6.02 us  CPU     6.03 us (per call)
+  kcl phase execbuf (ioctl)        5050 x  wall    13.55 us  CPU    13.60 us (per call)
+  kcl phase GEM_WAIT (ioctl)       5050 x  wall    41.01 us  CPU     6.78 us (per call)
+  kcl phase userptr               10100 x  wall     0.54 us  CPU     0.52 us (per call)
+  kcl phase objects per execbuf: 6.0
+  axpy n=4096 plain: 63.5 µs wall, 29.6 µs CPU per call
+  == round 1 usm
+  kcl phase EnqueueNDRange         5050 x  wall     5.03 us  CPU     5.03 us (per call)
+  kcl phase execbuf (ioctl)        5050 x  wall    13.21 us  CPU    13.25 us (per call)
+  kcl phase GEM_WAIT (ioctl)       5050 x  wall    40.34 us  CPU     6.44 us (per call)
+  kcl phase objects per execbuf: 7.0
+  axpy n=4096 usm: 60.4 µs wall, 26.7 µs CPU per call
+  == round 2 plain
+  kcl phase EnqueueNDRange         5050 x  wall     5.04 us  CPU     5.04 us (per call)
+  kcl phase execbuf (ioctl)        5050 x  wall    12.36 us  CPU    12.42 us (per call)
+  kcl phase GEM_WAIT (ioctl)       5050 x  wall    40.08 us  CPU     6.48 us (per call)
+  kcl phase userptr               10100 x  wall     0.48 us  CPU     0.48 us (per call)
+  kcl phase objects per execbuf: 6.0
+  axpy n=4096 plain: 61.3 µs wall, 27.9 µs CPU per call
+  == round 2 usm
+  kcl phase EnqueueNDRange         5050 x  wall     5.02 us  CPU     5.03 us (per call)
+  kcl phase execbuf (ioctl)        5050 x  wall    12.72 us  CPU    12.76 us (per call)
+  kcl phase GEM_WAIT (ioctl)       5050 x  wall    39.59 us  CPU     6.17 us (per call)
+  kcl phase objects per execbuf: 7.0
+  axpy n=4096 usm: 59.4 µs wall, 26.0 µs CPU per call
+
+## 2. Library: sh bench/compare/userptr.sh (3 alternating rounds, separate processes), medians [MEAS]
+  case                     |    copy: time / CPU [ms] |  userptr: time / CPU [ms] | time  | CPU
+  sgemm n=256 same         |      0.573 /     0.177   |      0.566 /     0.160    | 0.99× | 0.90×
+  sgemm n=1024 same        |      9.835 /     2.049   |      8.223 /     0.491    | 0.84× | 0.24×
+  sgemm n=2048 same        |     61.935 /     7.028   |     55.503 /     0.490    | 0.90× | 0.07×
+  sgemm n=4096 same        |    452.375 /    27.360   |    426.610 /     0.556    | 0.94× | 0.02×
+  hgemm n=2048 same        |     31.633 /     3.713   |     28.719 /     0.497    | 0.91× | 0.13×
+  sgemm n=1024 new         |      9.792 /     1.252   |      9.044 /     0.513    | 0.92× | 0.41×
+  sgemm n=4096 new         |    440.241 /    12.056   |    430.831 /     2.834    | 0.98× | 0.24×
+  axpy n=1e+06 same        |      3.419 /     2.653   |      0.793 /     0.254    | 0.23× | 0.10×
+  dot n=1e+06 same         |      1.519 /     0.893   |      0.724 /     0.257    | 0.48× | 0.29×
+  axpy n=1e+07 same        |     15.696 /    10.116   |      5.671 /     0.269    | 0.36× | 0.03×
+  dot n=1e+07 same         |     10.545 /     6.891   |      4.058 /     0.263    | 0.38× | 0.04×
+  axpy n=1e+07 new         |     16.758 /    10.845   |      8.120 /     2.287    | 0.48× | 0.21×
+  gemv 4096 same           |      8.846 /     5.661   |      3.621 /     0.155    | 0.41× | 0.03×
+
+## 3. Microbenchmark: experiments/no-neo/userptr (default sizes; median) [MEAS]
+  I915_PARAM_HAS_USERPTR_PROBE: yes
+  I915_USERPTR_READ_ONLY: accepted
+  I915_USERPTR_PROBE (valid address): accepted
+  I915_USERPTR_PROBE (bad address 0x1000): Bad address
+  
+         S | copy: time / CPU [us]      | up per call                | up created once            | kernel only  | chk.
+  0.0625 MB |         55 / 29            |         91 / 55            |         53 / 13            |         52   | OK (h%4096 = 864)
+       1 MB |        409 / 187           |        349 / 122           |        218 / 12            |        218   | OK (h%4096 = 16)
+       4 MB |       1514 / 729           |       1049 / 374           |        728 / 47            |        722   | OK (h%4096 = 16)
+      16 MB |       5651 / 3956          |       4420 / 2104          |       2588 / 61            |       2538   | OK (h%4096 = 16)
+      64 MB |      22146 / 16880         |      17812 / 7638          |       9715 / 108           |       9666   | OK (h%4096 = 16)
+
+## 4. Phases: PHASES=1 experiments/no-neo/userptr 64 (4 calls per run: userptr create, execbuf = pinning, wait, close; us CPU), 2 runs [MEAS]
+  == round 1
+  PHASES: create 13, execbuf 15731 (wall 15779), wait 266 (wall 11410), close 11 us CPU
+  PHASES: create 5, execbuf 3529 (wall 3535), wait 21 (wall 10492), close 12 us CPU
+  PHASES: create 5, execbuf 3721 (wall 3726), wait 153 (wall 10362), close 21 us CPU
+  PHASES: create 10, execbuf 9204 (wall 9215), wait 217 (wall 9955), close 40 us CPU
+  == round 2
+  PHASES: create 13, execbuf 14698 (wall 14719), wait 298 (wall 10763), close 11 us CPU
+  PHASES: create 4, execbuf 2918 (wall 2923), wait 20 (wall 10064), close 14 us CPU
+  PHASES: create 4, execbuf 2920 (wall 2925), wait 22 (wall 9991), close 14 us CPU
+  PHASES: create 5, execbuf 2963 (wall 2968), wait 20 (wall 10359), close 15 us CPU

@@ -106,7 +106,10 @@ to OpenBLAS at n = 1024 and in FP64. GEMM kernel against oneDNN 3.6: +7-14% FP32
     time; at the default 1100 MHz a memory-bound kernel keeps the GPU at 100% busy and loses energy efficiency. The library does not
     change the frequency.
 14. Boot parameter `intel_iommu=igfx_off`: page pinning without the IOMMU might lower the userptr cost; its effect on GPU
-    memory bandwidth is not measured.
+    memory bandwidth is not measured. Indirect evidence from the HD 530 machine, whose GPU is not behind the IOMMU: pinning
+    32 768 pages costs ~0.1 us/page after the first call (first call ~0.46 us/page, like the UHD 620 in every call), and the
+    library's re-pinning cases use 0.6x the CPU (`results/userptr-overhead-hd530-2026-11-12.txt`). Different CPU and memory,
+    so the IOMMU share is a hypothesis until measured on the UHD 620 itself with `igfx_off`.
 
 ### Preemption in kcl
 
@@ -126,6 +129,11 @@ about the same fraction as the UHD 620 reaches of its 1100 MHz peak [MEAS] (`res
 threads in MEDIA_VFE_STATE and for private memory) match this part. Still open: GT1/GT3 parts (other EU counts would need
 those constants from the device), Kaby Lake / Coffee Lake GT2 (expected to behave like the two tested parts, not tried),
 `ocloc -device skl` kernels (not needed so far), and the NEO builds on Skylake (no NEO on the test machine).
+
+Further measurements on the same machine (results/level12-hd530-2026-11-12.txt, results/level3-extra-hd530-2026-11-12.txt):
+memory-bound routines (levels 1-2, skinny GEMM) reach 0.78-0.93 of the UHD 620, with DDR4-2133 against the laptop's
+37.5 GB/s limit (theoretical ratio 0.91); DGEMM 50.6 GFLOPS (0.90-0.94); batched GEMM 0.70-0.89, lowest for the smallest
+matrices; ten minutes of HGEMM n = 2048 at a constant 607-609 GFLOPS and 1000 MHz, no throttling [MEAS].
 
 ### Model gaps
 

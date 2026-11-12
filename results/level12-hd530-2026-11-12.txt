@@ -1,0 +1,88 @@
+# Levels 1-2 on the HD 530: python3 bench/l12_gen9blas.py float32 / float16, 2 rounds, 2026-11-12
+# Machine: Intel HD Graphics 530 (Skylake-S GT2, Gen9, PCI 0x1912, 24 EU), Core i5-6500 (4 cores), DDR4-2133 2 channels (2 x 8 GB,
+#   34.1 GB/s theoretical), desktop without a monitor, Ubuntu 26.04.1, Linux 7.0.0-34-generic, i915, Python 3.14.4, NumPy 2.3.5,
+#   OpenBLAS 0.3.32. Code at fb1e1e2; lib/kernels.c built on the UHD 620 (-device whl), md5 02e260eb5c20ceabb31ea0335da2255e.
+# IOMMU: enabled for other devices (DMA-FQ), NOT for the GPU (no graphics DMAR unit; 00:02.0 in no IOMMU group). The UHD 620
+#   laptop has the GPU behind the IOMMU (DMA-FQ). GPU under load: 1000 MHz (max 1050). CPU governor powersave, EPP balance_performance.
+# The machine runs its own services (about 30% of one core in total); every run at nice 19 / ionice idle, OPENBLAS_NUM_THREADS=1.
+#   No display on this GPU. First file for this machine: results/skylake-hd530-2026-11-12.txt.
+# NOTE: OPENBLAS_NUM_THREADS=1 here, so the "CPU (NumPy)" column is single-threaded (the laptop file used all threads).
+
+## Summary
+# GPU usm columns are 0.82-0.93 of the UHD 620 (results/level12-2026-11-12.txt): FP32 gemv N 23.2 vs 28.4 GB/s (0.82),
+# axpy 21.9 vs 24.0 (0.91), dot 23.8 vs 26.8 (0.89), symv 40.6 vs 47.3 (0.86), trsv N 9.5 vs 10.3 (0.92) [MEAS].
+# Theoretical RAM ratio: 34.1 / 37.5 GB/s = 0.91. The streaming kernels (gemv, trmv, symv) fall a little below it; the cause
+# (DRAM timings, the GPU clock 1000 vs 1100 MHz, or something else) is not measured [HYP]. Round 2 repeats round 1 within 5%
+# for 25 of 28 cases; the largest differences: FP16 trmv N 9.5%, FP16 axpy 6.5%, FP32 trmv N 5.4%.
+  == round 1 float32
+  == float32: vectors n = 16777216, matrices 8192 x 8192
+                          GPU usm           GPU copy        CPU (NumPy)
+    axpy          21.9 GB/s    5%    21.3 GB/s    3%     9.8 GB/s  100%
+    dot           23.8 GB/s    3%    20.5 GB/s    2%    17.4 GB/s  100%
+    nrm2          23.2 GB/s    4%    20.0 GB/s    4%    19.7 GB/s  100%
+    iamax         23.2 GB/s    4%    20.0 GB/s    3%     4.8 GB/s  100%
+    gemv N        23.2 GB/s    2%    20.2 GB/s    1%    19.9 GB/s  100%
+    gemv T        23.4 GB/s    2%    20.1 GB/s    2%    18.5 GB/s  100%
+    ger           16.1 GB/s    1%    16.1 GB/s    1%     5.0 GB/s  100%
+    symv          40.6 GB/s    2%    34.9 GB/s    2%    38.8 GB/s  100%
+    trmv N        20.3 GB/s    2%    17.8 GB/s    2%    17.6 GB/s  100%
+    trmv T        20.1 GB/s    3%    17.5 GB/s    2%    18.5 GB/s  100%
+    trsv N         9.5 GB/s    2%     8.2 GB/s    2%    16.6 GB/s  100%
+    trsv T        10.2 GB/s    4%    10.1 GB/s    2%    18.9 GB/s  100%
+    syr           12.1 GB/s    1%    11.8 GB/s    1%    23.9 GB/s  100%
+    syr2           8.7 GB/s    1%     8.7 GB/s    1%    17.8 GB/s  100%
+  == round 1 float16
+  /usr/lib/python3/dist-packages/numpy/linalg/_linalg.py:2792: RuntimeWarning: overflow encountered in dot
+    sqnorm = x.dot(x)
+  == float16: vectors n = 16777216, matrices 8192 x 8192
+                          GPU usm           GPU copy        CPU (NumPy)
+    axpy          18.5 GB/s    8%    18.8 GB/s    4%     0.3 GB/s  100%
+    dot           18.7 GB/s    5%    16.4 GB/s    4%     0.5 GB/s  100%
+    nrm2          16.1 GB/s    6%    14.9 GB/s    5%     0.7 GB/s  100%
+    iamax         17.4 GB/s    8%    14.4 GB/s    6%     1.0 GB/s  100%
+    gemv N        22.9 GB/s    2%    23.9 GB/s    3%     0.3 GB/s  100%
+    gemv T        23.1 GB/s    2%    23.1 GB/s    3%     0.1 GB/s  100%
+    ger            7.5 GB/s    1%     7.6 GB/s    1%     0.1 GB/s  100%
+    symv          25.2 GB/s    2%    24.6 GB/s    3%                  -
+    trmv N        14.8 GB/s    3%    13.8 GB/s    4%                  -
+    trmv T        10.5 GB/s    2%    10.8 GB/s    2%                  -
+    trsv N         5.1 GB/s    3%     4.7 GB/s    3%                  -
+    trsv T         5.3 GB/s    3%     5.3 GB/s    2%                  -
+    syr            5.8 GB/s    1%     5.8 GB/s    1%                  -
+    syr2           4.1 GB/s    1%     4.1 GB/s    1%                  -
+  == round 2 float32
+  == float32: vectors n = 16777216, matrices 8192 x 8192
+                          GPU usm           GPU copy        CPU (NumPy)
+    axpy          21.9 GB/s    5%    21.6 GB/s    4%    10.2 GB/s  100%
+    dot           24.6 GB/s    3%    20.9 GB/s    2%    17.4 GB/s  100%
+    nrm2          23.5 GB/s    4%    20.3 GB/s    4%    19.6 GB/s  100%
+    iamax         23.1 GB/s    4%    19.9 GB/s    4%     4.7 GB/s  100%
+    gemv N        23.1 GB/s    2%    20.1 GB/s    2%    20.4 GB/s  100%
+    gemv T        23.6 GB/s    2%    20.5 GB/s    2%    18.3 GB/s  100%
+    ger           16.1 GB/s    1%    16.1 GB/s    1%     4.9 GB/s  100%
+    symv          39.6 GB/s    2%    34.8 GB/s    3%    38.7 GB/s  100%
+    trmv N        21.4 GB/s    3%    18.4 GB/s    3%    17.5 GB/s  100%
+    trmv T        20.1 GB/s    4%    18.1 GB/s    3%    18.9 GB/s  100%
+    trsv N         9.4 GB/s    4%     8.5 GB/s    3%    17.2 GB/s  100%
+    trsv T        10.2 GB/s    4%    10.2 GB/s    3%    19.3 GB/s  100%
+    syr           12.1 GB/s    1%    11.7 GB/s    1%    23.9 GB/s  100%
+    syr2           8.7 GB/s    1%     8.7 GB/s    1%    18.4 GB/s  100%
+  == round 2 float16
+  /usr/lib/python3/dist-packages/numpy/linalg/_linalg.py:2792: RuntimeWarning: overflow encountered in dot
+    sqnorm = x.dot(x)
+  == float16: vectors n = 16777216, matrices 8192 x 8192
+                          GPU usm           GPU copy        CPU (NumPy)
+    axpy          19.7 GB/s    9%    18.5 GB/s    3%     0.3 GB/s  100%
+    dot           17.7 GB/s    5%    15.7 GB/s    4%     0.5 GB/s  100%
+    nrm2          16.8 GB/s    6%    16.0 GB/s    8%     0.7 GB/s  100%
+    iamax         17.3 GB/s    7%    14.7 GB/s    6%     1.0 GB/s  100%
+    gemv N        23.3 GB/s    5%    22.8 GB/s    2%     0.3 GB/s  100%
+    gemv T        23.8 GB/s    5%    23.1 GB/s    3%     0.1 GB/s  100%
+    ger            7.6 GB/s    1%     7.6 GB/s    1%     0.1 GB/s  100%
+    symv          25.7 GB/s    2%    25.4 GB/s    4%                  -
+    trmv N        16.2 GB/s    3%    13.2 GB/s    4%                  -
+    trmv T        10.5 GB/s    2%    11.3 GB/s    2%                  -
+    trsv N         5.1 GB/s    4%     4.7 GB/s    4%                  -
+    trsv T         5.3 GB/s    3%     5.3 GB/s    2%                  -
+    syr            5.8 GB/s    1%     5.8 GB/s    1%                  -
+    syr2           4.1 GB/s    1%     4.1 GB/s    1%                  -

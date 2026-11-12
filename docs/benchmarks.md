@@ -70,6 +70,9 @@ and `make -C bench optional` (`gemm_clblast`, needs CLBlast and OpenBLAS); libra
 | `batched-gemm-2026-11-12.txt`, `gemm-sizes-2026-11-12.txt` | Batched GEMM; whole-call GEMM FP16 / FP16 accurate / FP32 versus size | `python3 bench/batched_gemm.py`; `python3 bench/gemm_sizes.py` |
 | `call-overhead-python-2026-11-12.txt` | Fixed cost of a call from Python (wrapper vs library) | `python3 bench/call_overhead.py 4096 2000 5` |
 | `no-neo-level3-2026-11-11.txt` | Level 3 without NEO (`kcl`) vs the NEO variant, with CPU load | `OPENBLAS_NUM_THREADS=1 python3 bench/level3_cpu.py 1024 2048 4096` once with the default library and once with `GEN9BLAS_LIB=lib/libgen9blas_neo.so` (build with `make -C lib libgen9blas_neo.so`) |
+| `skylake-hd530-2026-11-12.txt` | Second Gen9 part (HD 530, Skylake GT2) with the whl kernels: `make -C lib check`, GEMM vs size, level 3 | `lib/kernels.c` copied from a machine with `ocloc`; `make -C lib check`, `python3 bench/gemm_sizes.py`, `python3 bench/level3_cpu.py` (nice 19, `OPENBLAS_NUM_THREADS=1`) |
+| `userptr-overhead-hd530-2026-11-12.txt` | HD 530 (GPU without IOMMU): fixed call cost, userptr vs copy, page pinning by phase | `KCL_PHASES=1 bench/overhead 4096 5000 [usm]`; `sh bench/compare/userptr.sh`; `experiments/no-neo/userptr` and `PHASES=1 experiments/no-neo/userptr 64` |
+| `level12-hd530-2026-11-12.txt`, `level3-extra-hd530-2026-11-12.txt` | HD 530: levels 1-2; batched and skinny GEMM, DGEMM, 10-minute HGEMM run | `python3 bench/l12_gen9blas.py float32\|float16`; `bench/batched_gemm.py`; `bench/skinny_gemm.py usm`; DGEMM and the 10-minute loop: short one-off scripts described in the file headers |
 
 Other measurement programs in `bench/`: `hgemm.c` / `sgemm.c` (single GEMM kernels; `hgemm` reads the environment variables `PACK`, `ND1`, `LY`, `REPS`,
 `TRACE`), `packing.c` (packing kernels), `l12.c`, `l12_gen9blas.py`, `l12_cpu.py`, `level12_speed.py` (levels 1–2 bandwidth),
