@@ -114,8 +114,18 @@ kcl does not set up mid-thread preemption (system routine / SIP kernel and conte
 are therefore split into bands below 100 ms ([api.md](api.md), "Long launches"), and only GEMM kernels are covered: any other
 kernel that one day runs for hundreds of ms would need the same treatment. Setting up mid-thread preemption would remove the
 limit and the extra launches; it also needs a check of what NEO 24.35 actually enables on Gen9 (the reason NEO survives the same
-DGEMM is a hypothesis so far). Another open item: running on other Gen9 parts (Skylake, Kaby Lake, Coffee Lake; `ocloc -device
-skl|kbl|cfl` instead of `whl`), not tried yet.
+DGEMM is a hypothesis so far).
+
+### Other Gen9 parts
+
+HD Graphics 530 (Skylake-S GT2, 24 EU, PCI 0x1912; Linux 7.0.0-34, i915, NEO-free build) runs the Gen9.5 kernels
+(`-device whl`, `lib/kernels.c` built on the UHD 620) without any change: `make -C lib check` passes all 10 suites, including
+the long-launch test, and no GPU reset was reported [MEAS]. GEMM at n = 4096: FP16 638, FP16 accurate 566, FP32 323 GFLOPS,
+0.89-0.94 of the UHD 620; under load the GPU ran at 1000 MHz (its maximum is 1050), so FP32 / FP16 reach 84% / 83% of peak,
+about the same fraction as the UHD 620 reaches of its 1100 MHz peak [MEAS] (`results/skylake-hd530-2026-11-12.txt`). kcl's fixed GT2 sizes (24 EU x 7
+threads in MEDIA_VFE_STATE and for private memory) match this part. Still open: GT1/GT3 parts (other EU counts would need
+those constants from the device), Kaby Lake / Coffee Lake GT2 (expected to behave like the two tested parts, not tried),
+`ocloc -device skl` kernels (not needed so far), and the NEO builds on Skylake (no NEO on the test machine).
 
 ### Model gaps
 

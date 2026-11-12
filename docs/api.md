@@ -290,7 +290,9 @@ All variables are read once per process (on first use). "Value" lists what is ac
 
 ## Building
 
-Requirements: Linux with the i915 driver and access to `/dev/dri/renderD128`; GCC; Python 3 with NumPy (tests, wrapper);
+Requirements: Linux with the i915 driver and access to `/dev/dri/renderD128`; GCC; the OpenCL headers (`CL/cl.h`,
+`CL/cl_ext.h`; Debian/Ubuntu package `opencl-c-headers`), needed by every build because `kcl.h` and `gen9blas.c` use the
+OpenCL types; Python 3 with NumPy (tests, wrapper);
 `ocloc` from Intel's compute-runtime packages (the kernels are compiled at build time); the Mesa header `lib/third_party/mesa/gen9_pack.h`
 is in the repository. OpenBLAS (`libopenblas.so.0`) is needed at run time for `libgen9blas_blas.so`. The NEO builds additionally
 need `libOpenCL` and a working NEO. The assembly GEMM binaries (`bench/gen_h.bin`, `bench/gen_hd.bin`, `bench/gen_s.bin`) are
@@ -298,7 +300,7 @@ tracked; they are rebuilt without a GPU by `make -C asm`.
 
 ```
 make -C lib           # kernels.c (from bench/*.cl and bench/gen_*.bin through ocloc), libgen9blas.so, libgen9blas_blas.so, *_neo.so
-make -C lib check     # builds, then runs all 8 test suites in sequence and stops at the first failure
+make -C lib check     # builds, then runs all 10 test suites in sequence and stops at the first failure
 make -C lib test      # only test_basic.py
 make -C lib clean
 ```

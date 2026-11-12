@@ -19,7 +19,10 @@ force a reboot. Save your work first, do not run experiments on a machine you ca
 
 ## Tested configuration
 
-All results in this repository come from one machine; nothing else has been tested.
+All results in this repository come from one machine, below, unless a result file says otherwise. A second Gen9 part,
+Intel HD Graphics 530 (Skylake-S GT2, Core i5-6500, Linux 7.0.0-34, Ubuntu 26.04), runs the same `-device whl` kernels
+unchanged: all 10 test suites pass and GEMM speed is 0.89-0.94 of the UHD 620, about the GPU clock ratio
+(1000 vs 1100 MHz under load); see `results/skylake-hd530-2026-11-12.txt`.
 
 | Item | Value |
 |---|---|
@@ -98,13 +101,14 @@ are in `results/compare-l3-power-2026-11-11.txt` and `results/compare-onednn-202
 ## Quick start
 
 Requirements: Linux with `i915` and read/write access to `/dev/dri/renderD128` (usually the `render` group), `gcc`,
+the OpenCL headers (`CL/cl.h`; Debian/Ubuntu package `opencl-c-headers`, also for the NEO-free build),
 `ocloc` 24.35 (generates the kernels), Python 3 + NumPy. OpenBLAS (`libopenblas.so.0`) is needed for the BLAS layer.
 
 ```sh
 sh scripts/fetch_docs.sh                         # optional: reference documents/sources into third_party/ (not needed to build)
 make -C asm check                                # optional, no GPU: rebuild the 6 assembly binaries, compare with the tracked ones
 make -C lib libgen9blas.so libgen9blas_blas.so   # NEO-free libraries (plain `make -C lib` also builds the *_neo.so variants, needs libOpenCL)
-make -C lib check                                # runs all 8 test suites on the GPU
+make -C lib check                                # runs all 10 test suites on the GPU
 ```
 
 Python (NumPy arrays, zero-copy through `userptr`):
@@ -141,8 +145,8 @@ Reproducing the measurements: [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Limitations
 
-- One GPU model, one machine, one driver stack (see "Tested configuration"). Other Gen9/Gen9.5 parts may work but are
-  untested; newer generations and the `xe` driver are not supported.
+- Tested on two GPUs: the UHD 620 (all measurements) and an HD 530 (Skylake, tests and level-3 speed; see "Tested
+  configuration"). Other Gen9/Gen9.5 parts may work but are untested; newer generations and the `xe` driver are not supported.
 - `kcl` is a subset of OpenCL, just enough for the kernels of this library. It does not configure scratch space: a
   kernel that spills registers would compute wrong results (the kernel generator rejects the cases found so far). It
   does not export `cl*` symbols, and it uses a single device (the first render node).

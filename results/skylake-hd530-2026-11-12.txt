@@ -1,0 +1,218 @@
+# Second Gen9 part: Intel HD Graphics 530 (Skylake-S GT2, Gen9, PCI 0x1912), the Gen9.5 (-device whl) kernels unchanged, 2026-11-12
+# Machine: Core i5-6500 (4 cores), desktop without a monitor, Ubuntu 26.04.1, Linux 7.0.0-34-generic, i915; NEO-free build
+#   (kcl) only, no NEO installed. Python 3.14.4, NumPy 2.3.5, SciPy 1.16.3, OpenBLAS 0.3.32 (libopenblas0-pthread).
+# Kernels: lib/kernels.c generated on the UHD 620 laptop (ocloc 24.35, -device whl) at d14e013, copied as is (no ocloc on this
+#   machine); md5 02e260eb5c20ceabb31ea0335da2255e. Libraries built here with gcc from d14e013.
+# GPU clocks: gt_RPn 350, gt_RP0 / gt_max / gt_boost 1050 MHz; under GEMM load gt_act_freq read 1000 MHz in all 90 busy samples
+#   (0.1 s sampling, n = 4096) [MEAS]. Peak at 1000 MHz, 24 EU: FP32 384, FP16 768 GFLOPS.
+# CPU governor powersave (EPP balance_performance). The machine runs its own services during the
+#   measurements (about 30% of one core in total); all runs at nice 19 / ionice idle, OPENBLAS_NUM_THREADS=1. No display on this GPU.
+
+## 1. make -C lib check (10 suites) [MEAS]
+# Command: OPENBLAS_NUM_THREADS=1 nice -n 19 ionice -c3 make -C lib check. All 10 suites: RESULT all OK; no GPU reset reported
+# (kcl checks I915_GET_RESET_STATS after each wait). Full output:
+  python3 test_basic.py
+  
+  == hgemm
+  OK  M=    1 N=    1 K=    1 a=   1 b=   0 tA=0 tB=0 zero-copy=111  e: avg=2.4e-04 max=2.4e-04
+  OK  M=   17 N=   33 K=   15 a=   1 b=   0 tA=0 tB=0 zero-copy=111  e: avg=1.5e-04 max=1.2e-03
+  OK  M=  100 N=   70 K=  300 a= 2.0 b=   0 tA=0 tB=0 zero-copy=111  e: avg=1.4e-04 max=1.7e-03
+  OK  M=   64 N=   96 K=   48 a= 0.5 b= 1.0 tA=0 tB=0 zero-copy=111  e: avg=1.3e-04 max=1.5e-03
+  OK  M=  333 N=  129 K= 1000 a=   1 b=-1.0 tA=0 tB=0 zero-copy=111  e: avg=1.4e-04 max=1.9e-03
+  OK  M= 1000 N= 1024 K=  777 a=   1 b= 0.5 tA=0 tB=0 zero-copy=111  e: avg=1.4e-04 max=2.4e-03
+     (checked all 4 transpose combinations × copy / zero-copy for each size)
+  
+  == hgemm acc.
+  OK  M=    1 N=    1 K=    1 a=   1 b=   0 tA=0 tB=0 zero-copy=111  e: avg=2.4e-04 max=2.4e-04
+  OK  M=   17 N=   33 K=   15 a=   1 b=   0 tA=0 tB=0 zero-copy=111  e: avg=1.5e-04 max=1.2e-03
+  OK  M=  100 N=   70 K=  300 a= 2.0 b=   0 tA=0 tB=0 zero-copy=111  e: avg=5.2e-05 max=2.9e-04
+  OK  M=   64 N=   96 K=   48 a= 0.5 b= 1.0 tA=0 tB=0 zero-copy=111  e: avg=1.1e-04 max=1.0e-03
+  OK  M=  333 N=  129 K= 1000 a=   1 b=-1.0 tA=0 tB=0 zero-copy=111  e: avg=3.0e-05 max=1.8e-04
+  OK  M= 1000 N= 1024 K=  777 a=   1 b= 0.5 tA=0 tB=0 zero-copy=111  e: avg=3.4e-05 max=2.3e-04
+     (checked all 4 transpose combinations × copy / zero-copy for each size)
+  
+  == sgemm
+  OK  M=    1 N=    1 K=    1 a=   1 b=   0 tA=0 tB=0 zero-copy=111  e: avg=5.2e-09 max=5.2e-09
+  OK  M=   17 N=   33 K=   15 a=   1 b=   0 tA=0 tB=0 zero-copy=111  e: avg=1.6e-08 max=1.3e-07
+  OK  M=  100 N=   70 K=  300 a= 2.0 b=   0 tA=0 tB=0 zero-copy=111  e: avg=1.7e-08 max=1.6e-07
+  OK  M=   64 N=   96 K=   48 a= 0.5 b= 1.0 tA=0 tB=0 zero-copy=111  e: avg=1.6e-08 max=1.3e-07
+  OK  M=  333 N=  129 K= 1000 a=   1 b=-1.0 tA=0 tB=0 zero-copy=111  e: avg=1.7e-08 max=2.5e-07
+  OK  M= 1000 N= 1024 K=  777 a=   1 b= 0.5 tA=0 tB=0 zero-copy=111  e: avg=1.7e-08 max=2.5e-07
+     (checked all 4 transpose combinations × copy / zero-copy for each size)
+  
+  == Speed: GFLOPS of the whole call (copy / zero-copy) and of the kernel alone
+    hgemm        N= 1024: copy  453.7, zero-copy  485.1, kernel  504.7
+    hgemm        N= 2048: copy  609.7, zero-copy  609.7, kernel  609.4
+    hgemm        N= 4096: copy  636.3, zero-copy  637.3, kernel  636.9
+    hgemm acc.   N= 1024: copy  467.3, zero-copy  461.8, kernel  476.2
+    hgemm acc.   N= 2048: copy  542.1, zero-copy  546.3, kernel  549.6
+    hgemm acc.   N= 4096: copy  557.9, zero-copy  560.7, kernel  560.4
+    sgemm        N= 1024: copy  263.1, zero-copy  270.0, kernel  269.9
+    sgemm        N= 2048: copy  311.6, zero-copy  312.9, kernel  312.3
+    sgemm        N= 4096: copy  321.0, zero-copy  323.0, kernel  323.2
+  
+  RESULT: all OK
+  python3 test_level3.py
+  fp16       : 28/28 case groups OK
+  fp16 acc.  : 28/28 case groups OK
+  fp32       : 28/28 case groups OK
+  fp64       : 28/28 case groups OK
+  trsm fp64  : 32/32 cases OK
+  trsm fp32  : 32/32 cases OK
+  trsm fp16  : 32/32 cases OK
+  trsm fp16d : 32/32 cases OK
+  
+  == GEMM batched: 256 × (64×64×64), FP16 / FP32
+    float16: batched   86.6 GFLOPS (1.5 ms), one by one    2.8 (47.4 ms), NumPy fp32   21.0
+    float32: batched   53.2 GFLOPS (2.5 ms), one by one    3.3 (41.2 ms), NumPy fp32   43.7
+  
+  == Zero-copy views: slices (row stride), A[::2], .T views, C as a slice (FP32, FP16)
+    checked
+  
+  == Level 3 speed (FP32, n = 2048): GFLOPS computed with the standard formula
+    gemm:  310.2 GFLOPS (55 ms)
+    symm:  287.5 GFLOPS (60 ms)
+    syrk:  205.2 GFLOPS (42 ms)
+    trmm:  207.4 GFLOPS (41 ms)
+    trsm:  164.5 GFLOPS (52 ms)
+  
+  RESULT: all OK
+  python3 test_level12.py
+  == float32
+  == float16
+  == float64
+  RESULT: all OK
+  python3 test_userptr.py
+  == 1. changes by the CPU between calls
+  == 2. freeing and reallocating (also gen9blas.empty at freed addresses)
+  == 3. file mapped read-only
+  == 4. views of the same array; small arrays on a shared page
+  == 5. in-place result on plain arrays
+  
+  RESULT: all OK
+  python3 test_skinny.py
+  tests: 432
+  RESULT: all OK
+  python3 test_blas.py
+  calls on the GPU: 183
+  RESULT: all OK
+  python3 test_blas_d.py
+  calls on the GPU: 178
+  RESULT: all OK
+  python3 test_blas_banded.py
+  calls on the GPU: 273
+  RESULT: all OK
+  GEN9BLAS_MAX_LAUNCH_MS=0.5 python3 test_level3.py
+  fp16       : 28/28 case groups OK
+  fp16 acc.  : 28/28 case groups OK
+  fp32       : 28/28 case groups OK
+  fp64       : 28/28 case groups OK
+  trsm fp64  : 32/32 cases OK
+  trsm fp32  : 32/32 cases OK
+  trsm fp16  : 32/32 cases OK
+  trsm fp16d : 32/32 cases OK
+  
+  == GEMM batched: 256 × (64×64×64), FP16 / FP32
+    float16: batched   75.8 GFLOPS (1.8 ms), one by one    2.6 (50.7 ms), NumPy fp32   20.2
+    float32: batched   57.7 GFLOPS (2.3 ms), one by one    3.1 (43.2 ms), NumPy fp32   42.5
+  
+  == Zero-copy views: slices (row stride), A[::2], .T views, C as a slice (FP32, FP16)
+    checked
+  
+  == Level 3 speed (FP32, n = 2048): GFLOPS computed with the standard formula
+    gemm:  243.6 GFLOPS (71 ms)
+    symm:  232.5 GFLOPS (74 ms)
+    syrk:  173.9 GFLOPS (49 ms)
+    trmm:  177.0 GFLOPS (49 ms)
+    trsm:  148.3 GFLOPS (58 ms)
+  
+  RESULT: all OK
+  python3 test_long_launch.py
+  OK  dgemm n=4096: max rel err 5.4e-15 (tolerance 1e-12)
+  OK  sgemm n=8192: max rel err 4.7e-06 (tolerance 1e-04)
+  OK  hgemm accurate n=8192: max rel err 6.3e-04 (tolerance 5e-03)
+  OK  batched dgemm 2 x 3072: max rel err 6.5e-15 (tolerance 1e-12)
+  RESULT: all OK
+
+## 2. GEMM vs size: python3 bench/gemm_sizes.py (best of 5 after a warm-up; GFLOPS = 2 n^3 / time) [MEAS]
+## 3. Level 3, whole call: python3 bench/level3_cpu.py (n = 2048, 4096) [MEAS]
+# Two runs of each, alternating; run-to-run spread below 1% (no desktop competing for the GPU).
+  ### gemm_sizes run 1 16:59:40
+       n       FP16  FP16 accurate       FP32   (GFLOPS)
+    1024      438.4          444.4      274.7
+    2048      609.3          546.8      312.5
+    3072      639.4          553.6      316.9
+    4096      638.5          565.9      323.1
+  ### level3_cpu run 1 16:59:50
+  == n = 2048, float32
+    gemm    307.0 GFLOPS      56 ms   CPU   1.20 ms ( 2.1%)
+    symm    294.3 GFLOPS      58 ms   CPU   0.49 ms ( 0.8%)
+    syrk    222.4 GFLOPS      39 ms   CPU   0.41 ms ( 1.1%)
+    syr2k   213.3 GFLOPS      81 ms   CPU   0.38 ms ( 0.5%)
+    trmm    208.8 GFLOPS      41 ms   CPU   0.86 ms ( 2.1%)
+    trsm    165.4 GFLOPS      52 ms   CPU   0.83 ms ( 1.6%)
+  == n = 2048, float16
+    gemm    609.5 GFLOPS      28 ms   CPU   0.29 ms ( 1.0%)
+    symm    547.7 GFLOPS      31 ms   CPU   0.30 ms ( 1.0%)
+    syrk    392.3 GFLOPS      22 ms   CPU   0.28 ms ( 1.3%)
+    syr2k   373.9 GFLOPS      46 ms   CPU   0.33 ms ( 0.7%)
+    trmm    370.9 GFLOPS      23 ms   CPU   0.85 ms ( 3.7%)
+    trsm    251.5 GFLOPS      34 ms   CPU   0.93 ms ( 2.7%)
+  == n = 4096, float32
+    gemm    323.2 GFLOPS     425 ms   CPU   0.40 ms ( 0.1%)
+    symm    315.8 GFLOPS     435 ms   CPU   0.52 ms ( 0.1%)
+    syrk    247.4 GFLOPS     278 ms   CPU   0.27 ms ( 0.1%)
+    syr2k   229.9 GFLOPS     598 ms   CPU   0.30 ms ( 0.1%)
+    trmm    239.2 GFLOPS     287 ms   CPU   0.78 ms ( 0.3%)
+    trsm    235.9 GFLOPS     291 ms   CPU   0.98 ms ( 0.3%)
+  == n = 4096, float16
+    gemm    636.0 GFLOPS     216 ms   CPU   0.29 ms ( 0.1%)
+    symm    613.4 GFLOPS     224 ms   CPU   0.28 ms ( 0.1%)
+    syrk    471.1 GFLOPS     146 ms   CPU   0.28 ms ( 0.2%)
+    syr2k   451.8 GFLOPS     304 ms   CPU   0.29 ms ( 0.1%)
+    trmm    459.1 GFLOPS     150 ms   CPU   0.70 ms ( 0.5%)
+    trsm    410.2 GFLOPS     168 ms   CPU   0.90 ms ( 0.5%)
+  ### gemm_sizes run 2 17:00:16
+       n       FP16  FP16 accurate       FP32   (GFLOPS)
+    1024      458.3          442.0      275.7
+    2048      609.6          546.5      313.3
+    3072      641.2          552.6      316.8
+    4096      638.6          565.7      322.9
+  ### level3_cpu run 2 17:00:27
+  == n = 2048, float32
+    gemm    306.9 GFLOPS      56 ms   CPU   1.20 ms ( 2.1%)
+    symm    292.5 GFLOPS      59 ms   CPU   0.46 ms ( 0.8%)
+    syrk    222.5 GFLOPS      39 ms   CPU   0.28 ms ( 0.7%)
+    syr2k   212.7 GFLOPS      81 ms   CPU   0.29 ms ( 0.4%)
+    trmm    207.5 GFLOPS      41 ms   CPU   0.84 ms ( 2.0%)
+    trsm    164.2 GFLOPS      52 ms   CPU   0.96 ms ( 1.8%)
+  == n = 2048, float16
+    gemm    614.3 GFLOPS      28 ms   CPU   0.32 ms ( 1.1%)
+    symm    545.4 GFLOPS      31 ms   CPU   0.33 ms ( 1.1%)
+    syrk    389.3 GFLOPS      22 ms   CPU   0.29 ms ( 1.3%)
+    syr2k   375.2 GFLOPS      46 ms   CPU   0.35 ms ( 0.8%)
+    trmm    369.2 GFLOPS      23 ms   CPU   0.82 ms ( 3.5%)
+    trsm    252.9 GFLOPS      34 ms   CPU   0.93 ms ( 2.7%)
+  == n = 4096, float32
+    gemm    322.7 GFLOPS     426 ms   CPU   0.36 ms ( 0.1%)
+    symm    315.9 GFLOPS     435 ms   CPU   0.36 ms ( 0.1%)
+    syrk    247.0 GFLOPS     278 ms   CPU   0.33 ms ( 0.1%)
+    syr2k   229.9 GFLOPS     598 ms   CPU   0.31 ms ( 0.1%)
+    trmm    238.8 GFLOPS     288 ms   CPU   0.90 ms ( 0.3%)
+    trsm    236.2 GFLOPS     291 ms   CPU   1.14 ms ( 0.4%)
+  == n = 4096, float16
+    gemm    637.4 GFLOPS     216 ms   CPU   0.28 ms ( 0.1%)
+    symm    613.4 GFLOPS     224 ms   CPU   0.30 ms ( 0.1%)
+    syrk    468.9 GFLOPS     147 ms   CPU   0.28 ms ( 0.2%)
+    syr2k   452.5 GFLOPS     304 ms   CPU   0.34 ms ( 0.1%)
+    trmm    458.7 GFLOPS     150 ms   CPU   0.73 ms ( 0.5%)
+    trsm    409.2 GFLOPS     168 ms   CPU   1.09 ms ( 0.6%)
+  ### end 17:00:53
+
+## Comparison with the UHD 620 (results/gemm-sizes-2026-11-12.txt, results/level3-whole-call-2026-11-12.txt; n = 4096)
+#              HD 530 (this file)   UHD 620    ratio   fraction of peak (HD 530 at 1000 MHz / UHD 620 at 1100 MHz)
+#   FP16 GEMM       638               717       0.89          83% / 85%
+#   FP16 accurate   566               599-607   0.94          (mixed precision: no single peak)
+#   FP32 GEMM       323               342-347   0.93          84% / 81-82%
+# The ratios are close to the GPU clock ratio 1000 / 1100 = 0.91. The UHD 620 load clock is taken as its 1100 MHz maximum;
+# its gt_act_freq under load was not recorded in those files (assumption).
