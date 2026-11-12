@@ -42,6 +42,10 @@ gen9blas_packed *gen9blas_pack_b(int type, int transB, int K, int N, const void 
 int gen9blas_gemm_pb(int type, int transA, int M, double alpha, const void *A, int lda, const gen9blas_packed *Bp,
                      double beta, void *C, int ldc);
 void gen9blas_packed_free(gen9blas_packed *Bp);
+// ggml backend: C (F32, M x N) = A (F32, M x K) . Bp with Bp = gen9blas_pack_b(GEN9BLAS_HS, ...) of FP16 weights.
+// A and the result are rounded to FP16 once each (accurate FP16 GEMM: FP32 sums of 32-product FP16 chunks).
+// *nonfinite = 1 if any result is inf / NaN (FP16 overflow): the caller should recompute in F32.
+int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
 // SYMM: C = alpha·A·B + beta·C (left, A: M×M symmetric) or alpha·B·A + beta·C (right, A: N×N). The uplo triangle is used.
 int gen9blas_symm(int type, int side, int uplo, int M, int N, double alpha, const void *A, int lda,
              const void *B, int ldb, double beta, void *C, int ldc);

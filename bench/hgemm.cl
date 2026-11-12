@@ -563,6 +563,22 @@ __kernel void gen9blas_epilog_b(__global const half *Cp, int ldp, int Mp, __glob
     vstore_half(v, 0, c);
 }
 
+// ggml backend (F16 weights x F32 activations, docs/ggml-backend-design.md section 4):
+// F32 activations packed straight into the A3 layout of the accurate FP16 GEMM, rounded to nearest. Grid (Kp, Mp, count).
+__kernel void pk_a3_f32(__global const float *A, __global half *Ap, int M, int K, int lda, int Kp, long sA, int Mp) {
+    const int k = get_global_id(0), m = get_global_id(1), b = get_global_id(2);
+    vstore_half_rte((m < M && k < K) ? A[b * sA + (size_t)m * lda + k] : 0.0f, 0, Ap + (size_t)b * Mp * Kp + PK_IDX_A3(m, k, Kp)); }
+// Epilogue FP16 work buffer -> F32 C; *nonfinite |= 1 if any result is inf or NaN (FP16 overflow: recompute in F32).
+__kernel void gen9blas_epilog_hf(__global const half *Cp, int ldp, int Mp, __global float *C, int ldc, long sC, float alpha,
+                                 float beta, __global int *nonfinite) {
+    const int j = get_global_id(0), i = get_global_id(1), b = get_global_id(2);
+    float v = alpha * vload_half(0, Cp + (size_t)b * Mp * ldp + (size_t)i * ldp + j);
+    __global float *c = C + b * sC + (size_t)i * ldc + j;
+    if (beta != 0.0f) v += beta * c[0];
+    if (!isfinite(v)) atomic_or(nonfinite, 1);
+    c[0] = v;
+}
+
 // ---------- "v" versions: separate N (columns to compute), ldc (row stride of C), K (loop length) and Kfull
 // (stride of packed data panels). Allows computing a piece of packed data once (sub-buffers with offset).
 // Batched: matrix b starts at Ap + b·M·Kfull, Bp + b·N·Kfull, C + b·M·ldc.

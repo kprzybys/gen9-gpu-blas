@@ -110,6 +110,42 @@ for nm, A in (("reuse 1 (M=128)", A1), ("reuse 2 (M=512)", A2), ("reuse 3 (M=128
     print(f"{'OK ' if ok else 'ERR'} S  {nm + ', B zeroed after packing':40s} rel err {e:.2e}")
 L.gen9blas_packed_free(P)
 
+# F16 weights x F32 activations -> F32 (gemm_pb_f16w; ggml backend with an F16 model)
+L.gen9blas_gemm_pb_f16w.argtypes = [_i, _p, _i, _p, _p, _i, ctypes.POINTER(_i)]
+
+
+def f16w(name, M, N, K, a_scale=1.0, w_ones=False, expect_flag=False):
+    global errors
+    A = (np.full((M, K), a_scale) if w_ones else rng.uniform(-1, 1, (M, K)) * a_scale).astype(np.float32)
+    W = (np.ones((N, K)) if w_ones else rng.uniform(-1, 1, (N, K))).astype(np.float16)
+    P, _, _ = pack(HS, W, 1)
+    C = np.zeros((M, N), np.float32)
+    nf = _i(0)
+    if L.gen9blas_gemm_pb_f16w(M, A.ctypes.data, K, P, C.ctypes.data, N, ctypes.byref(nf)) != 0:
+        raise RuntimeError(L.gen9blas_error().decode())
+    L.gen9blas_packed_free(P)
+    if expect_flag is None:   # flag must equal "some exact result is beyond the FP16 range"
+        big = bool(np.max(np.abs(A.astype(np.float64) @ W.T.astype(np.float64))) > 65504)
+        ok = nf.value == int(big)
+        print(f"{'OK ' if ok else 'ERR'} F16w {name:40s} flag {nf.value}, exact result beyond FP16: {big}")
+    elif expect_flag:
+        ok = nf.value == 1
+        print(f"{'OK ' if ok else 'ERR'} F16w {name:40s} nonfinite flag {nf.value} (expected 1)")
+    else:
+        e = rel_err(C, A, W.T.astype(np.float32))
+        ok = nf.value == 0 and e <= 2e-3 and np.all(np.isfinite(C))
+        print(f"{'OK ' if ok else 'ERR'} F16w {name:40s} rel err {e:.2e}, flag {nf.value}")
+    errors += not ok
+
+
+f16w("512x1536x1536", 512, 1536, 1536)
+f16w("512x8960x1536 (gate/up)", 512, 8960, 1536)
+f16w("512x1536x8960 (down), |x| up to 30", 512, 1536, 8960, a_scale=30.0)
+f16w("512x1536x8960, |x| up to 900: flag iff overflow", 512, 1536, 8960, a_scale=900.0, expect_flag=None)
+f16w("33x100x2051 (padding)", 33, 100, 2051)
+f16w("overflow: x=1000, w=1, K=256 -> C=256000", 64, 64, 256, a_scale=1000.0, w_ones=True, expect_flag=True)
+f16w("no overflow: x=200, w=1, K=256 -> C=51200", 64, 64, 256, a_scale=200.0, w_ones=True)
+
 # output projection of Qwen2.5-1.5B: 151936 x 1536 FP32 (0.93 GB), M = 512 (llama-perplexity: all rows)
 if os.environ.get("SKIP_BIG") is None:
     N, K, M = 151936, 1536, 512

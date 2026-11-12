@@ -119,6 +119,7 @@ static int init_l12(const char *dir) {
 
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
+static cl_kernel k_pa3_f32, k_epi_hf;   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w)
 int gen9blas_init(const char *dir) {
     static int inited;
     if (inited) return 0;
@@ -141,6 +142,7 @@ int gen9blas_init(const char *dir) {
     usm_arg = (clSetKernelArgMemPointerINTEL_fn)clGetExtensionFunctionAddressForPlatform(plat, "clSetKernelArgMemPointerINTEL");
     if (!usm_alloc || !usm_free || !usm_info || !usm_arg) FAIL("missing cl_intel_unified_shared_memory extension");
     if (init_l12(dir)) return -1;
+    KER(ph, "pk_a3_f32", k_pa3_f32); KER(ph, "gen9blas_epilog_hf", k_epi_hf);   // F16 weights x F32 activations
     // "v" kernels: (Ap, Bp, C, M, N, ldc, K, Kfull) -- also for chunks of data packed once (sub-buffers)
     // bin = NULL: main kernel from source (FP64: dgemm.cl, OpenCL C), not from an asm binary
     struct { int r; const char *bin, *k, *pa, *pb, *epi, *tri; int es, tn, km; cl_program pr; } t[4] = {
@@ -596,6 +598,49 @@ int gen9blas_gemm_pb(int type, int tA, int M, double alpha, const void *A, int l
         }
     }
     return to_host(xC, zC, bC, C);
+}
+
+// C (F32, M x N) = A (F32, M x K) . Bp, Bp packed with type GEN9BLAS_HS (FP16 weights). A is rounded to FP16 while packing,
+// the accurate FP16 GEMM writes FP16 into a work buffer, the epilogue converts to F32 and sets *nonfinite when any result
+// is inf / NaN (then the caller recomputes in F32). Epilogue in row bands as in gemm_pb.
+int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
+    static int *nf;   // USM flag word (coherent with the GPU through the LLC)
+    NEW_OPERATION();
+    if (!P || P->type != GEN9BLAS_HS || !types[GEN9BLAS_HS].ready || !k_pa3_f32) FAIL("gemm_pb_f16w: needs B packed as GEN9BLAS_HS");
+    if (!nf && !(nf = gen9blas_alloc(64))) return -1;
+    *nonfinite = 0;
+    if (M <= 0) return 0;
+    type_t *r = &types[GEN9BLAS_HS];
+    int N = P->N, K = P->K, Np = P->Np, Kp = P->Kp, Mp = (M + 15) / 16 * 16;
+    size_t bA = ((size_t)(M - 1) * lda + K) * 4, bC = ((size_t)(M - 1) * ldc + N) * 4;
+    bf_t xA, xC; int zA, zC;
+    if (get_obj(A, bA, &uA, 1, 0, &xA, &zA) || get_obj(C, bC, &uC, 0, 1, &xC, &zC)) return -1;
+    if (ensure_buf(&dAp, &sAp, (size_t)Mp * Kp * 2 + 4096) || ensure_buf(&dCp, &sCp, (size_t)Mp * Np * 2)) return -1;
+    *nf = 0;
+    cl_long zero = 0;
+    ARGB(k_pa3_f32, 0, xA); ARG(k_pa3_f32, 1, dAp); ARG(k_pa3_f32, 2, M); ARG(k_pa3_f32, 3, K); ARG(k_pa3_f32, 4, lda);
+    ARG(k_pa3_f32, 5, Kp); ARG(k_pa3_f32, 6, zero); ARG(k_pa3_f32, 7, Mp);
+    size_t ga[3] = { (size_t)Kp, (size_t)Mp, 1 };
+    CHECK(clEnqueueNDRangeKernel(q, k_pa3_f32, 3, NULL, ga, NULL, 0, NULL, NULL));
+    if (est_ms(r, Mp, Np, Kp) <= max_launch_ms()) {
+        ARG(r->main, 0, dAp); ARG(r->main, 1, P->buf); ARG(r->main, 2, dCp); ARG(r->main, 3, Mp); ARG(r->main, 4, Np);
+        ARG(r->main, 5, Np); ARG(r->main, 6, Kp); ARG(r->main, 7, Kp);
+        size_t gm = (size_t)(Np / r->tn) * (Mp / 16) * 16, lm = 16;
+        CHECK(clEnqueueNDRangeKernel(q, r->main, 1, NULL, &gm, &lm, 0, NULL, NULL));
+    } else if (launch(r, dAp, 0, P->buf, 0, dCp, 0, Mp, Np, Np, Kp, Kp, 0)) return -1;
+    float one = 1.0f, zf = 0.0f; cl_long lC = 0;
+    bf_t xnf = { NULL, nf };
+    ARG(k_epi_hf, 0, dCp); ARG(k_epi_hf, 1, Np); ARG(k_epi_hf, 2, Mp); ARGB(k_epi_hf, 3, xC); ARG(k_epi_hf, 4, ldc);
+    ARG(k_epi_hf, 5, lC); ARG(k_epi_hf, 6, one); ARG(k_epi_hf, 7, zf); ARGB(k_epi_hf, 8, xnf);
+    size_t mb = pack_band_bytes() / ((size_t)N * 6);
+    if (mb < 1) mb = 1;
+    for (size_t i0 = 0; i0 < (size_t)M; i0 += mb) {
+        size_t o[3] = { 0, i0, 0 }, ge[3] = { (size_t)N, (size_t)M - i0 < mb ? (size_t)M - i0 : mb, 1 };
+        CHECK(clEnqueueNDRangeKernel(q, k_epi_hf, 3, o, ge, NULL, 0, NULL, NULL));
+    }
+    if (to_host(xC, zC, bC, C)) return -1;
+    *nonfinite = *nf != 0;
+    return 0;
 }
 
 int gen9blas_gemm(int type, int tA, int tB, int M, int N, int K, double alpha, const void *A, int lda,
