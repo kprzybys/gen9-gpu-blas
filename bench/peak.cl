@@ -1,6 +1,6 @@
-// Etap 2: szczytowa przepustowość arytmetyki.
-// T = typ, OP(x) = operacja na łańcuchu. CH niezależnych łańcuchów × U powtórzeń w pętli n razy.
-// ops na work-item na iterację = CH * U * OPS_PER (przekazywane do clbench).
+// Stage 2: peak arithmetic throughput.
+// T = type, OP(x) = operation on the chain. CH independent chains × U repetitions in a loop n times.
+// ops per work-item per iteration = CH * U * OPS_PER (passed to clbench).
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 
@@ -14,7 +14,7 @@
 #define R8(s) s s s s s s s s
 #define R16(s) R8(s) R8(s)
 
-// Łańcuchy x0..x7 niezależne: pozwalają ukryć opóźnienie potoku.
+// Chains x0..x7 are independent: they hide the pipeline latency.
 #define DECL T x0 = (T)gid, x1 = x0 + (T)1, x2 = x0 + (T)2, x3 = x0 + (T)3, \
                x4 = x0 + (T)4, x5 = x0 + (T)5, x6 = x0 + (T)6, x7 = x0 + (T)7;
 #define STEP8(F) x0 = F(x0); x1 = F(x1); x2 = F(x2); x3 = F(x3); x4 = F(x4); x5 = F(x5); x6 = F(x6); x7 = F(x7);
@@ -44,11 +44,11 @@ __kernel void name##_lat(__global T *out, int n) {          \
     out[gid] = SUM;                                          \
 }
 
-// Wersje z operandem wektorowym (a, b różne w każdej linii), a nie rozgłaszanym skalarem.
+// Versions with a vector operand (a, b different in each lane), rather than a broadcast scalar.
 #define F_MULV(x) ((x) * av)
 #define F_ADDV(x) ((x) + bv)
 #define F_MADV(x) mad(x, av, bv)
-// add+xor: łańcuch, którego kompilator nie zwinie do mnożenia (2 operacje).
+// add+xor: a chain the compiler cannot fold into a multiplication (2 operations).
 #define F_ADDX(x) (((x) + b) ^ a)
 #define F_ADDXV(x) (((x) + bv) ^ av)
 #define F_FMAV(x) fma(x, av, bv)

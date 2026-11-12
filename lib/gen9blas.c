@@ -23,7 +23,7 @@ static double now_s(void) { struct timespec t; clock_gettime(CLOCK_MONOTONIC, &t
 
 typedef struct {
     cl_kernel main, pa, pb, pa_t, pb_t, pa_q, pb_w2,   // pa_q, pb_w2: faster packing without transpose (NULL: absent)
-              epi, epi_tri, tL, tY, tZ, tI[4], pel, skl;   // t*: TRSM; pel: full matrix; skl: SYR2K join
+              epi, epi_tri, tL, tY, tZ, tI[4], expand, syr2k_merge;   // t*: TRSM; expand: full matrix; syr2k_merge: SYR2K join
     int es, tn, km, ready;
 } type_t;
 
@@ -63,7 +63,7 @@ static int program_bin(const char *dir, const char *file, const char *kernel, cl
     char p[1024]; size_t len; cl_int err, bst;
     snprintf(p, sizeof p, "%s/%s", dir, file);
     unsigned char *bin = load_file(p, &len);
-    if (!bin) FAIL("missing %.900s (build: asm/gemm_build.sh h|hd|s)", p);
+    if (!bin) FAIL("missing %.900s (build: make -C asm)", p);
     cl_program pb = clCreateProgramWithBinary(ctx, 1, &dev, &len, (const unsigned char **)&bin, &bst, &err);
     free(bin); CHECK(err); CHECK(bst); CHECK(clBuildProgram(pb, 1, &dev, "", NULL, NULL));
     *k = clCreateKernel(pb, kernel, &err); CHECK(err);
@@ -92,25 +92,25 @@ static int program_src(const char *dir, const char *file, const char *options, c
 #define KER(pr, name, dst) do { cl_int e2_; dst = clCreateKernel(pr, name, &e2_); CHECK(e2_); } while (0)
 
 // Level 1–2 kernels (bench/level12.cl): L12[0] FP16 (GEN9BLAS_H, GEN9BLAS_HS), L12[1] FP32.
-typedef struct { cl_kernel axpy, scal, copy, copy16, rot, red, iamax, gemv_n, gemv_nw, gemv_t1, gemv_t1b, gemv_t2, ger, syr2, do_f, z_f, trsv_block, trsv_upd_n, trsv_upd_t, rotm, pmv, psv, spr2, symv1, symv2, skinny_k1, skinny_k4, skinny_k8, skinny_r4, skinny_r8, skinny_n4, skinny_n2; int es; } l12_t;
+typedef struct { cl_kernel axpy, scal, copy, copy16, rot, red, iamax, gemv_n, gemv_nw, gemv_t1, gemv_t1b, gemv_t2, ger, syr2, to_f, from_f, trsv_block, trsv_upd_n, trsv_upd_t, rotm, pmv, psv, spr2, symv1, symv2, skinny_k1, skinny_k4, skinny_k8, skinny_r4, skinny_r8, skinny_n4, skinny_n2; int es; } l12_t;
 static l12_t L12[3];   // 0 FP16, 1 FP32, 2 FP64
 static int init_l12(const char *dir) {
     for (int i = 0; i < 3; i++) {
-        cl_program pr; const char *suf = "hfd" + i, *opc[3] = { "-cl-std=CL3.0 -DPOL", "-cl-std=CL3.0", "-cl-std=CL3.0 -DDBL" };
+        cl_program pr; const char *suf = "hfd" + i, *opc[3] = { "-cl-std=CL3.0 -DHALF", "-cl-std=CL3.0", "-cl-std=CL3.0 -DDBL" };
         char n[32], sf[2] = { *suf, 0 };
         if (program_src(dir, "level12.cl", opc[i], &pr)) return -1;
         l12_t *k = &L12[i]; k->es = i == 0 ? 2 : i == 1 ? 4 : 8; suf = sf;
         struct { const char *n; cl_kernel *k; } t[] = { { "axpy", &k->axpy }, { "scal", &k->scal }, { "copy", &k->copy }, { "copy16", &k->copy16 },
             { "rot", &k->rot }, { "red", &k->red }, { "iamax", &k->iamax }, { "gemv_n", &k->gemv_n }, { "gemv_nw", &k->gemv_nw },
             { "gemv_t1", &k->gemv_t1 }, { "gemv_t1b", &k->gemv_t1b }, { "gemv_t2", &k->gemv_t2 }, { "ger", &k->ger }, { "syr2", &k->syr2 },
-            { "do_f", &k->do_f }, { "z_f", &k->z_f }, { "trsv_blok", &k->trsv_block },
-            { "trsv_akt_n", &k->trsv_upd_n }, { "trsv_akt_t", &k->trsv_upd_t }, { "rotm", &k->rotm }, { "pmv", &k->pmv },
+            { "to_f", &k->to_f }, { "from_f", &k->from_f }, { "trsv_block", &k->trsv_block },
+            { "trsv_upd_n", &k->trsv_upd_n }, { "trsv_upd_t", &k->trsv_upd_t }, { "rotm", &k->rotm }, { "pmv", &k->pmv },
             { "psv", &k->psv }, { "spr2", &k->spr2 }, { "symv1", &k->symv1 }, { "symv2", &k->symv2 } };
         for (size_t j = 0; j < sizeof t / sizeof t[0]; j++) { snprintf(n, sizeof n, "%s_%s", t[j].n, suf); KER(pr, n, *t[j].k); }
         if (i < 2) {   // skinny GEMM: FP16 and FP32 only (bench/level12.cl, #ifndef DBL)
-            struct { const char *n; cl_kernel *k; } c[] = { { "chudy_k1", &k->skinny_k1 }, { "chudy_k4", &k->skinny_k4 }, { "chudy_k8", &k->skinny_k8 },
-                { "chudy_r4", &k->skinny_r4 }, { "chudy_r8", &k->skinny_r8 },
-                { "chudy_n4", &k->skinny_n4 }, { "chudy_n2", &k->skinny_n2 } };
+            struct { const char *n; cl_kernel *k; } c[] = { { "skinny_k1", &k->skinny_k1 }, { "skinny_k4", &k->skinny_k4 }, { "skinny_k8", &k->skinny_k8 },
+                { "skinny_r4", &k->skinny_r4 }, { "skinny_r8", &k->skinny_r8 },
+                { "skinny_n4", &k->skinny_n4 }, { "skinny_n2", &k->skinny_n2 } };
             for (size_t j = 0; j < sizeof c / sizeof c[0]; j++) { snprintf(n, sizeof n, "%s_%s", c[j].n, suf); KER(pr, n, *c[j].k); }
         }
     }
@@ -144,10 +144,10 @@ int gen9blas_init(const char *dir) {
     // "v" kernels: (Ap, Bp, C, M, N, ldc, K, Kfull) -- also for chunks of data packed once (sub-buffers)
     // bin = NULL: main kernel from source (FP64: dgemm.cl, OpenCL C), not from an asm binary
     struct { int r; const char *bin, *k, *pa, *pb, *epi, *tri; int es, tn, km; cl_program pr; } t[4] = {
-        { GEN9BLAS_H,  "gen_h.bin",  "hgemm_v",    "pk_a2", "pk_bq",  "kpg_epilog_b",  "kpg_epilog_tri",  2, 32, 16, ph },
-        { GEN9BLAS_HS, "gen_hd.bin", "hgemm_kc_v", "pk_a3", "pk_b16", "kpg_epilog_b",  "kpg_epilog_tri",  2, 16, GEN9BLAS_KC, ph },
-        { GEN9BLAS_S,  "gen_s.bin",  "sgemm_v",    "pkf_a", "pkf_b",  "kpg_epilog_fb", "kpg_epilog_trif", 4, 16, 16, ps },
-        { GEN9BLAS_D,  NULL,         "dgemm_v",    "pkd_a", "pkd_b",  "kpg_epilog_db", "kpg_epilog_trid", 8, 16, 16, pd } };
+        { GEN9BLAS_H,  "gen_h.bin",  "hgemm_v",    "pk_a2", "pk_bq",  "gen9blas_epilog_b",  "gen9blas_epilog_tri",  2, 32, 16, ph },
+        { GEN9BLAS_HS, "gen_hd.bin", "hgemm_kc_v", "pk_a3", "pk_b16", "gen9blas_epilog_b",  "gen9blas_epilog_tri",  2, 16, GEN9BLAS_KC, ph },
+        { GEN9BLAS_S,  "gen_s.bin",  "sgemm_v",    "pkf_a", "pkf_b",  "gen9blas_epilog_fb", "gen9blas_epilog_trif", 4, 16, 16, ps },
+        { GEN9BLAS_D,  NULL,         "dgemm_v",    "pkd_a", "pkd_b",  "gen9blas_epilog_db", "gen9blas_epilog_trid", 8, 16, 16, pd } };
     for (int i = 0; i < 4; i++) {
         type_t *r = &types[t[i].r]; char n[64];
         if (t[i].bin ? program_bin(dir, t[i].bin, t[i].k, &r->main) : 0) return -1;
@@ -157,10 +157,10 @@ int gen9blas_init(const char *dir) {
         const char *suf = t[i].es == 4 ? "f" : t[i].es == 8 ? "d" : "h";
         snprintf(n, sizeof n, "trsm_L_%s", suf); KER(t[i].pr, n, r->tL);
         snprintf(n, sizeof n, "trsm_Y_%s", suf); KER(t[i].pr, n, r->tY);
-        snprintf(n, sizeof n, "trsm_zapisz_%s", suf); KER(t[i].pr, n, r->tZ);
+        snprintf(n, sizeof n, "trsm_store_%s", suf); KER(t[i].pr, n, r->tZ);
         for (int j = 0; j < 4; j++) { snprintf(n, sizeof n, "trsm_inv%d_%s", j, suf); KER(t[i].pr, n, r->tI[j]); }
-        snprintf(n, sizeof n, "gen9blas_pelna_%s", suf); KER(t[i].pr, n, r->pel);
-        snprintf(n, sizeof n, "gen9blas_sklej_%s", suf); KER(t[i].pr, n, r->skl);
+        snprintf(n, sizeof n, "gen9blas_expand_%s", suf); KER(t[i].pr, n, r->expand);
+        snprintf(n, sizeof n, "gen9blas_syr2k_merge_%s", suf); KER(t[i].pr, n, r->syr2k_merge);
         snprintf(n, sizeof n, "%s_t", t[i].pa); KER(t[i].pr, n, r->pa_t);
         snprintf(n, sizeof n, "%s_t", t[i].pb); KER(t[i].pr, n, r->pb_t);
         cl_int e3;   // optional faster packing kernels (GEN9BLAS_PACK=old: disabled)
@@ -476,7 +476,7 @@ static int num_blocks(int n) { const char *e = getenv("GEN9BLAS_BLOCKS"); if (e)
 static int full_dev(type_t *r, const void *A, int lda, int n, int uplo, int sym, int diag, int tr) {
     size_t bA = ((size_t)(n - 1) * lda + n) * r->es; bf_t xA; int z;
     if (ensure_buf(&dT, &sT, (size_t)n * n * r->es) || get_obj(A, bA, &uA, 1, 0, &xA, &z)) return -1;
-    cl_kernel k = r->pel;
+    cl_kernel k = r->expand;
     ARGB(k, 0, xA); ARG(k, 1, lda); ARG(k, 2, dT); ARG(k, 3, n); ARG(k, 4, uplo); ARG(k, 5, sym); ARG(k, 6, diag); ARG(k, 7, tr);
     size_t g[2] = { (size_t)(n + 15) / 16 * 16, (size_t)(n + 15) / 16 * 16 }, l[2] = { 16, 16 };
     CHECK(clEnqueueNDRangeKernel(q, k, 2, NULL, g, l, 0, NULL, NULL));
@@ -579,7 +579,7 @@ int gen9blas_syr2k(int type, int uplo, int trans, int N, int K, double alpha, co
     if (ensure_buf(&dX, &sX, (size_t)N * K2 * es) || ensure_buf(&dY, &sY, (size_t)N * K2 * es) ||
         get_obj(A, bA, &uA, 1, 0, &xA, &zA) || get_obj(B, bB, &uB, 1, 0, &xB, &zB))
         return -1;
-    cl_kernel k = r->skl;
+    cl_kernel k = r->syr2k_merge;
     ARGB(k, 0, xA); ARG(k, 1, lda); ARGB(k, 2, xB); ARG(k, 3, ldb); ARG(k, 4, dX); ARG(k, 5, dY); ARG(k, 6, K); ARG(k, 7, trans);
     size_t g[2] = { (size_t)K, (size_t)N };
     CHECK(clEnqueueNDRangeKernel(q, k, 2, NULL, g, NULL, 0, NULL, NULL));
@@ -1008,7 +1008,7 @@ int gen9blas_trsv(int type, int uplo, int trans, int diag, int n, const void *A,
     if (load_operands(w, 2, cin, cout) || ensure_buf(&dXf, &sXf, (size_t)n * RS(k))) return -1;
     cl_long ox = vec_off(n, incx), ix = incx, oa = 0;
     int lower = (uplo == GEN9BLAS_LOWER) != (trans != 0), tr = trans != 0, dg = diag != 0;
-    cl_kernel K = k->do_f;
+    cl_kernel K = k->to_f;
     ARG(K, 0, n); ARGB(K, 1, w[1].g); ARG(K, 2, ox); ARG(K, 3, ix); ARG(K, 4, dXf);
     if (start1(K, n)) return -1;
     const int nb = 256, nbl = (n + nb - 1) / nb;   // = NBT in level12.cl
@@ -1041,7 +1041,7 @@ int gen9blas_trsv(int type, int uplo, int trans, int diag, int n, const void *A,
         fprintf(stderr, "trsv n=%d: blocks %.2f ms, updates %.2f ms, first to last %.2f ms (%d kernels)\n",
                 n, tb, ta, (last_t - first_t) * 1e-6, ne);
     }
-    K = k->z_f;
+    K = k->from_f;
     ARG(K, 0, n); ARG(K, 1, dXf); ARGB(K, 2, w[1].g); ARG(K, 3, ox); ARG(K, 4, ix);
     return start1(K, n) || finish(w, 2, cout) ? -1 : 0;
 }
@@ -1151,7 +1151,7 @@ static int psv(int type, int N, int fmt, int KL, int KU, int tr, int lower, int 
     const int cin[2] = { 1, 1 }, cout[2] = { 0, 1 };
     if (load_operands(w, 2, cin, cout) || ensure_buf(&dXf, &sXf, (size_t)N * RS(k))) return -1;
     cl_long ox = vec_off(N, incx), ix = incx, oa = 0;
-    cl_kernel K = k->do_f;
+    cl_kernel K = k->to_f;
     ARG(K, 0, N); ARGB(K, 1, w[1].g); ARG(K, 2, ox); ARG(K, 3, ix); ARG(K, 4, dXf);
     if (start1(K, N)) return -1;
     K = k->psv;
@@ -1159,7 +1159,7 @@ static int psv(int type, int N, int fmt, int KL, int KU, int tr, int lower, int 
     ARG(K, 8, tr); ARG(K, 9, lower); ARG(K, 10, unit); ARG(K, 11, K_);
     size_t g = 256, l = 256;
     CHECK(clEnqueueNDRangeKernel(q, K, 1, NULL, &g, &l, 0, NULL, NULL));
-    K = k->z_f;
+    K = k->from_f;
     ARG(K, 0, N); ARG(K, 1, dXf); ARGB(K, 2, w[1].g); ARG(K, 3, ox); ARG(K, 4, ix);
     return start1(K, N) || finish(w, 2, cout) ? -1 : 0;
 }
@@ -1209,7 +1209,7 @@ int gen9blas_spr2(int type, int uplo, int n, double alpha, const void *x, int in
 // for FP16 -- accuracy at least as good as GEN9BLAS_HS). The small operand "a" (Mc × K) and the weights "w" (K × Nc) with general strides;
 // for small N the roles are swapped: Cᵀ = op(B)ᵀ · op(A)ᵀ (C is written with swapped strides).
 // GEN9BLAS_SKINNY=0 disables it (old path), GEN9BLAS_SKINNY=n sets the threshold min(M, N) ≤ n for all types (measurements).
-#define SKINNY_S 16   // subgroups per group in skinny_r (like CHUDY_S in level12.cl)
+#define SKINNY_S 16   // subgroups per group in skinny_r (like SKINNY_S in level12.cl)
 static cl_mem dQ; static size_t sQ;   // partial sums (weights contiguous along N)
 static int skinny_threshold(int type) {
     static int forced = -2;
@@ -1243,9 +1243,9 @@ static int gemm_skinny(int type, int tA, int tB, int M, int N, int K, double alp
         swn = tA ? 1 : lda; swk = tA ? lda : 1;           // op(A)ᵀ[k][m] = op(A)[m][k]
     }
     int iK = K, iM = Mc, iN = Nc;
-    static int no_r = -1;   // GEN9BLAS_SKINNY_R=0: old chudy_k4/k8 (comparisons)
+    static int no_r = -1;   // GEN9BLAS_SKINNY_R=0: old skinny_k4/k8 (comparisons)
     if (no_r < 0) { const char *e = getenv("GEN9BLAS_SKINNY_R"); no_r = e && !atoi(e); }
-    const int KL = es == 2 ? 4 : 2;   // k elements per lane (8 B), as in chudy_r in level12.cl
+    const int KL = es == 2 ? 4 : 2;   // k elements per lane (8 B), as in skinny_r in level12.cl
     const uintptr_t align_or = (uintptr_t)(M <= N ? A : B) | (uintptr_t)(M <= N ? B : A) | (uintptr_t)(sam * es) | (uintptr_t)(swn * es);
     // the GPU address has the same offset within a page as on the host (USM, kcl userptr; work buffer aligned)
     // M ≤ 4 with a weight row > 16 KB: old kernel (measured 2026-11-12: N = 4096, K = 11008 FP32 M = 2–4 0.7×, FP16 0.9–1.0×;
@@ -1260,7 +1260,7 @@ static int gemm_skinny(int type, int tA, int tB, int M, int N, int K, double alp
         size_t g[2] = { (size_t)(Mc + MT - 1) / MT * 8 * SKINNY_S, (size_t)(Nc + 7) / 8 }, l[2] = { 8 * SKINNY_S, 1 };
         CHECK(clEnqueueNDRangeKernel(q, Kk, 2, NULL, g, l, 0, NULL, NULL));
     } else if (swk == 1) {   // weights contiguous along K
-        const int MT = Mc == 1 ? 1 : Mc <= 4 ? 4 : 8, RW = MT == 8 ? 2 : 4;   // as CHUDY_K in level12.cl
+        const int MT = Mc == 1 ? 1 : Mc <= 4 ? 4 : 8, RW = MT == 8 ? 2 : 4;   // as SKINNY_K in level12.cl
         cl_kernel Kk = MT == 1 ? k->skinny_k1 : MT == 4 ? k->skinny_k4 : k->skinny_k8;
         ARG(Kk, 0, iM); ARG(Kk, 1, iN); ARG(Kk, 2, iK); CHECK(argr(Kk, 3, alpha, es == 8 ? 8 : 4)); CHECK(argr(Kk, 4, beta, 4));
         ARGB(Kk, 5, xa); ARG(Kk, 6, sam); ARG(Kk, 7, sak); ARGB(Kk, 8, xw); ARG(Kk, 9, swn); ARGB(Kk, 10, xC); ARG(Kk, 11, scm); ARG(Kk, 12, scn);

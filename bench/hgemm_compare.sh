@@ -1,7 +1,7 @@
 #!/bin/sh
 # Porównanie GEMM: nasz HGEMM (asm i OpenCL C) vs CLBlast (H/SGEMM) vs OpenBLAS (f32). Wynik: results/hgemm-porownanie-<data>.txt
 cd -P "$(dirname "$0")"
-[ -x hgemm_asm.bin ] || ../asm/hgemm_build.sh
+[ -x hgemm_asm.bin ] || make -C ../asm
 g() { grep -oE '[0-9.]+ GFLOPS' | head -1 | awk '{print $1}'; }
 gp() { grep -oE 'pakowaniem: [0-9.]+ ms, [0-9.]+' | awk '{print $NF}'; }
 {

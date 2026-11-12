@@ -1,5 +1,5 @@
 """Chudy GEMM (małe M): czas, GB/s wag, GFLOPS, CPU i błąd -- libgen9blas (FP16, FP32) i OpenBLAS SGEMM (odniesienie CPU).
-Plan i model: PLAN_CHUDY_GEMM.md. Wyniki: results/skinny-gemm-2026-11-12.txt.
+Plan i model: docs/skinny-gemm.md. Wyniki: results/skinny-gemm-2026-11-12.txt.
 
 Uruchom: python3 bench/skinny_gemm.py [usm|zwykla] [etykieta]   (GEN9BLAS_SKINNY=0 wyłącza chude jądro -- dawna ścieżka)
 C (M×N) = A (M×K) · Wᵀ (wagi N×K, „W”) albo A · B (wagi K×N, „B”). GB/s = bajty wag / czas (wagi czytane raz).

@@ -20,7 +20,7 @@ os.makedirs(WORK, exist_ok=True)
 # (file, options) -- exactly like the program_zr / program_bin calls in gen9blas.c
 PROGRAMS = [
     ("hgemm.cl", ""), ("sgemm.cl", ""), ("dgemm.cl", ""),
-    ("level12.cl", "-cl-std=CL3.0 -DPOL"), ("level12.cl", "-cl-std=CL3.0"), ("level12.cl", "-cl-std=CL3.0 -DDBL"),
+    ("level12.cl", "-cl-std=CL3.0 -DHALF"), ("level12.cl", "-cl-std=CL3.0"), ("level12.cl", "-cl-std=CL3.0 -DDBL"),
     ("gen_h.bin", None), ("gen_hd.bin", None), ("gen_s.bin", None),
 ]
 VALUES = ("arg_byvalue",)

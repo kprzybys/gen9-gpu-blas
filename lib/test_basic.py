@@ -21,7 +21,7 @@ gen9blas._init()
 if gen9blas._lib.gen9blas_available(gen9blas.GEN9BLAS_HS):
     KINDS.insert(1, ("hgemm acc.", np.float16, dict(accurate=True), 4.9e-4, 5e-3))
 else:
-    print("NOTE: accurate variant not built (asm/hgemm_kc_build.sh), skipping")
+    print("NOTE: accurate variant not built (make -C asm), skipping")
 
 
 def call(dt, opts, A, B, al, be, C):
