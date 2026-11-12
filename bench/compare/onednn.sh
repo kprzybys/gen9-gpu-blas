@@ -1,6 +1,6 @@
 #!/bin/sh
 # GEMM: oneDNN v3.6 (GPU, OpenCL, jit:gemm with nGEN -- the last version with a kernel catalog for Gen9) vs libgen9blas.
-# oneDNN is built outside the repo: ~/src/onednn-3.6 (cmake -DDNNL_CPU_RUNTIME=NONE -DDNNL_GPU_RUNTIME=OCL, target benchdnn).
+# oneDNN is built outside the repo (default location ~/src/onednn-3.6, override with BENCHDNN) (cmake -DDNNL_CPU_RUNTIME=NONE -DDNNL_GPU_RUNTIME=OCL, target benchdnn).
 # Measurement: benchdnn --mode=P (data already on the GPU, min time over many repetitions) -- compare with gen9blas in gpu mode (USM).
 # Run from the repo root: sh bench/compare/onednn.sh > results/...
 B=${BENCHDNN:-$HOME/src/onednn-3.6/build/tests/benchdnn/benchdnn}

@@ -1,7 +1,7 @@
 // Skinny GEMM in ViennaCL 1.7.1 (OpenCL through NEO): C (M×N) = A (M×K) · Wᵀ, W (N×K) row-major -- the same shapes as
 // bench/skinny_gemm.py (libgen9blas). FP32 only (ViennaCL has no FP16). For M = 1 also GEMV y = W·x.
 // Method: warm-up 3×, then repeat up to ≥ 0.5 s, median of single-call times (with viennacl::backend::finish()).
-// Build: g++ -O2 -DVIENNACL_WITH_OPENCL -I ~/src/viennacl-1.7.1-github/viennacl-dev-release-1.7.1 viennacl_skinny.cpp -lOpenCL
+// Build: g++ -O2 -DVIENNACL_WITH_OPENCL -I <ViennaCL 1.7.1 source dir> viennacl_skinny.cpp -lOpenCL
 #include <algorithm>
 #include <chrono>
 #include <cstdio>

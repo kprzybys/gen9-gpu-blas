@@ -22,6 +22,24 @@ done <<'L'
 L
 f=pdf/the-compute-architecture-of-intel-processor-graphics-gen9-v1d0.pdf
 [ -f "$f" ] || curl -sfL -A "$UA" -o "$f" https://www.intel.com/content/dam/develop/external/us/en/documents/the-compute-architecture-of-intel-processor-graphics-gen9-v1d0.pdf
+sha256sum_check() {
+  # Warn (do not fail silently) when a downloaded PDF differs from the one the documentation was written against.
+  sha256sum -c --quiet - 2>&1 <<'S' || echo "WARNING: some PDFs differ from the reference checksums (Intel may have re-issued them); page numbers in docs/ may not match" >&2
+1833ab7fcd7f132f88504e2b243fe357f7f86ac1350838aacf407e291c03dbaf  pdf/intel-gfx-prm-osrc-kbl-vol01-preface.pdf
+0f2bd4d5fdcdb502606bda01d91247a4101a076c8f1ffeb620fc42beb3f141a4  pdf/intel-gfx-prm-osrc-kbl-vol02a-commandreference-instructions.pdf
+bcae959ab2f87fb7cf00412d396a97fb7e62b3824bc131e411677d97833d8e0c  pdf/intel-gfx-prm-osrc-kbl-vol02b-commandreference-enumerations.pdf
+c6fcd0256fe9dcc51695d68e7a12e19a87e17b40004ff23277f1a452caa72faf  pdf/intel-gfx-prm-osrc-kbl-vol02c-commandreference-registers-part1.pdf
+542454f3c013ab291296b9fb26cbc9fe16c465783f7436fe43e728dcde01de8f  pdf/intel-gfx-prm-osrc-kbl-vol02c-commandreference-registers-part2_0.pdf
+3aca1f3230584dc598799871ba901f5b40fcbd01f19edd41dd167a9e6768a805  pdf/intel-gfx-prm-osrc-kbl-vol02d-commandreference-structures.pdf
+9aec33ce96790de7b0402744591788041221a9e2ec92fc2ae280003f505591ae  pdf/intel-gfx-prm-osrc-kbl-vol03-gpu_overview.pdf
+aa1d9bc58ad40bf5ef914de8edcfbda825bfdd279944b719f4c406fda897a481  pdf/intel-gfx-prm-osrc-kbl-vol04-configurations.pdf
+8b15ca979b4f356888dd0b4b46482cd05457949974c1dde1abd6914f911fd8e0  pdf/intel-gfx-prm-osrc-kbl-vol05-memory_views.pdf
+432bda751f1ef8925ee65eec3f2dedc7359c88441a03cbdef601e5f62686cc9b  pdf/intel-gfx-prm-osrc-kbl-vol06-command_stream_programming.pdf
+22aa547d0b634af217917d71642791f522ace6a9567aed74451c040fb99a7bee  pdf/intel-gfx-prm-osrc-kbl-vol07-3d_media_gpgpu.pdf
+5a944ad0bf9b078816480017bae4c31bfb927678c525e0f35b25154464a59f14  pdf/the-compute-architecture-of-intel-processor-graphics-gen9-v1d0.pdf
+S
+}
+sha256sum_check
 for p in pdf/*.pdf; do b=$(basename "$p" .pdf); [ -f "txt/$b.txt" ] || pdftotext -layout "$p" "txt/$b.txt"; done
 for e in cl_intel_subgroups cl_intel_subgroups_short cl_intel_subgroups_char cl_intel_required_subgroup_size cl_intel_spirv_subgroups; do
   [ -f "khronos/$e.md" ] || curl -sfL "https://registry.khronos.org/OpenCL/extensions/intel/$e.html" | pandoc -f html -t gfm-raw_html --wrap=none -o "khronos/$e.md"
@@ -57,6 +75,28 @@ if [ ! -f "$M/genxml/gen90.xml" ]; then
   for f in gen40.xml gen45.xml gen50.xml gen60.xml gen70.xml gen75.xml gen80.xml gen90.xml gen_pack_header.py intel_genxml.py util.py README; do
     cp "$t/src/intel/genxml/$f" "$M/genxml/"; done
   rm -rf "$t"
+fi
+# Intel Compute Runtime (NEO): how it programs the Gen9 compute pipeline (docs/no-neo.md), the files that were consulted
+N=neo-24.35.30872.36
+if [ ! -d "$N" ]; then
+  t=$(mktemp -d)
+  git clone -q --filter=blob:none --sparse --depth 1 --branch 24.35.30872.36 https://github.com/intel/compute-runtime.git "$t"
+  (cd "$t" && git sparse-checkout set shared/source opencl/source)
+  for f in shared/source/gen9/preamble_gen9.cpp shared/source/gen9/hw_cmds_base.h shared/source/gen9/command_encoder_gen9.cpp \
+           shared/source/gen9/reg_configs.h shared/source/gen9/gfx_core_helper_gen9.cpp \
+           shared/source/command_container/command_encoder.inl shared/source/command_container/command_encoder_bdw_and_later.inl \
+           shared/source/generated/gen9/hw_cmds_generated_gen9.inl \
+           shared/source/helpers/gfx_core_helper_bdw_and_later.inl shared/source/helpers/per_thread_data.h shared/source/helpers/l3_range.h \
+           shared/source/helpers/gfx_core_helper_base.inl shared/source/helpers/state_base_address_bdw.inl \
+           shared/source/helpers/local_id_gen_special.inl shared/source/helpers/preamble_bdw_and_later.inl shared/source/helpers/local_id_gen.h \
+           shared/source/helpers/local_id_gen.inl shared/source/helpers/state_base_address_bdw_and_later.inl \
+           opencl/source/gen9/gpgpu_walker_gen9.cpp opencl/source/command_queue/gpgpu_walker_bdw_and_later.inl \
+           opencl/source/command_queue/gpgpu_walker_base.inl opencl/source/command_queue/gpgpu_walker.h \
+           opencl/source/helpers/hardware_commands_helper_base.inl opencl/source/helpers/hardware_commands_helper_bdw_and_later.inl \
+           opencl/source/helpers/hardware_commands_helper.h; do
+    mkdir -p "$N/$(dirname "$f")"; cp "$t/$f" "$N/$f"
+  done
+  cp "$t/LICENSE.md" "$N/"; (cd "$t" && git log -1 --format='NEO 24.35.30872.36 %H %cd') > "$N/VERSION.txt"; rm -rf "$t"
 fi
 # intel-gpu-tools: gpgpu_fill (the smallest example of a Gen9 compute kernel through i915, without NEO)
 I=igt-2.6

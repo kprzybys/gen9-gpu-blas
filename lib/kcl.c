@@ -667,7 +667,7 @@ static cl_int enqueue_(cl_command_queue q, cl_kernel k, cl_uint dim, const size_
     }
     uint32_t slm = 0;
     // SLM size encoding in the IDD (PRM KBL vol. 2d, NEO computeSlmValues): log2(pow2(max(slm, 1K))) - 9, i.e.
-    // 1K=1, 2K=2, 4K=3 ... 64K=7. Note: Mesa genxml (gen80) gives a different encoding (4K=1, 8K=2, ...) -- with it work-groups
+    // 1K=1, 2K=2, 4K=3 ... 64K=7. Note: the Gen8 encoding (Mesa genxml gen80.xml: 4K=1, 8K=2, ...) differs; Mesa's gen90.xml has the right one -- with Gen8 values work-groups
     // got too little SLM and overlapped (SYMM/TRMM: wrong result with more than one work-group).
     if (o->slm) { uint32_t v = 1024; slm = 1; while (v < o->slm) { v *= 2; slm++; } slm_in_batch = 1; }
     struct GFX9_INTERFACE_DESCRIPTOR_DATA idd = {

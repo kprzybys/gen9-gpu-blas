@@ -1,5 +1,5 @@
 # GEMM ggml (llama.cpp 2cbe0ec, 2026-11-11) Vulkan backend (Mesa ANV) on UHD 620, test-backend-ops perf -o MUL_MAT -b Vulkan0
-# Local patch in ~/src/llama.cpp/tests/test-backend-ops.cpp: GEN9BLAS_SQUARE=1 -> n x n cases (type_a f32/f16, type_b f32, result f32).
+# Local patch to llama.cpp tests/test-backend-ops.cpp (not included): GEN9BLAS_SQUARE=1 -> n x n cases (type_a f32/f16, type_b f32, result f32).
 # ggml_vulkan: 0 = Intel(R) UHD Graphics 620 (WHL GT2) (Intel open-source Mesa driver) | uma: 1 | fp16: 1 | int dot: 0 | matrix cores: none
 # Time: wall-clock per graph call (us/run), GFLOPS = 2n³ / time
 n=1024 f32: 15160 us  142 GFLOPS | f16 (A f16, B f32): 16790 us  128 GFLOPS

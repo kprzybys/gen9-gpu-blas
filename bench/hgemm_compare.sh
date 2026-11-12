@@ -1,7 +1,7 @@
 #!/bin/sh
 # GEMM comparison: our HGEMM (asm and OpenCL C) vs CLBlast (H/SGEMM) vs OpenBLAS (f32). Result: results/hgemm-compare-<date>.txt
 cd -P "$(dirname "$0")"
-[ -x hgemm_asm.bin ] || make -C ../asm
+[ -f hgemm_asm.bin ] || make -C ../asm
 g() { grep -oE '[0-9.]+ GFLOPS' | head -1 | awk '{print $1}'; }
 gp() { grep -oE 'with packing: [0-9.]+ ms, [0-9.]+' | awk '{print $NF}'; }
 {
