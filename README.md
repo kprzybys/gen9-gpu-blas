@@ -1,5 +1,7 @@
 # gen9-gpu-blas
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.24166394.svg)](https://doi.org/10.5281/zenodo.24166394)
+
 BLAS levels 1–3 (FP16, FP32, FP64) for the Intel UHD Graphics 620 integrated GPU (Gen9.5, Whiskey Lake GT2), with
 GEMM inner loops written in Gen9 assembly, and `kcl`, a minimal OpenCL subset that builds command buffers itself and
 submits them straight to the Linux `i915` kernel driver. No OpenCL runtime (NEO) is needed to run the library.
@@ -194,11 +196,12 @@ part of this repository and keep their own licenses.
 
 ## How to cite
 
-See `CITATION.cff` (GitHub offers "Cite this repository" from it). Version 0.1.0 is planned.
-<!-- Zenodo DOI: to be added after the 0.1.0 release is archived -->
+See `CITATION.cff` (GitHub offers "Cite this repository" from it). Archived on Zenodo: DOI
+[10.5281/zenodo.24166394](https://doi.org/10.5281/zenodo.24166394) (all versions; version 0.1.0:
+[10.5281/zenodo.24166395](https://doi.org/10.5281/zenodo.24166395)).
 
 > Przybyszewski, K. gen9-gpu-blas: BLAS levels 1–3 for Intel UHD 620 (Gen9.5) with hand-written assembly GEMM loops
-> and a direct i915 OpenCL subset, version 0.1.0. https://github.com/kprzybys/gen9-gpu-blas
+> and a direct i915 OpenCL subset, version 0.1.0, 2026. https://doi.org/10.5281/zenodo.24166394
 
 ## AI assistance
 
