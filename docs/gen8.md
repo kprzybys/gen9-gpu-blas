@@ -163,11 +163,25 @@ matched `results/skylake-hd530-2026-11-12.txt` within 0.6 % (n >= 2048).
 | DGEMM n = 16 | `pkd_a` | **GPU hang, engine reset** (detected by kcl; machine and services unaffected) |
 
 So kcl itself works on Gen8 (command stream, 4 GB address space, coherency, patch-token descriptors) and the width-1
-64-bit regions of `-noFP64bRegion` executed correctly in `copy16_f`. The failing packing kernels use the same memory
-messages as the working ones (A64 dword/qword gather and scatter), so the difference is in index arithmetic: they contain
-non-scalar DW x DW multiplies and `mul`/`mach` sequences emulating 64-bit multiplies, which break R1 [HYP: the most likely
-cause; `axpy` with unit strides may have passed because its products were trivial]. Next: remove these multiplies from
-the GEMM-path kernels (section 3, way 2) and re-run; no further GPU runs on the target before that.
+64-bit regions of `-noFP64bRegion` executed correctly in `copy16_f`.
+
+Analysis (offline, 2026-11-12):
+- **SGEMM: a software bug of step D5, not the hardware.** On Gen8 the main kernel is `sgemm_v` from `bench/sgemm.cl`,
+  which reads the plain packed layout of `pack_af`/`pack_bf` (`sgemm.cl:46-53`, 156-181), while the packing kernels
+  `pkf_a`/`pkf_b` write the interleaved layout of the Gen9 assembler kernel (`PKF_IDX_A`/`PKF_IDX_B`, `sgemm.cl:131-133`).
+  The same arguments, a different data layout; on Gen9 this pair never runs. A numpy emulation of "pack with PKF_IDX,
+  multiply as `sgemm_v` reads" with the test's random inputs predicts relative errors 1.4546 (n = 64) and 1.3259
+  (n = 256), printed by the test as 1.5e+00 and 1.3e+00 as measured [EXP]. So `pkf_a`, `pkf_b` and `sgemm_v` most likely
+  executed correctly [HYP until re-run with a consistent layout].
+- **The DW x DW multiply hypothesis is contradicted:** `skinny_n2_f`, `skinny_n4_f` and `axpy_f` ran correctly with
+  non-scalar DW x DW `mul` and `mul`/`mach` sequences whose products feed the store addresses [SCAN + MEAS]. Not yet
+  exercised: `mach` with a non-zero high part, `math.invm`/`madm` (R3), the indirect moves (R2).
+- **DGEMM hang: unexplained.** It is in `pkd_a` (its start timestamp was written, its end not); `pkd_a` has no loop. The
+  only instruction forms it uses that no completed kernel used are A64 qword gather/scatter messages and `mov :df`
+  [SCAN]. The CHV PRM defines A64 QWord scattered messages (vol07 p.129, 193), but Mesa never emits them [HYP: the
+  candidate cause].
+- Next: give `pkf_a`/`pkf_b` the plain layout in the Gen8 build and re-run SGEMM (no new risk); then FP64 copy
+  (`copy16_d`: qword messages without multiplies), which may hang, to test the qword-message candidate.
 
 ## 7. Open questions
 
