@@ -198,7 +198,7 @@ See `CITATION.cff` (GitHub offers "Cite this repository" from it). Version 0.1.0
 <!-- Zenodo DOI: to be added after the 0.1.0 release is archived -->
 
 > Przybyszewski, K. gen9-gpu-blas: BLAS levels 1–3 for Intel UHD 620 (Gen9.5) with hand-written assembly GEMM loops
-> and a direct i915 OpenCL subset, version 0.1.0.
+> and a direct i915 OpenCL subset, version 0.1.0. https://github.com/kprzybys/gen9-gpu-blas
 
 ## AI assistance
 

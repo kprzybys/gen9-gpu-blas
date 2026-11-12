@@ -12,6 +12,7 @@ authors:
     given-names: Karol
     orcid: "https://orcid.org/0009-0001-9311-2022"
 license: MIT
+repository-code: "https://github.com/kprzybys/gen9-gpu-blas"
 keywords:
   - BLAS
   - GEMM
