@@ -441,7 +441,7 @@ The repository does not keep a per-binary build script; everything is in `asm/Ma
 |---|---|
 | `make -C asm` | rebuilds the 6 binaries in `bench/` (`gen_h`, `gen_hd`, `gen_s`, `hgemm_asm`, `hgemm_kc_asm`, `sgemm_asm`) from the frozen templates `asm/gen_h.cl`, `gen_s.cl`, `hgemm.cl`, `hgemm_kc.cl`, `sgemm.cl` and the tracked accumulator maps `asm/*_map.txt`; no GPU needed |
 | `make -C asm check` | rebuilds into a temporary directory and compares with `bench/*.bin` (`cmp`) |
-| `make -C asm maps` | regenerates the maps on the GPU (`asm/maps.sh`; needs `bench/hgemm` and `bench/sgemm` built) |
+| `make -C asm maps` | regenerates the maps on the GPU (`asm/maps.sh`; needs `bench/hgemm` and `bench/sgemm`: `make -C bench`) |
 | `make -C lib` | embeds `bench/gen_h.bin`, `gen_hd.bin`, `gen_s.bin` into `lib/kernels.c` (via `lib/gen_kernels.py`) |
 
 Steps inside the makefile: template (OpenCL C) -> `asm/disassemble.sh` -> directory `asm/<name>.d` -> generator in `loop` mode

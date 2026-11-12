@@ -1,7 +1,7 @@
 # Reproducible build of the six hand-assembled GEMM binaries (no GPU needed):
 #   make -C asm          rebuild all binaries into ../bench from the frozen templates (*.cl) and tracked maps (*_map.txt)
 #   make -C asm check    rebuild into a temporary directory (from scratch) and cmp with the binaries in ../bench
-#   make -C asm maps     regenerate the accumulator maps on the GPU (needs ../bench/hgemm and ../bench/sgemm built)
+#   make -C asm maps     regenerate the accumulator maps on the GPU (needs ../bench/hgemm and ../bench/sgemm: make -C ../bench)
 # Per binary: template (OpenCL C) --ocloc--> disassembly dir <name>.d --generator `loop` mode + map--> .bin
 # Library binaries: gen_h, gen_hd, gen_s (embedded by lib/Makefile); older experiments: hgemm_asm, hgemm_kc_asm, sgemm_asm.
 # gen_h and gen_hd share the template gen_h.cl (they patch different kernels: hgemm_v and hgemm_kc_v).

@@ -38,9 +38,8 @@ time. `bench/level3_power.py` and `bench/compare/l3_power.sh` wrap it for level-
 ## 3. Reproducing each result file
 
 Build prerequisites: `make -C lib libgen9blas.so libgen9blas_blas.so` (and `make -C lib libgen9blas_neo.so` for NEO
-comparisons); programs under `bench/` that use OpenCL are compiled with `gcc -O2 -Wall -o bench/<name> bench/<name>.c
--lOpenCL -lm` (the exact lines for `clbench`, `gemm_clblast`, `overhead` and `compare/l3` are in the scripts, the
-`bench/compare/Makefile` and the source headers). Run scripts from the repository root unless noted; the shell scripts
+comparisons); the measurement programs are built with `make -C bench` (`hgemm`, `sgemm`, `clbench`, `packing`, `l12`, `overhead`)
+and `make -C bench optional` (`gemm_clblast`, needs CLBlast and OpenBLAS); library comparisons: `make -C bench/compare`. Run scripts from the repository root unless noted; the shell scripts
 `cd` to their own directory. Comparison binaries need CLBlast (`libclblast`), OpenBLAS and an OpenCL ICD (NEO).
 
 | Result file (`results/`) | What it contains | How to reproduce |
@@ -62,7 +61,7 @@ comparisons); programs under `bench/` that use OpenCL are compiled with `gcc -O2
 | `skinny-gemm-rework-2026-11-12.txt` | Rework of the skinny kernels (`skinny_r`), diagnosis from assembly, stage comparison | `python3 bench/skinny_gemm.py usm`; old path of the rework: `GEN9BLAS_SKINNY_R=0`; 3 alternating runs, medians. Assembly dumps come from `lib/.kernels/` after `make -C lib` |
 | `gemv-n-2026-11-12.txt` | GEMV N, old vs grouped kernel, USM vs plain memory | `python3 bench/gemv_n.py usm` and `... plain` (the script alternates `GEN9BLAS_GEMV_N=old\|grouped` in separate processes, 3 rounds) |
 | `message-16B-2026-11-12.txt` | Access width per lane vs bandwidth (copy and GEMV kernels) | `python3 bench/compare/viennacl_gen9blas.py` for the table; kernels in `bench/level12.cl`; ISA by `ocloc disasm` (see `asm/disassemble.sh`) |
-| `overhead-2026-11-12.txt` | Fixed call cost, phase breakdown (execbuf, wait, command building, userptr) | `gcc -O2 -o bench/overhead bench/overhead.c -Llib -lgen9blas -Wl,-rpath,$PWD/lib`; `KCL_PHASES=1 bench/overhead [n] [repetitions] [usm]` on mains power, then once on battery. The bare-i915 reference line comes from `experiments/no-neo/first` |
+| `overhead-2026-11-12.txt` | Fixed call cost, phase breakdown (execbuf, wait, command building, userptr) | `make -C bench overhead`; `KCL_PHASES=1 bench/overhead [n] [repetitions] [usm]` on mains power, then once on battery. The bare-i915 reference line comes from `experiments/no-neo/first` |
 | `userptr-2026-11-12.txt` | userptr vs copy through the CPU | `sh bench/compare/userptr.sh` (3 alternating rounds; copy mode uses `GEN9BLAS_NO_USERPTR=1`); microbenchmark: `make -C experiments/no-neo userptr && experiments/no-neo/userptr` |
 | `auto-thresholds-2026-11-12.txt` | Sizes at which the BLAS layer's auto mode sends level 1–2 calls to the GPU, CPU time per call | `python3 bench/auto_thresholds.py [rounds] [s\|d]` (needs `lib/libgen9blas_blas.so`; modes run alternately in separate processes). The file's battery section is superseded by its "MAINS POWER" section |
 | `no-neo-level3-2026-11-11.txt` | Level 3 without NEO (`kcl`) vs the NEO variant, with CPU load | `OPENBLAS_NUM_THREADS=1 python3 bench/level3_cpu.py 1024 2048 4096` once with the default library and once with `GEN9BLAS_LIB=lib/libgen9blas_neo.so` (build with `make -C lib libgen9blas_neo.so`) |

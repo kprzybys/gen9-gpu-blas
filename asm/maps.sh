@@ -1,7 +1,7 @@
 #!/bin/sh
 # Regenerates one accumulator map (register -> row/column of C) by running the kernel on the GPU.
 # Usage: asm/maps.sh h|hd|s|hgemm|hgemm_kc|sgemm      (called for all kinds by `make -C asm maps`)
-# Needs: bench/hgemm and bench/sgemm built, the disassembly dirs (make builds them), and an Intel GPU.
+# Needs: bench/hgemm and bench/sgemm built (make -C bench), the disassembly dirs (make builds them), and an Intel GPU.
 # The compiler's epilog keeps each row of C in some register; the generator in `map` mode writes a kernel in which
 # accumulator number i is the constant i, the kernel is run with DUMP=1, and the printed values give the mapping.
 set -e
