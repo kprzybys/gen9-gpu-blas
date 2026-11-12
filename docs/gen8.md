@@ -188,6 +188,15 @@ Analysis (offline, 2026-11-12):
   engine reset** (detected by kcl; machine and services unaffected). So the DGEMM hang does not come from index
   arithmetic; the candidates left are the A64 qword scattered messages (most likely) and DF-typed moves [HYP].
   `-cl-intel-force-enable-a64WA` (internal option) does not change these messages [EXP].
+- **Root cause confirmed, 2026-11-13** (`lib/test_gen8_probe`, kernels in `bench/gen8_probe.cl`, compiled stateless) [MEAS]:
+  `probe_df_dword` (DF multiply, A64 dword gather/scatter only) is correct (64 of 64); `probe_qword` (the A64 QWord
+  gathering read `0x042402FF` of the hanging kernels, integer data, no DF type) **hangs the GPU** (engine reset; machine
+  and services unaffected). So on the Cherryview the A64 QWord scattered *read* must not be used. The CHV PRM documents
+  the message (vol07 p.193) but has no "A64 Qword Scattered Read" MSD page (vol02a lists Dword read/write and only the
+  Qword *write*); Mesa never emits 64-bit memory messages on Gen8 (`elk_fs_nir.cpp`: 64-bit global loads are split into
+  32-bit ones). Not tested on its own: the A64 QWord scattered write (the probe's compiler used dword scatter for it).
+- Fix: in the Gen8 build, FP64 data must be read with dword messages (e.g. `as_double(vload2(..., (global uint *)p))`);
+  this concerns 40 of the 41 FP64 kernels and the FP32 `trsm_inv*_f` kernels [SCAN].
 
 ## 7. Open questions
 
