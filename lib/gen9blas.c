@@ -163,8 +163,8 @@ int gen9blas_init(const char *dir) {
         snprintf(n, sizeof n, "gen9blas_sklej_%s", suf); KER(t[i].pr, n, r->skl);
         snprintf(n, sizeof n, "%s_t", t[i].pa); KER(t[i].pr, n, r->pa_t);
         snprintf(n, sizeof n, "%s_t", t[i].pb); KER(t[i].pr, n, r->pb_t);
-        cl_int e3;   // optional faster packing kernels (GEN9BLAS_PACK=stare: disabled)
-        int old_pack = getenv("GEN9BLAS_PACK") && !strcmp(getenv("GEN9BLAS_PACK"), "stare");
+        cl_int e3;   // optional faster packing kernels (GEN9BLAS_PACK=old: disabled)
+        int old_pack = getenv("GEN9BLAS_PACK") && !strcmp(getenv("GEN9BLAS_PACK"), "old");
         snprintf(n, sizeof n, "%s_q", t[i].pa); r->pa_q = old_pack ? NULL : clCreateKernel(t[i].pr, n, &e3); if (e3) r->pa_q = NULL;
         snprintf(n, sizeof n, "%s_w2", t[i].pb); r->pb_w2 = old_pack ? NULL : clCreateKernel(t[i].pr, n, &e3); if (e3) r->pb_w2 = NULL;
         r->es = t[i].es; r->tn = t[i].tn; r->km = t[i].km; r->ready = 1;
@@ -175,14 +175,14 @@ int gen9blas_init(const char *dir) {
 }
 
 // Sleeping wait for the queue to finish: clFinish / clWaitForEvents / blocking reads in NEO spin actively
-// on the CPU (~6 W). Marker + clFlush, then polling the state every 20 µs .. 0.5 ms. GEN9BLAS_WAIT=aktywne: clFinish.
+// on the CPU (~6 W). Marker + clFlush, then polling the state every 20 µs .. 0.5 ms. GEN9BLAS_WAIT=busy: clFinish.
 static int wait_gpu(void) {
 #ifndef GEN9BLAS_NEO   // kcl: submit the batch buffer and GEM_WAIT (sleeps in the Linux kernel until the GPU interrupt)
     if (kcl_wait() != CL_SUCCESS) FAIL("GPU execution error (kcl)");
     return 0;
 #else
     static int busy = -1;
-    if (busy < 0) { const char *e = getenv("GEN9BLAS_WAIT"); busy = e && !strcmp(e, "aktywne"); }
+    if (busy < 0) { const char *e = getenv("GEN9BLAS_WAIT"); busy = e && !strcmp(e, "busy"); }
     if (busy) { CHECK(clFinish(q)); return 0; }
     cl_event e; cl_int st = CL_COMPLETE; long ns = 20000;
     CHECK(clEnqueueMarkerWithWaitList(q, 0, NULL, &e)); CHECK(clFlush(q));
@@ -905,9 +905,9 @@ static int gemv_inner(l12_t *k, int trans, int M, int N, double alpha, bf_t A, i
         // Rows of 1024 columns and more: the grouped variant (16 subgroups on the same 4 rows, few pages at once). On ordinary memory
         // (userptr, 4 KB pages) the old one lost 2× (n = 4096: 10.5 -> 18.9 GB/s), on USM -5..+20%; with N <= 512
         // grouped is slower (too few columns for 16 subgroups). Measurement: bench/gemv_n.py, results/gemv-n-2026-11-12.txt.
-        // GEN9BLAS_GEMV_N=stary|grupowy forces a variant (comparisons).
+        // GEN9BLAS_GEMV_N=old|grouped forces a variant (comparisons).
         static int forced = -1;
-        if (forced < 0) { const char *e = getenv("GEN9BLAS_GEMV_N"); forced = !e ? 0 : !strcmp(e, "stary") ? 1 : !strcmp(e, "grupowy") ? 2 : 0; }
+        if (forced < 0) { const char *e = getenv("GEN9BLAS_GEMV_N"); forced = !e ? 0 : !strcmp(e, "old") ? 1 : !strcmp(e, "grouped") ? 2 : 0; }
         const int grouped = forced == 2 || (forced == 0 && N >= 1024);
         cl_kernel K = grouped ? k->gemv_nw : k->gemv_n;
         ARG(K, 0, M); ARG(K, 1, N); ARGR(K, 2, alpha); ARGB(K, 3, A); ARG(K, 4, oa); ARG(K, 5, lda); ARGB(K, 6, x);

@@ -1,6 +1,6 @@
 """Poziom 3 libgen9blas: czas całego wywołania i czas CPU procesu (wszystkie wątki) na wywołanie.
 
-Uruchom: python3 bench/level3_cpu.py [n ...]   (GEN9BLAS_LIB=ścieżka: inna wersja biblioteki; GEN9BLAS_WAIT=aktywne)
+Uruchom: python3 bench/level3_cpu.py [n ...]   (GEN9BLAS_LIB=ścieżka: inna wersja biblioteki; GEN9BLAS_WAIT=busy)
 CPU% = czas CPU / czas ściany: ile rdzenia zajmuje wywołanie (cel: blisko 0 -- CPU tylko zleca i śpi).
 Tablice gen9blas.empty (zero-copy). Najlepszy czas ściany z 5 powtórzeń, czas CPU -- średnia.
 """

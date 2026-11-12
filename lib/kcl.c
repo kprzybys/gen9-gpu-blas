@@ -261,8 +261,8 @@ static int open_batch(void) {
     lri = p;   // L3CNTLREG: value filled in at submit time (with SLM if any kernel uses it)
     EMIT(MI_LOAD_REGISTER_IMM, .RegisterOffset = 0x7034, .DataDWord = L3_NO_SLM);
     // EU thread arbitration: round-robin (DebugControlReg2 0xE404 = 0x100), like NEO on Gen9 (gfx_core_helper_gen9.cpp:
-    // getDefaultThreadArbitrationPolicy, command_encoder_gen9.cpp). KCL_ARB=wiek ("age"): the hardware default (diagnostics).
-    static int arb = -1; if (arb < 0) arb = !(getenv("KCL_ARB") && !strcmp(getenv("KCL_ARB"), "wiek"));
+    // getDefaultThreadArbitrationPolicy, command_encoder_gen9.cpp). KCL_ARB=age: the hardware default (diagnostics).
+    static int arb = -1; if (arb < 0) arb = !(getenv("KCL_ARB") && !strcmp(getenv("KCL_ARB"), "age"));
     if (arb) EMIT(MI_LOAD_REGISTER_IMM, .RegisterOffset = 0xE404, .DataDWord = 0x100);
     EMIT(PIPELINE_SELECT, .MaskBits = 3, .PipelineSelection = GPGPU);
     EMIT(STATE_BASE_ADDRESS,
