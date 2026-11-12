@@ -58,3 +58,5 @@ cl_mem kcl_userptr(const void *ptr, size_t n, int wr);
 void kcl_new_operation(void);
 // Submit the current batch buffer and wait for all work to finish (sleeps in the Linux kernel, GEM_WAIT).
 cl_int kcl_wait(void);
+// 1 on a Gen8 Cherryview GPU (docs/gen8.md): kernels from kernels_gen8.c, no assembler programs; 0 on Gen9.
+int kcl_gen8(void);

@@ -442,6 +442,7 @@ cl_int kcl_wait(void) {
     if (kprofile_kernels) collect_measurements();
     return CL_SUCCESS;
 }
+int kcl_gen8(void) { return init() ? 0 : dev.gen8; }
 static uint64_t seq_in_use(void) { return cur >= 0 ? S[cur].seq : seq_sent; }   // the last batch that may use an object
 static int kcl_wait_all(void) { return kcl_wait() != CL_SUCCESS; }
 
