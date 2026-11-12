@@ -1,14 +1,14 @@
-"""Wspólny generator ręcznych pętli GEMM w asemblerze Gen9 dla UHD 620 (zastępuje hgemm_asm.py, sgemm_asm.py, hgemm_kc_asm.py).
+"""Common generator of hand-written GEMM loops in Gen9 assembly for UHD 620 (replaces hgemm_asm.py, sgemm_asm.py, hgemm_kc_asm.py).
 
-Rodzaje (szablony w bench/*.cl; wszystkie wsadowe: numer macierzy z numeru wątku, dla 1 macierzy b = 0):
-  h  : hgemm_16x32q    kafelek 16×32, FP16, A2 + Bq,   pół-kroki k (2 × 8 kl), 512 mad / k16
-  hd : hgemm_16x16kc_b kafelek 16×16, FP16 -> porcje 32 -> FP32, A3 + B16, ćwiartki k, 256 mad / k16
-  s  : sgemm_16x16p_b  kafelek 16×16, FP32, A2f + B2f, ćwiartki k, 256 mad / k16
-Automatycznie z pętli kompilatora: wskaźniki A i B (rejestry :q zwiększane w pętli; rola z użycia danych w mad,
-także przez kopie `mov :w`), licznik i granica (`cmp (lt)`), akumulatory (zerowane przed pętlą).
-Mapa akumulatorów (rejestr -> wiersz/kolumna) z uruchomienia na GPU (tryb mapa*, zob. gemm_build.sh).
+Types (templates in bench/*.cl; all batched: matrix index from the thread index, b = 0 for 1 matrix):
+  h  : hgemm_16x32q    tile 16×32, FP16, A2 + Bq,   half-steps of k (2 × 8 kl), 512 mad / k16
+  hd : hgemm_16x16kc_b tile 16×16, FP16 -> chunks of 32 -> FP32, A3 + B16, quarters of k, 256 mad / k16
+  s  : sgemm_16x16p_b  tile 16×16, FP32, A2f + B2f, quarters of k, 256 mad / k16
+Taken automatically from the compiler loop: pointers A and B (:q registers incremented in the loop; role from data use in mad,
+also through `mov :w` copies), counter and limit (`cmp (lt)`), accumulators (zeroed before the loop).
+Accumulator map (register -> row/column) from a GPU run (map* modes, see maps.sh).
 
-Użycie: python3 -I gemm_gen.py <rodzaj> analiza|mapa|mapa_f|mapa_h|petla <wynik.bin>
+Usage: python3 -I gemm_gen.py <type> analyze|map|map_f|map_h|loop <result.bin>
 """
 import os
 import re
@@ -17,55 +17,55 @@ import subprocess
 import sys
 import tempfile
 
-TU = os.path.dirname(os.path.realpath(__file__))
+HERE = os.path.dirname(os.path.realpath(__file__))
 W = "(W)     "
-RODZAJE = {
-    # szablony „v”: argumenty (Ap, Bp, C, M, N, ldc, K, Kfull) -- fragmenty danych spakowanych raz
-    "h": dict(plik="hgemm", kernel="hgemm_v", typ="hf"),
-    "hd": dict(plik="hgemm", kernel="hgemm_kc_v", typ="hf"),
-    "s": dict(plik="sgemm", kernel="sgemm_v", typ="f"),
+KINDS = {
+    # "v" templates: arguments (Ap, Bp, C, M, N, ldc, K, Kfull) -- pieces of data packed once
+    "h": dict(file="hgemm", kernel="hgemm_v", dtype="hf"),
+    "hd": dict(file="hgemm", kernel="hgemm_kc_v", dtype="hf"),
+    "s": dict(file="sgemm", kernel="sgemm_v", dtype="f"),
 }
-SEND = "0xC  0x024D0CFF"   # a64 aligned OWord block read ×8 (128 B), nagłówek 1 GRF
+SEND = "0xC  0x024D0CFF"   # a64 aligned OWord block read ×8 (128 B), header 1 GRF
 
 
-def katalog(rodz):
-    return os.path.join(TU, f"gen_{rodz}.d")
+def kind_dir(kind):
+    return os.path.join(HERE, f"gen_{kind}.d")
 
 
-def wczytaj(rodz):
-    k = RODZAJE[rodz]["kernel"]
-    t = open(os.path.join(katalog(rodz), f".text.{k}.asm")).read().splitlines()
+def load(kind):
+    k = KINDS[kind]["kernel"]
+    t = open(os.path.join(kind_dir(kind), f".text.{k}.asm")).read().splitlines()
     w = next(i for i, l in enumerate(t) if re.search(r"^\s+while \(16\|M0\)\s+L\d+", l))
-    etyk = re.search(r"while \(16\|M0\)\s+(L\d+)", t[w]).group(1)
-    s = next(i for i, l in enumerate(t) if l.startswith(etyk + ":"))
+    label = re.search(r"while \(16\|M0\)\s+(L\d+)", t[w]).group(1)
+    s = next(i for i, l in enumerate(t) if l.startswith(label + ":"))
     return t[:s], t[s:w + 1], t[w + 1:]
 
 
-def akumulatory(prolog):
-    """Zerowania po ostatnim skoku prologu: (lista hf, lista f)."""
-    ost = max([i for i, l in enumerate(prolog) if "jmpi" in l] + [0])
-    h = [int(m.group(1)) for l in prolog[ost:] for m in [re.search(r"mov \(16\|M0\)\s+r(\d+)\.0<1>:hf\s+0\.0:hf", l)] if m]
-    f = [int(m.group(1)) for l in prolog[ost:] for m in [re.search(r"mov \(16\|M0\)\s+r(\d+)\.0<1>:f\s+0\.0:f", l)] if m]
+def accumulators(prologue):
+    """Zeroings after the last jump of the prologue: (hf list, f list)."""
+    last = max([i for i, l in enumerate(prologue) if "jmpi" in l] + [0])
+    h = [int(m.group(1)) for l in prologue[last:] for m in [re.search(r"mov \(16\|M0\)\s+r(\d+)\.0<1>:hf\s+0\.0:hf", l)] if m]
+    f = [int(m.group(1)) for l in prologue[last:] for m in [re.search(r"mov \(16\|M0\)\s+r(\d+)\.0<1>:f\s+0\.0:f", l)] if m]
     return h, f
 
 
-def analiza(petla, typ):
-    wsk = sorted({int(m.group(1)) for l in petla
+def analyze(loop, dtype):
+    ptrs = sorted({int(m.group(1)) for l in loop
                   for m in [re.search(r"add \((?:8|1)\|M0\)\s+r(\d+)\.0<1>:q\s+r\1\.0<[^>]*>:q\s+\d+:w", l)] if m})
-    uzycie = {}
-    for l in petla:
-        m = re.search(rf"mad \(16\|M0\)\s+r\d+\.0<1>:{typ}\s+r\d+\.0<2;1>:{typ}\s+r(\d+)\.0<2;1>:{typ}\s+r(\d+)\.\d+<0>:{typ}", l)
+    usage = {}
+    for l in loop:
+        m = re.search(rf"mad \(16\|M0\)\s+r\d+\.0<1>:{dtype}\s+r\d+\.0<2;1>:{dtype}\s+r(\d+)\.0<2;1>:{dtype}\s+r(\d+)\.\d+<0>:{dtype}", l)
         if m:
-            uzycie.setdefault(int(m.group(1)), "B")
-            uzycie.setdefault(int(m.group(2)), "A")
-    kopie = [(int(m.group(1)), int(m.group(2))) for l in petla
+            usage.setdefault(int(m.group(1)), "B")
+            usage.setdefault(int(m.group(2)), "A")
+    copies = [(int(m.group(1)), int(m.group(2))) for l in loop
              for m in [re.search(r"mov \(16\|M0\)\s+r(\d+)\.0<1>:w\s+r(\d+)\.0<16;16,1>:w", l)] if m]
     for _ in range(6):
-        for d, s in kopie:
-            if d in uzycie:
-                uzycie.setdefault(s, uzycie[d])
-    defs, rola = {}, {}
-    for l in petla:
+        for d, s in copies:
+            if d in usage:
+                usage.setdefault(s, usage[d])
+    defs, role = {}, {}
+    for l in loop:
         m = re.search(r"(mov|add) \((?:1|8)\|M0\)\s+r(\d+)\.0<1>:u?q\s+r(\d+)\.0<[^>]*>:u?q(?:\s+(\S+):)?", l)
         if m:
             src = int(m.group(3))
@@ -77,194 +77,194 @@ def analiza(petla, typ):
         if m:
             base, _ = defs.get(int(m.group(2)), (int(m.group(2)), 0))
             r = int(m.group(1))
-            t = {uzycie[x] for x in range(r, r + 4) if x in uzycie}
-            if base in wsk and len(t) == 1:
-                rola.setdefault(base, set()).update(t)
-    pa = [w for w, t in rola.items() if t == {"A"}]
-    pb = [w for w, t in rola.items() if t == {"B"}]
-    assert len(pa) == 1 and len(pb) == 1, ("rozpoznanie wskaźników", wsk, rola)
+            t = {usage[x] for x in range(r, r + 4) if x in usage}
+            if base in ptrs and len(t) == 1:
+                role.setdefault(base, set()).update(t)
+    pa = [w for w, t in role.items() if t == {"A"}]
+    pb = [w for w, t in role.items() if t == {"B"}]
+    assert len(pa) == 1 and len(pb) == 1, ("pointer detection", ptrs, role)
     c = next(re.search(r"cmp \(16\|M0\)\s+\(lt\)f0\.0\s+null<1>:d\s+(r\d+\.\d)<0;1,0>:d\s+(r\d+\.\d)<0;1,0>:d", l)
-             for l in petla if "(lt)f0.0" in l)
-    return f"r{pa[0]}.0", f"r{pb[0]}.0", c.group(1), c.group(2), wsk
+             for l in loop if "(lt)f0.0" in l)
+    return f"r{pa[0]}.0", f"r{pb[0]}.0", c.group(1), c.group(2), ptrs
 
 
-def zbuduj(rodz, prolog, cialo, epilog, wynik):
-    k = RODZAJE[rodz]["kernel"]
+def build(kind, prologue, body, epilogue, result):
+    k = KINDS[kind]["kernel"]
     tmp = tempfile.mkdtemp()
     d = os.path.join(tmp, "d")
-    shutil.copytree(katalog(rodz), d)
-    open(os.path.join(d, f".text.{k}.asm"), "w").write("\n".join(prolog + cialo + epilog) + "\n")
-    nazwa = os.path.basename(wynik)
-    subprocess.run(["ocloc", "asm", "-file", nazwa, "-dump", d, "-device", "whl"], check=True, stdout=subprocess.DEVNULL)
-    shutil.move(os.path.join(d, nazwa), wynik)
+    shutil.copytree(kind_dir(kind), d)
+    open(os.path.join(d, f".text.{k}.asm"), "w").write("\n".join(prologue + body + epilogue) + "\n")
+    name = os.path.basename(result)
+    subprocess.run(["ocloc", "asm", "-file", name, "-dump", d, "-device", "whl"], check=True, stdout=subprocess.DEVNULL)
+    shutil.move(os.path.join(d, name), result)
     shutil.rmtree(tmp)
 
 
-class Rejestry:
-    def __init__(self, wolne):
-        self.w = list(wolne)
+class Registers:
+    def __init__(self, free_regs):
+        self.w = list(free_regs)
 
-    def blok(self, rozmiar, parz=0):
+    def block(self, size, parity=0):
         s = set(self.w)
-        for b in range(2 + parz, 127, 2):
-            if all(r in s for r in range(b, b + rozmiar)):
-                for r in range(b, b + rozmiar):
+        for b in range(2 + parity, 127, 2):
+            if all(r in s for r in range(b, b + size)):
+                for r in range(b, b + size):
                     self.w.remove(r)
                 return b
-        raise SystemExit(f"brak bloku {rozmiar} rejestrów o parzystości {parz}")
+        raise SystemExit(f"no block of {size} registers with parity {parity}")
 
-    def jeden(self):
+    def one(self):
         return self.w.pop(0)
 
 
-def wolne(prolog, epilog, zajete):
-    uz = {int(x) for l in epilog for x in re.findall(r"\br(\d+)", l.split("//")[0])}
-    return [r for r in range(2, 127) if r not in uz | zajete | {0, 1, 127}]
+def free_regs(prologue, epilogue, taken):
+    used = {int(x) for l in epilogue for x in re.findall(r"\br(\d+)", l.split("//")[0])}
+    return [r for r in range(2, 127) if r not in used | taken | {0, 1, 127}]
 
 
-def ladowanie(H, cele):
-    """cele: lista (rejestr docelowy, indeks nagłówka); po każdym send nagłówek += 128 B (sprzęt czyta nagłówek przy wydaniu)."""
+def loads(H, cele):
+    """targets: list of (destination register, header index); after each send header += 128 B (hardware reads the header at issue)."""
     return [x for dst, h in cele for x in (f"{W}send (16|M0)  r{dst}:w  r{H[h]}  {SEND}",
                                            f"{W}add (1|M0)  r{H[h]}.0<1>:q  r{H[h]}.0<0;1,0>:q  128:w")]
 
 
-def przesun(H, idx, ile):
-    return [f"{W}add (1|M0)  r{H[i]}.0<1>:q  r{H[i]}.0<0;1,0>:q  {ile}:w" for i in idx]
+def advance(H, idx, amount):
+    return [f"{W}add (1|M0)  r{H[i]}.0<1>:q  r{H[i]}.0<0;1,0>:q  {amount}:w" for i in idx]
 
 
-def koniec(licz, gran, krok, etyk):
-    return [f"{W}add (1|M0)  {licz}<1>:d  {licz}<0;1,0>:d  {krok}:w",
-            f"{W}cmp (16|M0)  (lt)f0.0  null<1>:d  {licz}<0;1,0>:d  {gran}<0;1,0>:d",
-            f"(W&f0.0) jmpi  {etyk}"]
+def loop_end(counter, limit, step, label):
+    return [f"{W}add (1|M0)  {counter}<1>:d  {counter}<0;1,0>:d  {step}:w",
+            f"{W}cmp (16|M0)  (lt)f0.0  null<1>:d  {counter}<0;1,0>:d  {limit}<0;1,0>:d",
+            f"(W&f0.0) jmpi  {label}"]
 
 
-def petla_h(prolog, petla_k, epilog, mapa):
-    """FP16 16×32: pół-krok h (kl 0..7) w buforze h: A2 8 GRF (pa + 256h), B0 8 GRF (pb + 256h), B1 8 GRF (pb + 512 + 256h).
-    Krok k16: pa += 512, pb += 1024."""
-    pa, pb, licz, gran, wsk = analiza(petla_k, "hf")
-    acc = set(mapa.values())
-    zaj = acc | {r for w in wsk for r in (w, w + 1)} | {int(x) for x in re.findall(r"r(\d+)", licz + gran)}
-    R = Rejestry(wolne(prolog, epilog, zaj))
-    buf = [(R.blok(8), R.blok(8), R.blok(8)) for _ in range(2)]
-    H = [R.jeden() for _ in range(6)]   # [bufor][A, B0, B1]
-    out = [f"// --- gemm_gen h: pa={pa} pb={pb} licznik={licz} granica={gran} bufory={buf} naglowki={H}"]
+def loop_h(prologue, loop_k, epilogue, acc_map):
+    """FP16 16×32: half-step h (kl 0..7) in buffer h: A2 8 GRF (pa + 256h), B0 8 GRF (pb + 256h), B1 8 GRF (pb + 512 + 256h).
+    Step k16: pa += 512, pb += 1024."""
+    pa, pb, counter, limit, ptrs = analyze(loop_k, "hf")
+    acc = set(acc_map.values())
+    busy = acc | {r for w in ptrs for r in (w, w + 1)} | {int(x) for x in re.findall(r"r(\d+)", counter + limit)}
+    R = Registers(free_regs(prologue, epilogue, busy))
+    buf = [(R.block(8), R.block(8), R.block(8)) for _ in range(2)]
+    H = [R.one() for _ in range(6)]   # [buffer][A, B0, B1]
+    out = [f"// --- gemm_gen h: pa={pa} pb={pb} counter={counter} limit={limit} buffers={buf} headers={H}"]
     for b in range(2):
         out += [f"{W}add (1|M0)  r{H[3 * b]}.0<1>:q  {pa}<0;1,0>:q  {256 * b}:w",
                 f"{W}add (1|M0)  r{H[3 * b + 1]}.0<1>:q  {pb}<0;1,0>:q  {256 * b}:w",
                 f"{W}add (1|M0)  r{H[3 * b + 2]}.0<1>:q  {pb}<0;1,0>:q  {512 + 256 * b}:w"]
 
-    def laduj(b):
+    def load_q(b):
         A, B0, B1 = buf[b]
-        o = ladowanie(H, [(A, 3 * b), (A + 4, 3 * b), (B0, 3 * b + 1), (B0 + 4, 3 * b + 1), (B1, 3 * b + 2), (B1 + 4, 3 * b + 2)])
-        # po 2 × 128 B: A do następnego k16 +256, B +768 (pomijamy drugą połówkę i drugą grupę kolumn)
-        return o + przesun(H, [3 * b], 256) + przesun(H, [3 * b + 1, 3 * b + 2], 768)
+        o = loads(H, [(A, 3 * b), (A + 4, 3 * b), (B0, 3 * b + 1), (B0 + 4, 3 * b + 1), (B1, 3 * b + 2), (B1 + 4, 3 * b + 2)])
+        # after 2 × 128 B: A to the next k16 +256, B +768 (skip the second half and the second column group)
+        return o + advance(H, [3 * b], 256) + advance(H, [3 * b + 1, 3 * b + 2], 768)
 
-    def mady(b):
+    def mads(b):
         A, B0, B1 = buf[b]
         o = []
         for kl in range(8):
             for r in range(16):
                 ga, sub = A + 2 * (r // 4) + (1 if kl % 2 == 0 else 0), (r % 4) * 4 + kl // 2
                 for c, Bc in ((0, B0), (1, B1)):
-                    a = mapa[(r, c)]
+                    a = acc_map[(r, c)]
                     o.append(f"        mad (16|M0)  r{a}.0<1>:hf  r{a}.0<2;1>:hf  r{Bc + kl}.0<2;1>:hf  r{ga}.{sub}<0>:hf")
         return o
-    return out + laduj(0) + laduj(1) + ["LGEN:"] + mady(0) + laduj(0) + mady(1) + laduj(1) + koniec(licz, gran, 16, "LGEN")
+    return out + load_q(0) + load_q(1) + ["LGEN:"] + mads(0) + load_q(0) + mads(1) + load_q(1) + loop_end(counter, limit, 16, "LGEN")
 
 
-def petla_cwiartki(prolog, petla_k, epilog, mapa, typ, kc=None, mapa_f=None):
-    """16×16, ćwiartki k (kl 0..3), bufory na zmianę, odczyt z wyprzedzeniem o 2 ćwiartki.
-    hf (hd): A3 4 GRF + B 4 GRF; ćwiartka = 128 B A + 128 B B. f (s): A2f 8 GRF + BE 4 + BO 4; ćwiartka = 256 B + 256 B.
-    hd: po kc iloczynach przeniesienie f += h (mieszane add), h = 0."""
-    pa, pb, licz, gran, wsk = analiza(petla_k, typ)
-    acc = set(mapa.values()) | ({r for x in mapa.values() for r in (x, x + 1)} if typ == "f" else set())
-    if mapa_f:
-        acc |= {r for x in mapa_f.values() for r in (x, x + 1)}
-    zaj = acc | {r for w in wsk for r in (w, w + 1)} | {int(x) for x in re.findall(r"r(\d+)", licz + gran)}
-    R = Rejestry(wolne(prolog, epilog, zaj))
-    if typ == "hf":
-        buf = [(R.blok(4), R.blok(4), None) for _ in range(2)]
-        cw = 128
+def loop_quarters(prologue, loop_k, epilogue, acc_map, dtype, kc=None, acc_map_f=None):
+    """16×16, quarters of k (kl 0..3), alternating buffers, read-ahead by 2 quarters.
+    hf (hd): A3 4 GRF + B 4 GRF; quarter = 128 B A + 128 B B. f (s): A2f 8 GRF + BE 4 + BO 4; quarter = 256 B + 256 B.
+    hd: after kc products carry f += h (mixed add), h = 0."""
+    pa, pb, counter, limit, ptrs = analyze(loop_k, dtype)
+    acc = set(acc_map.values()) | ({r for x in acc_map.values() for r in (x, x + 1)} if dtype == "f" else set())
+    if acc_map_f:
+        acc |= {r for x in acc_map_f.values() for r in (x, x + 1)}
+    busy = acc | {r for w in ptrs for r in (w, w + 1)} | {int(x) for x in re.findall(r"r(\d+)", counter + limit)}
+    R = Registers(free_regs(prologue, epilogue, busy))
+    if dtype == "hf":
+        buf = [(R.block(4), R.block(4), None) for _ in range(2)]
+        qw = 128
     else:
-        buf = [(R.blok(8), R.blok(4, 0), R.blok(4, 1)) for _ in range(2)]
-        cw = 256
-    H = [R.jeden() for _ in range(4)]   # [bufor][A, B]
-    out = [f"// --- gemm_gen {typ}: pa={pa} pb={pb} licznik={licz} granica={gran} bufory={buf} naglowki={H}"]
+        buf = [(R.block(8), R.block(4, 0), R.block(4, 1)) for _ in range(2)]
+        qw = 256
+    H = [R.one() for _ in range(4)]   # [buffer][A, B]
+    out = [f"// --- gemm_gen {dtype}: pa={pa} pb={pb} counter={counter} limit={limit} buffers={buf} headers={H}"]
     for b in range(2):
-        out += [f"{W}add (1|M0)  r{H[2 * b]}.0<1>:q  {pa}<0;1,0>:q  {cw * b}:w",
-                f"{W}add (1|M0)  r{H[2 * b + 1]}.0<1>:q  {pb}<0;1,0>:q  {cw * b}:w"]
+        out += [f"{W}add (1|M0)  r{H[2 * b]}.0<1>:q  {pa}<0;1,0>:q  {qw * b}:w",
+                f"{W}add (1|M0)  r{H[2 * b + 1]}.0<1>:q  {pb}<0;1,0>:q  {qw * b}:w"]
 
-    def laduj(b):
+    def load_q(b):
         A, B, BO = buf[b]
-        if typ == "hf":
-            o = ladowanie(H, [(A, 2 * b), (B, 2 * b + 1)])
+        if dtype == "hf":
+            o = loads(H, [(A, 2 * b), (B, 2 * b + 1)])
         else:
-            o = ladowanie(H, [(A, 2 * b), (A + 4, 2 * b), (B, 2 * b + 1), (BO, 2 * b + 1)])
-        return o + przesun(H, [2 * b, 2 * b + 1], 2 * cw - (128 if typ == "hf" else 256))
+            o = loads(H, [(A, 2 * b), (A + 4, 2 * b), (B, 2 * b + 1), (BO, 2 * b + 1)])
+        return o + advance(H, [2 * b, 2 * b + 1], 2 * qw - (128 if dtype == "hf" else 256))
 
-    def mady(b):
+    def mads(b):
         A, B, BO = buf[b]
         o = []
         for kl in range(4):
             for r in range(16):
-                a = mapa[r]
-                if typ == "hf":
+                a = acc_map[r]
+                if dtype == "hf":
                     g, sub, breg = A + 2 * (r // 8) + (kl % 2 == 0), (r % 8) * 2 + kl // 2, B + kl
                 else:
                     g, sub = A + 2 * (r // 4) + (kl % 2 == 0), (r % 4) * 2 + kl // 2
                     breg = (B if kl % 2 == 0 else BO) + 2 * (kl // 2)
-                o.append(f"        mad (16|M0)  r{a}.0<1>:{typ}  r{a}.0<2;1>:{typ}  r{breg}.0<2;1>:{typ}  r{g}.{sub}<0>:{typ}")
+                o.append(f"        mad (16|M0)  r{a}.0<1>:{dtype}  r{a}.0<2;1>:{dtype}  r{breg}.0<2;1>:{dtype}  r{g}.{sub}<0>:{dtype}")
         return o
 
-    krok = kc or 16
-    out += laduj(0) + laduj(1) + ["LGEN:"]
-    for q in range(krok // 4):
-        out += mady(q % 2) + laduj(q % 2)
+    step = kc or 16
+    out += load_q(0) + load_q(1) + ["LGEN:"]
+    for q in range(step // 4):
+        out += mads(q % 2) + load_q(q % 2)
     if kc:
         for r in range(16):
-            h, f = mapa[r], mapa_f[r]
+            h, f = acc_map[r], acc_map_f[r]
             out += [f"        add (8|M0)  r{f}.0<1>:f  r{f}.0<8;8,1>:f  r{h}.0<8;8,1>:hf",
                     f"        add (8|M8)  r{f + 1}.0<1>:f  r{f + 1}.0<8;8,1>:f  r{h}.8<8;8,1>:hf",
                     f"        mov (16|M0)  r{h}.0<1>:hf  0.0:hf"]
-    return out + koniec(licz, gran, krok, "LGEN")
+    return out + loop_end(counter, limit, step, "LGEN")
 
 
-def wczytaj_mape(rodz):
-    mapa, mapa_f = {}, {}
-    for l in open(os.path.join(TU, f"gen_{rodz}_mapa.txt")):
+def load_map(kind):
+    acc_map, acc_map_f = {}, {}
+    for l in open(os.path.join(HERE, f"gen_{kind}_map.txt")):
         p = l.split()
-        if rodz == "h":
-            mapa[(int(p[1]), int(p[2]))] = int(p[0])
+        if kind == "h":
+            acc_map[(int(p[1]), int(p[2]))] = int(p[0])
         elif p[0] == "f":
-            mapa_f[int(p[2])] = int(p[1])
+            acc_map_f[int(p[2])] = int(p[1])
         else:
-            mapa[int(p[2])] = int(p[1])
-    return mapa, mapa_f
+            acc_map[int(p[2])] = int(p[1])
+    return acc_map, acc_map_f
 
 
 if __name__ == "__main__":
-    rodz, tryb = sys.argv[1], sys.argv[2]
-    wynik = sys.argv[3] if len(sys.argv) > 3 else None
-    prolog, petla_k, epilog = wczytaj(rodz)
-    h, f = akumulatory(prolog)
-    typ = RODZAJE[rodz]["typ"]
-    if tryb == "analiza":
-        print(analiza(petla_k, typ), "hf:", h, "f:", f)
-    elif tryb.startswith("mapa"):
-        # mapa (h, s) / mapa_f / mapa_h (hd): akumulator nr i := i; zapis C pokaże, który rejestr to który wiersz
-        cel, t = (f, "f") if tryb == "mapa_f" or (tryb == "mapa" and rodz == "s") else (h, "hf")
-        zbuduj(rodz, prolog, ["LMAPA:"] + [f"{W}mov (16|M0)  r{a}.0<1>:{t}  {float(i)}:{t}" for i, a in enumerate(cel)],
-               epilog, wynik)
+    kind, mode = sys.argv[1], sys.argv[2]
+    result = sys.argv[3] if len(sys.argv) > 3 else None
+    prologue, loop_k, epilogue = load(kind)
+    h, f = accumulators(prologue)
+    dtype = KINDS[kind]["dtype"]
+    if mode == "analyze":
+        print(analyze(loop_k, dtype), "hf:", h, "f:", f)
+    elif mode.startswith("map"):
+        # map (h, s) / map_f / map_h (hd): accumulator no. i := i; the C write will show which register is which row
+        target, t = (f, "f") if mode == "map_f" or (mode == "map" and kind == "s") else (h, "hf")
+        build(kind, prologue, ["LMAP:"] + [f"{W}mov (16|M0)  r{a}.0<1>:{t}  {float(i)}:{t}" for i, a in enumerate(target)],
+               epilogue, result)
     else:
-        mapa_i, mapa_fi = wczytaj_mape(rodz)
-        if rodz == "h":
-            mapa = {k: h[v] for k, v in mapa_i.items()}
-            cialo = petla_h(prolog, petla_k, epilog, mapa)
-        elif rodz == "hd":
-            cialo = petla_cwiartki(prolog, petla_k, epilog, {k: h[v] for k, v in mapa_i.items()}, "hf", kc=32,
-                                   mapa_f={k: f[v] for k, v in mapa_fi.items()})
+        idx_map, idx_map_f = load_map(kind)
+        if kind == "h":
+            acc_map = {k: h[v] for k, v in idx_map.items()}
+            body = loop_h(prologue, loop_k, epilogue, acc_map)
+        elif kind == "hd":
+            body = loop_quarters(prologue, loop_k, epilogue, {k: h[v] for k, v in idx_map.items()}, "hf", kc=32,
+                                 acc_map_f={k: f[v] for k, v in idx_map_f.items()})
         else:
-            cialo = petla_cwiartki(prolog, petla_k, epilog, {k: f[v] for k, v in mapa_i.items()}, "f")
-        zbuduj(rodz, prolog, cialo, epilog, wynik)
-        print(cialo[0])
-        print(f"instrukcji: {len(cialo)}, mad: {sum('mad (' in l for l in cialo)}")
+            body = loop_quarters(prologue, loop_k, epilogue, {k: f[v] for k, v in idx_map.items()}, "f")
+        build(kind, prologue, body, epilogue, result)
+        print(body[0])
+        print(f"instructions: {len(body)}, mad: {sum('mad (' in l for l in body)}")

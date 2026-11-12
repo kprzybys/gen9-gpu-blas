@@ -1,4 +1,4 @@
-// Kernel-szablon do testu pełnego obiegu: OpenCL C -> binarka -> disasm -> (edycja) -> asm -> uruchomienie.
+// Template kernel for the full round-trip test: OpenCL C -> binary -> disasm -> (edit) -> asm -> run.
 __kernel void k_fma(__global float *out, int n) {
     int gid = get_global_id(0);
     float a = (float)(n & 1) * 0.5f + 0.999f, b = (float)(n & 2) * 0.25f + 0.001f;

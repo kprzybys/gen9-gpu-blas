@@ -1,4 +1,4 @@
-// Test: jak block read z cl_intel_subgroups mapuje się na komunikaty send (buffer -> OWord, image -> media block).
+// Test: how block read from cl_intel_subgroups maps to send messages (buffer -> OWord, image -> media block).
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 __attribute__((intel_reqd_sub_group_size(8)))
 __kernel void buf_read(__global uint *in, __global uint *out) {
@@ -12,7 +12,7 @@ __kernel void img_read(__read_only image2d_t im, __global uint *out) {
 }
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void hf_mad_bcast(__global half *o, __global half *b) {
-    // wzorzec pętli HGEMM: wynik += A(skalar rozgłoszony z linii k) * B(wektor)
+    // HGEMM loop pattern: result += A(scalar broadcast from lane k) * B(vector)
     half16 acc = 0; half a = o[get_sub_group_local_id()];
     for (int k = 0; k < 16; k++) acc = fma((half16)sub_group_broadcast(a, k), vload16(k, b), acc);
     vstore16(acc, get_global_id(0), o);

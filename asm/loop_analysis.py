@@ -1,5 +1,5 @@
-"""Analiza pętli w kodzie maszynowym: mieszanka instrukcji i konflikty banków (parzystość src1/src2 w mad).
-Użycie: python3 -I loop_analysis.py <plik.asm> <etykieta_poczatku>   (koniec: pierwsza linia 'while'/'jmpi' do etykiety)
+"""Loop analysis in machine code: instruction mix and bank conflicts (parity of src1/src2 in mad).
+Usage: python3 -I loop_analysis.py <file.asm> <start_label>   (end: first 'while'/'jmpi' line to the label)
 """
 import re
 import sys
@@ -9,8 +9,8 @@ lab = sys.argv[2]
 s = next(i for i, l in enumerate(t) if l.startswith(lab + ':'))
 e = next(i for i in range(s, len(t)) if re.search(r'(while|jmpi)\b.*\b' + lab + r'\b', t[i]))
 body = [l for l in t[s + 1:e + 1] if l.strip() and not re.match(r'^L\d+:', l)]
-ops, wzor = {}, {}
-konf = nmad = 0
+ops, pattern = {}, {}
+conf = nmad = 0
 for l in body:
     m = re.match(r'^\s*(\([^)]*\))?\s*([a-z.]+)\s+\((\d+)\|', l)
     if not m:
@@ -23,12 +23,12 @@ for l in body:
             nmad += 1
             s1, s2 = regs[2][0], regs[3][0]
             if int(s1) % 2 == int(s2) % 2 and s1 != s2:
-                konf += 1
+                conf += 1
             k = f"src0{regs[1][2]} src1{regs[2][2]} src2{regs[3][2]}"
-            wzor[k] = wzor.get(k, 0) + 1
-print("instrukcji w petli:", len(body))
+            pattern[k] = pattern.get(k, 0) + 1
+print("instructions in loop:", len(body))
 for k, v in sorted(ops.items(), key=lambda x: -x[1]):
     print(f"  {v:4d} {k}")
-print(f"mad: {nmad}, z konfliktem parzystosci src1/src2: {konf}")
-for k, v in wzor.items():
-    print("  wzorzec operandow:", v, k)
+print(f"mad: {nmad}, with src1/src2 parity conflict: {conf}")
+for k, v in pattern.items():
+    print("  operand pattern:", v, k)

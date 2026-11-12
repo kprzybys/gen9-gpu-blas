@@ -1,9 +1,9 @@
-// SGEMM C = A·B (FP32, row-major) dla UHD 620, ta sama metoda co hgemm.cl.
-// Wątek SIMD16 liczy kafelek C 16×16 (16 akumulatorów float = 32 GRF). Krok k = 16.
-// Dane spakowane (ciągłe kafelki, OWord block read z bufora):
-//   Apf: [m/16][k/16][r 0..15][kk 0..15]: blok A 16×16 = 1 KB; block_read8 (uint8) daje 8 wierszy, linia j = kolumna k+j.
-//   Bpf: [n/16][k][n%16]: blok B (8 wierszy k × 16 kolumn) = 512 B ciągłe; linia j = kolumna n0+j.
-// Mnożenia: acc[r] += A[m0+r][k+kk] (rozgłoszone z linii kk) * B[k+kk][n0+lane], 256 mad (16) :f na krok.
+// SGEMM C = A·B (FP32, row-major) for UHD 620, same method as hgemm.cl.
+// A SIMD16 thread computes a 16×16 C tile (16 float accumulators = 32 GRF). Step k = 16.
+// Packed data (contiguous tiles, OWord block read from a buffer):
+//   Apf: [m/16][k/16][r 0..15][kk 0..15]: A block 16×16 = 1 KB; block_read8 (uint8) gives 8 rows, lane j = column k+j.
+//   Bpf: [n/16][k][n%16]: B block (8 rows k × 16 columns) = 512 B contiguous; lane j = column n0+j.
+// Multiplications: acc[r] += A[m0+r][k+kk] (broadcast from lane kk) * B[k+kk][n0+lane], 256 mad (16) :f per step.
 #ifndef GM
 #define GM 16
 #endif
@@ -19,9 +19,9 @@ __kernel void sgemm_16x16p(__global const uint *Ap, __global const uint *Bp, __g
                            int M, int ldc, int K) {
     const int pid = get_group_id(0) * get_num_sub_groups() + get_sub_group_id();
     const int npm = M / 16, npn = ldc / 16;
-    const int grupa = pid / (GM * npn), m_pierwszy = grupa * GM;
-    const int gsz = min(npm - m_pierwszy, GM);
-    const int pm = m_pierwszy + (pid % (GM * npn)) % gsz, pn = (pid % (GM * npn)) / gsz;
+    const int group = pid / (GM * npn), m_first = group * GM;
+    const int gsz = min(npm - m_first, GM);
+    const int pm = m_first + (pid % (GM * npn)) % gsz, pn = (pid % (GM * npn)) / gsz;
     float acc[16];
     for (int r = 0; r < 16; r++) acc[r] = 0;
     __global const uint *pa = Ap + (size_t)pm * (K / 16) * 256;
@@ -52,22 +52,22 @@ __kernel void pack_bf(__global const float *B, __global float *Bp, int K, int ld
     Bp[((size_t)(n / 16) * K + k) * 16 + n % 16] = B[(size_t)k * ldb + n];
 }
 
-// Układy dla ręcznej pętli asm (asm/sgemm_asm.py), bez konfliktów banków. Krok k16 dzielony na 4 ćwiartki (kl 0..3).
-// A2f: ćwiartka = 16 wierszy × 4 kl = 64 floaty = 8 GRF (256 B, offset 256*q w bloku 1 KB).
-//      GRF g: wiersze 4*(g/2)..+3; g nieparzysty -> kl parzyste (0,2), g parzysty -> kl nieparzyste; element (r%4)*2 + kl/2.
+// Layouts for the hand-written asm loop (asm/sgemm_asm.py), no bank conflicts. Step k16 split into 4 quarters (kl 0..3).
+// A2f: quarter = 16 rows × 4 kl = 64 floats = 8 GRF (256 B, offset 256*q in the 1 KB block).
+//      GRF g: rows 4*(g/2)..+3; odd g -> even kl (0,2), even g -> odd kl; element (r%4)*2 + kl/2.
 __kernel void pack_af2(__global const float *A, __global float *Ap, int K, int lda) {
     const int k = get_global_id(0), m = get_global_id(1);
     const int r = m % 16, kk = k % 16, q = kk / 4, kl = kk % 4;
     const int g = 2 * (r / 4) + ((kl % 2 == 0) ? 1 : 0);
     Ap[((size_t)(m / 16) * (K / 16) + k / 16) * 256 + q * 64 + g * 8 + (r % 4) * 2 + kl / 2] = A[(size_t)m * lda + k];
 }
-// B2f: jak Bpf, ale w każdym bloku 4 wierszy kolejność 0,2,1,3 (parzyste kl i nieparzyste osobno, po 128 B).
+// B2f: like Bpf, but in each block of 4 rows the order is 0,2,1,3 (even and odd kl separately, 128 B each).
 __kernel void pack_bf2(__global const float *B, __global float *Bp, int K, int ldb) {
     const int n = get_global_id(0), k = get_global_id(1), kl = k % 4;
     Bp[((size_t)(n / 16) * K + (k - kl) + (kl % 2) * 2 + kl / 2) * 16 + n % 16] = B[(size_t)k * ldb + n];
 }
 
-// Pakowanie z brzegami (zera poza M/N/K) dla biblioteki; układy jak pack_af2 / pack_bf2. Siatki: (Kp, Mp) i (Np, Kp).
+// Packing with edges (zeros outside M/N/K) for the library; layouts as pack_af2 / pack_bf2. Grids: (Kp, Mp) and (Np, Kp).
 __kernel void pack_af2_pad(__global const float *A, __global float *Ap, int M, int K, int lda, int Kp) {
     const int k = get_global_id(0), m = get_global_id(1);
     const int r = m % 16, kk = k % 16, q = kk / 4, kl = kk % 4;
@@ -79,7 +79,7 @@ __kernel void pack_bf2_pad(__global const float *B, __global float *Bp, int K, i
     const int n = get_global_id(0), k = get_global_id(1), kl = k % 4;
     Bp[((size_t)(n / 16) * Kp + (k - kl) + (kl % 2) * 2 + kl / 2) * 16 + n % 16] = (n < N && k < K) ? B[(size_t)k * ldb + n] : 0.0f;
 }
-__kernel void kpg_epilog_f(__global const float *Cp, int ldp, __global float *C, int ldc, float alpha, float beta) {
+__kernel void gen9blas_epilog_f(__global const float *Cp, int ldp, __global float *C, int ldc, float alpha, float beta) {
     const int j = get_global_id(0), i = get_global_id(1);
     float v = alpha * Cp[(size_t)i * ldp + j];
     if (beta != 0.0f) v += beta * C[(size_t)i * ldc + j];

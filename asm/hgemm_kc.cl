@@ -1,11 +1,11 @@
-// HGEMM C = A·B (row-major, FP16, sumowanie w FP16) dla UHD 620. Wersja szablonowa w OpenCL C.
-// Jeden wątek SIMD16 liczy kafelek C: 16 wierszy × 32 kolumny (2 grupy po 16 linii).
-// A, B czytane jako obrazy 2D (CL_R, CL_HALF_FLOAT) przez media block read (intel_sub_group_block_read_us8):
-//   blok 32 B × 8 wierszy = 16 linii × 8 wierszy halfów, jeden komunikat send.
-// Krok k = 16: A: 2 bloki (wiersze m0..m0+7, m0+8..m0+15; linia j = kolumna k+j),
-//              B: 4 bloki (wiersze k..k+7, k+8..k+15 × kolumny n0.., n0+16..; linia j = kolumna n).
-// Mnożenia: acc[r][c] += A[m0+r][k+kk] (rozgłoszone z linii kk) * B[k+kk][n0+16c+lane], 512 mad(16):hf na krok.
-// Rozmiary: M % 16 == 0, N % 32 == 0, K % 16 == 0.
+// HGEMM C = A·B (row-major, FP16, FP16 accumulation) for UHD 620. Template version in OpenCL C.
+// One SIMD16 thread computes a C tile: 16 rows × 32 columns (2 groups of 16 lanes).
+// A, B are read as 2D images (CL_R, CL_HALF_FLOAT) via media block read (intel_sub_group_block_read_us8):
+//   block of 32 B × 8 rows = 16 lanes × 8 rows of halfs, one send message.
+// Step k = 16: A: 2 blocks (rows m0..m0+7, m0+8..m0+15; lane j = column k+j),
+//              B: 4 blocks (rows k..k+7, k+8..k+15 × columns n0.., n0+16..; lane j = column n).
+// Multiplications: acc[r][c] += A[m0+r][k+kk] (broadcast from lane kk) * B[k+kk][n0+16c+lane], 512 mad(16):hf per step.
+// Sizes: M % 16 == 0, N % 32 == 0, K % 16 == 0.
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 
 #define BC(v, i) as_half(sub_group_broadcast(v, i))
@@ -17,10 +17,10 @@ inline void tile_16x32(__read_only image2d_t A, __read_only image2d_t B, __globa
     for (int r = 0; r < 16; r++) { acc0[r] = 0; acc1[r] = 0; }
 
     for (int k = 0; k < K; k += 16) {
-        // A: lane j = A[m0+r][k+j]; a_lo.sr = wiersz m0+r, a_hi.sr = wiersz m0+8+r
+        // A: lane j = A[m0+r][k+j]; a_lo.sr = row m0+r, a_hi.sr = row m0+8+r
         ushort8 a_lo = intel_sub_group_block_read_us8(A, (int2)(k * 2, m0));
         ushort8 a_hi = intel_sub_group_block_read_us8(A, (int2)(k * 2, m0 + 8));
-        // B: lane j = B[k+r][n0+j] (b0*) i B[k+r][n0+16+j] (b1*)
+        // B: lane j = B[k+r][n0+j] (b0*) and B[k+r][n0+16+j] (b1*)
         ushort8 b0l = intel_sub_group_block_read_us8(B, (int2)(n0 * 2, k));
         ushort8 b0h = intel_sub_group_block_read_us8(B, (int2)(n0 * 2, k + 8));
         ushort8 b1l = intel_sub_group_block_read_us8(B, (int2)(n0 * 2 + 32, k));
@@ -49,7 +49,7 @@ inline void tile_16x32(__read_only image2d_t A, __read_only image2d_t B, __globa
         ROW(12, a_hi.s4, 0) ROW(13, a_hi.s5, 0) ROW(14, a_hi.s6, 0) ROW(15, a_hi.s7, 0)
         #undef ROW
     }
-    // zapis: wiersz po wierszu, 2 × 32 B (OWord block write)
+    // write: row by row, 2 × 32 B (OWord block write)
     for (int r = 0; r < 16; r++) {
         __global ushort *row = (__global ushort *)(C + (size_t)(m0 + r) * ldc + n0);
         intel_sub_group_block_write_us(row, as_ushort(acc0[r]));
@@ -57,16 +57,16 @@ inline void tile_16x32(__read_only image2d_t A, __read_only image2d_t B, __globa
     }
 }
 
-// Siatka 2D: (N/32 × 16, M/16), kolejność kafelków taka, jak sprzęt rozdziela grupy (wiersz po wierszu).
+// 2D grid: (N/32 × 16, M/16), tile order is the one in which the hardware dispatches work-groups (row by row).
 __attribute__((intel_reqd_sub_group_size(16)))
 __kernel void hgemm_16x32(__read_only image2d_t A, __read_only image2d_t B, __global half *C,
                           int M, int ldc, int K) {
     tile_16x32(A, B, C, ldc, K, ldc, get_global_id(1) * 16, get_group_id(0) * 32);
 }
 
-// Siatka 1D: jeden kafelek na subgrupę, kolejność grupowana (jak w Tritonie): kolejne kafelki idą w dół
-// pasa GM wierszy kafelków, potem w prawo. Jednocześnie aktywne wątki liczą zwarty fragment C,
-// więc dzielą wiersze A i kolumny B w L3/LLC.
+// 1D grid: one tile per subgroup, grouped order (as in Triton): consecutive tiles go down a band
+// of GM tile rows, then to the right. Concurrently active threads compute a compact piece of C,
+// so they share rows of A and columns of B in L3/LLC.
 #ifndef GM
 #define GM 16
 #endif
@@ -75,19 +75,19 @@ __kernel void hgemm_16x32g(__read_only image2d_t A, __read_only image2d_t B, __g
                            int M, int ldc, int K) {
     const int pid = get_group_id(0) * get_num_sub_groups() + get_sub_group_id();
     const int npm = M / 16, npn = get_image_width(B) / 32;
-    const int grupa = pid / (GM * npn), m_pierwszy = grupa * GM;
-    const int gsz = min(npm - m_pierwszy, GM);
-    const int pm = m_pierwszy + (pid % (GM * npn)) % gsz;
+    const int group = pid / (GM * npn), m_first = group * GM;
+    const int gsz = min(npm - m_first, GM);
+    const int pm = m_first + (pid % (GM * npn)) % gsz;
     const int pn = (pid % (GM * npn)) / gsz;
     tile_16x32(A, B, C, ldc, K, ldc, pm * 16, pn * 32);
 }
 
-// ---------- Wariant z macierzami spakowanymi (dane kafelka ciągłe w pamięci, odczyt z bufora) ----------
-// Bp: panele po 16 kolumn: Bp[n/16][k][n%16]. Blok B (k..k+7, 16 kolumn) = 8×16 halfów = 256 B ciągłe:
-//     intel_sub_group_block_read_us8(Bp + ...) daje linii j wartości [i*16 + j], i = 0..7, czyli wiersze k+i.
-// Ap: panele po 16 wierszy, bloki k po 16: Ap[m/16][k/16][m%16][k%16]. Blok A (8 wierszy, 16 k) = 256 B ciągłe:
-//     linia j = kolumna k+j, element i = wiersz m0+8h+i.
-// Odczyt z bufora to OWord block read (2 komunikaty po 128 B na blok 256 B).
+// ---------- Variant with packed matrices (tile data contiguous in memory, read from a buffer) ----------
+// Bp: panels of 16 columns: Bp[n/16][k][n%16]. B block (k..k+7, 16 columns) = 8×16 halfs = 256 B contiguous:
+//     intel_sub_group_block_read_us8(Bp + ...) gives lane j the values [i*16 + j], i = 0..7, i.e. rows k+i.
+// Ap: panels of 16 rows, k blocks of 16: Ap[m/16][k/16][m%16][k%16]. A block (8 rows, 16 k) = 256 B contiguous:
+//     lane j = column k+j, element i = row m0+8h+i.
+// Reading from a buffer is an OWord block read (2 messages of 128 B per 256 B block).
 inline void tile_16x32p(__global const ushort *Ap, __global const ushort *Bp, __global half *C,
                         int K, int ldc, int pm, int pn) {
     const int m0 = pm * 16, n0 = pn * 32;
@@ -138,12 +138,12 @@ __kernel void hgemm_16x32p(__global const ushort *Ap, __global const ushort *Bp,
                            int M, int ldc, int K) {
     const int pid = get_group_id(0) * get_num_sub_groups() + get_sub_group_id();
     const int npm = M / 16, npn = ldc / 32;
-    const int grupa = pid / (GM * npn), m_pierwszy = grupa * GM;
-    const int gsz = min(npm - m_pierwszy, GM);
-    tile_16x32p(Ap, Bp, C, K, ldc, m_pierwszy + (pid % (GM * npn)) % gsz, (pid % (GM * npn)) / gsz);
+    const int group = pid / (GM * npn), m_first = group * GM;
+    const int gsz = min(npm - m_first, GM);
+    tile_16x32p(Ap, Bp, C, K, ldc, m_first + (pid % (GM * npn)) % gsz, (pid % (GM * npn)) / gsz);
 }
 
-// Pakowanie (row-major, ld) -> Ap / Bp. Jeden work-item = jeden element.
+// Packing (row-major, ld) -> Ap / Bp. One work-item = one element.
 __kernel void pack_a(__global const half *A, __global half *Ap, int K, int lda) {
     const int k = get_global_id(0), m = get_global_id(1);
     Ap[(((size_t)(m / 16) * (K / 16) + k / 16) * 16 + m % 16) * 16 + k % 16] = A[(size_t)m * lda + k];
@@ -153,23 +153,23 @@ __kernel void pack_b(__global const half *B, __global half *Bp, int K, int ldb) 
     Bp[((size_t)(n / 16) * K + k) * 16 + n % 16] = B[(size_t)k * ldb + n];
 }
 
-// Układ A2 dla ręcznej pętli w asemblerze (bez konfliktów banków GRF):
-// blok k po 16, w nim 2 połówki (kk 0..7, 8..15) po 256 B = 8 rejestrów GRF.
-// GRF g połówki h: wiersze 4*(g/2)..+3; g nieparzysty -> parzyste kl (0,2,4,6), g parzysty -> nieparzyste kl.
-// Element e = (r%4)*4 + kl/2. Gdy rejestry B (wiersz kl) mają parzystość kl, rejestr A ma parzystość przeciwną.
+// Layout A2 for the hand-written assembly loop (no GRF bank conflicts):
+// k block of 16, in it 2 halves (kk 0..7, 8..15) of 256 B = 8 GRF registers each.
+// GRF g of half h: rows 4*(g/2)..+3; odd g -> even kl (0,2,4,6), even g -> odd kl.
+// Element e = (r%4)*4 + kl/2. When the B registers (row kl) have the parity of kl, the A register has the opposite parity.
 __kernel void pack_a2(__global const half *A, __global half *Ap, int K, int lda) {
     const int k = get_global_id(0), m = get_global_id(1);
     const int r = m % 16, kk = k % 16, h = kk / 8, kl = kk % 8;
     const int g = 2 * (r / 4) + ((kl % 2 == 0) ? 1 : 0);
-    const size_t blok = (size_t)(m / 16) * (K / 16) + k / 16;
-    Ap[blok * 256 + h * 128 + g * 16 + (r % 4) * 4 + kl / 2] = A[(size_t)m * lda + k];
+    const size_t block = (size_t)(m / 16) * (K / 16) + k / 16;
+    Ap[block * 256 + h * 128 + g * 16 + (r % 4) * 4 + kl / 2] = A[(size_t)m * lda + k];
 }
 
-// ---------- Warianty dokładniejsze (dane FP16, wynik FP16, suma pośrednia w FP32) ----------
-// hgemm_16x32kc: sumowanie FP16 w porcjach po KC (16 lub 32) iloczynów, porcje dodawane do akumulatora FP32.
-//                Arytmetyka głównie w tempie FP16; błąd ogranicza się do błędu krótkiej sumy FP16.
-// hgemm_16x32mx: każdy iloczyn FP16·FP16 dodawany do FP32 (tempo FP32, dokładność ~FP32).
-// Dane spakowane jak w hgemm_16x32p (PACK=1).
+// ---------- More accurate variants (FP16 data, FP16 result, intermediate sum in FP32) ----------
+// hgemm_16x32kc: FP16 accumulation in chunks of KC (16 or 32) products, chunks added to an FP32 accumulator.
+//                Arithmetic mostly at FP16 rate; the error is limited to the error of a short FP16 sum.
+// hgemm_16x32mx: each FP16·FP16 product is added to FP32 (FP32 rate, ~FP32 accuracy).
+// Data packed as in hgemm_16x32p (PACK=1).
 #ifndef KC
 #define KC 32
 #endif
@@ -188,9 +188,9 @@ __kernel void hgemm_16x32kc(__global const ushort *Ap, __global const ushort *Bp
                             int M, int ldc, int K) {
     const int pid = get_group_id(0) * get_num_sub_groups() + get_sub_group_id();
     const int npm = M / 16, npn = ldc / 32;
-    const int grupa = pid / (GM * npn), m_pierwszy = grupa * GM;
-    const int gsz = min(npm - m_pierwszy, GM);
-    const int pm = m_pierwszy + (pid % (GM * npn)) % gsz, pn = (pid % (GM * npn)) / gsz;
+    const int group = pid / (GM * npn), m_first = group * GM;
+    const int gsz = min(npm - m_first, GM);
+    const int pm = m_first + (pid % (GM * npn)) % gsz, pn = (pid % (GM * npn)) / gsz;
     const int m0 = pm * 16, n0 = pn * 32;
     float f0[16], f1[16]; half h0[16], h1[16];
     for (int r = 0; r < 16; r++) { f0[r] = 0; f1[r] = 0; h0[r] = 0; h1[r] = 0; }
@@ -226,9 +226,9 @@ __kernel void hgemm_16x32mx(__global const ushort *Ap, __global const ushort *Bp
                             int M, int ldc, int K) {
     const int pid = get_group_id(0) * get_num_sub_groups() + get_sub_group_id();
     const int npm = M / 16, npn = ldc / 32;
-    const int grupa = pid / (GM * npn), m_pierwszy = grupa * GM;
-    const int gsz = min(npm - m_pierwszy, GM);
-    const int pm = m_pierwszy + (pid % (GM * npn)) % gsz, pn = (pid % (GM * npn)) / gsz;
+    const int group = pid / (GM * npn), m_first = group * GM;
+    const int gsz = min(npm - m_first, GM);
+    const int pm = m_first + (pid % (GM * npn)) % gsz, pn = (pid % (GM * npn)) / gsz;
     const int m0 = pm * 16, n0 = pn * 32;
     float f0[16], f1[16];
     for (int r = 0; r < 16; r++) { f0[r] = 0; f1[r] = 0; }
@@ -251,40 +251,40 @@ __kernel void hgemm_16x32mx(__global const ushort *Ap, __global const ushort *Bp
     }
 }
 
-// ---------- Szybsze pakowanie: jeden work-item przenosi 16 kolejnych elementów wiersza (vload16) ----------
-// Wymiary wejścia dowolne: brakujące wiersze/kolumny do wielokrotności kafelka (M%16, N%32, K%16) wypełniane zerami.
-// Siatka: (ceil(K/16) lub ceil(N/16), Mp lub Kp) — patrz program hosta.
-inline half16 wiersz16(__global const half *X, int ld, int rows, int cols, int r, int c0) {
+// ---------- Faster packing: one work-item moves 16 consecutive row elements (vload16) ----------
+// Input dimensions arbitrary: missing rows/columns up to a multiple of the tile (M%16, N%32, K%16) are filled with zeros.
+// Grid: (ceil(K/16) or ceil(N/16), Mp or Kp) -- see the host program.
+inline half16 row16(__global const half *X, int ld, int rows, int cols, int r, int c0) {
     if (r >= rows) return (half16)0;
     if (c0 + 16 <= cols && ((ld | c0) & 1) == 0) return vload16(0, X + (size_t)r * ld + c0);
     half16 v = 0; __attribute__((opencl_unroll_hint))
     for (int j = 0; j < 16; j++) if (c0 + j < cols) ((half *)&v)[j] = X[(size_t)r * ld + c0 + j];
     return v;
 }
-// Bp[n/16][k][n%16], Kp = K zaokrąglone w górę do 16. gid0 = blok 16 kolumn, gid1 = wiersz k (0..Kp-1).
+// Bp[n/16][k][n%16], Kp = K rounded up to 16. gid0 = block of 16 columns, gid1 = row k (0..Kp-1).
 __kernel void pack_b16(__global const half *B, __global half *Bp, int K, int N, int ldb, int Kp) {
     const int nb = get_global_id(0), k = get_global_id(1);
-    vstore16(wiersz16(B, ldb, K, N, k, nb * 16), 0, Bp + ((size_t)nb * Kp + k) * 16);
+    vstore16(row16(B, ldb, K, N, k, nb * 16), 0, Bp + ((size_t)nb * Kp + k) * 16);
 }
-// A2 (patrz pack_a2), Kp jak wyżej. gid0 = blok 16 kolumn k, gid1 = wiersz m (0..Mp-1).
+// A2 (see pack_a2), Kp as above. gid0 = block of 16 columns k, gid1 = row m (0..Mp-1).
 __kernel void pack_a2_16(__global const half *A, __global half *Ap, int M, int K, int lda, int Kp) {
     const int kb = get_global_id(0), m = get_global_id(1), r = m % 16;
-    half16 v = wiersz16(A, lda, M, K, m, kb * 16);
-    __global half *blok = Ap + ((size_t)(m / 16) * (Kp / 16) + kb) * 256;
-    // połówka h, kl parzyste -> GRF nieparzysty g = 2*(r/4)+1, kl nieparzyste -> g = 2*(r/4); element (r%4)*4 + kl/2
-    __global half *p0 = blok + (2 * (r / 4) + 1) * 16 + (r % 4) * 4, *p1 = blok + (2 * (r / 4)) * 16 + (r % 4) * 4;
+    half16 v = row16(A, lda, M, K, m, kb * 16);
+    __global half *block = Ap + ((size_t)(m / 16) * (Kp / 16) + kb) * 256;
+    // half h, even kl -> odd GRF g = 2*(r/4)+1, odd kl -> g = 2*(r/4); element (r%4)*4 + kl/2
+    __global half *p0 = block + (2 * (r / 4) + 1) * 16 + (r % 4) * 4, *p1 = block + (2 * (r / 4)) * 16 + (r % 4) * 4;
     vstore4(v.s02468ace.lo, 0, p0);         vstore4(v.s13579bdf.lo, 0, p1);
     vstore4(v.s02468ace.hi, 0, p0 + 128);   vstore4(v.s13579bdf.hi, 0, p1 + 128);
 }
 
-// pack_a2_g: układ A2, jeden work-item = jeden 32-bajtowy wiersz wyjścia (rejestr GRF) zapisany ciągle (vstore16).
-// Wyjście jako tablica wierszy po 16 halfów: o -> blok = o/16 (pm, kb), h = (o%16)/8, g = o%8.
-// GRF g: wiersze r = 4*(g/2) + ri (ri 0..3), kl = 2*j + (g nieparzysty ? 0 : 1) (j 0..3), element ri*4 + j.
-// Brzegi (m >= M, k >= K) wypełniane zerami. Siatka: Mp*Kp/16 work-itemów.
+// pack_a2_g: layout A2, one work-item = one 32-byte output row (GRF register) written contiguously (vstore16).
+// Output as an array of rows of 16 halfs: o -> block = o/16 (pm, kb), h = (o%16)/8, g = o%8.
+// GRF g: rows r = 4*(g/2) + ri (ri 0..3), kl = 2*j + (g odd ? 0 : 1) (j 0..3), element ri*4 + j.
+// Edges (m >= M, k >= K) are filled with zeros. Grid: Mp*Kp/16 work-items.
 __kernel void pack_a2_g(__global const half *A, __global half *Ap, int M, int K, int lda, int Kp) {
-    const int o = get_global_id(0), blok = o / 16, h = (o % 16) / 8, g = o % 8;
-    const int pm = blok / (Kp / 16), kb = blok % (Kp / 16);
-    const int k0 = kb * 16 + 8 * h, nieparz = (g & 1) ? 0 : 1;
+    const int o = get_global_id(0), block = o / 16, h = (o % 16) / 8, g = o % 8;
+    const int pm = block / (Kp / 16), kb = block % (Kp / 16);
+    const int k0 = kb * 16 + 8 * h, odd = (g & 1) ? 0 : 1;
     half16 w;
     for (int ri = 0; ri < 4; ri++) {
         const int m = pm * 16 + 4 * (g / 2) + ri;
@@ -293,16 +293,16 @@ __kernel void pack_a2_g(__global const half *A, __global half *Ap, int M, int K,
             if (k0 + 8 <= K && ((lda | k0) & 7) == 0) v = vload8(0, A + (size_t)m * lda + k0);
             else for (int j = 0; j < 8; j++) if (k0 + j < K) ((half *)&v)[j] = A[(size_t)m * lda + k0 + j];
         }
-        half4 s = nieparz ? v.s1357 : v.s0246;
+        half4 s = odd ? v.s1357 : v.s0246;
         ((half *)&w)[ri * 4 + 0] = s.x; ((half *)&w)[ri * 4 + 1] = s.y;
         ((half *)&w)[ri * 4 + 2] = s.z; ((half *)&w)[ri * 4 + 3] = s.w;
     }
     vstore16(w, o, Ap);
 }
 
-// Pakowanie z obsługą brzegów, jeden element na work-item (najszybsze z testowanych: sąsiednie work-itemy czytają
-// ciągły wiersz i piszą do najwyżej 2 paneli; warianty „16 elementów na work-item” były wolniejsze przez TLB).
-// pack_a2_pad: siatka (Kp, Mp); pack_b_pad: siatka (Np, Kp). Poza zakresem (m >= M, k >= K, n >= N) zera.
+// Packing with edge handling, one element per work-item (fastest of those tested: neighbouring work-items read
+// a contiguous row and write to at most 2 panels; the "16 elements per work-item" variants were slower because of the TLB).
+// pack_a2_pad: grid (Kp, Mp); pack_b_pad: grid (Np, Kp). Out of range (m >= M, k >= K, n >= N) zeros.
 __kernel void pack_a2_pad(__global const half *A, __global half *Ap, int M, int K, int lda, int Kp) {
     const int k = get_global_id(0), m = get_global_id(1);
     const int r = m % 16, kk = k % 16, h = kk / 8, kl = kk % 8;
@@ -315,8 +315,8 @@ __kernel void pack_b_pad(__global const half *B, __global half *Bp, int K, int N
     Bp[((size_t)(n / 16) * Kp + k) * 16 + n % 16] = (n < N && k < K) ? B[(size_t)k * ldb + n] : (half)0;
 }
 
-// Wersje z transpozycją wejścia (op(A) = Aᵀ: A zapisana jako K×M; op(B) = Bᵀ: B zapisana jako N×K).
-// Siatka zamieniona tak, by sąsiednie work-itemy czytały ciągłą pamięć: pack_a2_pad_t (Mp, Kp), pack_b_pad_t (Kp, Np).
+// Versions with transposed input (op(A) = Aᵀ: A stored as K×M; op(B) = Bᵀ: B stored as N×K).
+// Grid swapped so that neighbouring work-items read contiguous memory: pack_a2_pad_t (Mp, Kp), pack_b_pad_t (Kp, Np).
 __kernel void pack_a2_pad_t(__global const half *A, __global half *Ap, int M, int K, int lda, int Kp) {
     const int m = get_global_id(0), k = get_global_id(1);
     const int r = m % 16, kk = k % 16, h = kk / 8, kl = kk % 8;
@@ -329,10 +329,10 @@ __kernel void pack_b_pad_t(__global const half *B, __global half *Bp, int K, int
     Bp[((size_t)(n / 16) * Kp + k) * 16 + n % 16] = (n < N && k < K) ? B[(size_t)n * ldb + k] : (half)0;
 }
 
-// ---------- Wariant dokładny do ręcznej pętli asm: kafelek 16×16, suma FP16 porcjami po KC2 iloczynów -> FP32 ----------
-// A3: blok k16 = 4 ćwiartki (kl 0..3) po 64 halfy = 4 GRF (128 B). GRF g: wiersze 8*(g/2)..+7;
-//     g nieparzysty -> kl parzyste (0,2), g parzysty -> kl nieparzyste; element (r%8)*2 + kl/2.
-// B: zwykłe panele 16 kolumn (pack_b_pad); ćwiartka = 4 wiersze × 32 B = 128 B.
+// ---------- Accurate variant for the hand-written asm loop: 16×16 tile, FP16 sum in chunks of KC2 products -> FP32 ----------
+// A3: k16 block = 4 quarters (kl 0..3) of 64 halfs = 4 GRF (128 B). GRF g: rows 8*(g/2)..+7;
+//     odd g -> even kl (0,2), even g -> odd kl; element (r%8)*2 + kl/2.
+// B: ordinary panels of 16 columns (pack_b_pad); quarter = 4 rows × 32 B = 128 B.
 #ifndef KC2
 #define KC2 32
 #endif
@@ -342,9 +342,9 @@ __kernel void hgemm_16x16kc(__global const ushort *Ap, __global const ushort *Bp
                             int M, int ldc, int K) {
     const int pid = get_group_id(0) * get_num_sub_groups() + get_sub_group_id();
     const int npm = M / 16, npn = ldc / 16;
-    const int grupa = pid / (GM * npn), m_pierwszy = grupa * GM;
-    const int gsz = min(npm - m_pierwszy, GM);
-    const int pm = m_pierwszy + (pid % (GM * npn)) % gsz, pn = (pid % (GM * npn)) / gsz;
+    const int group = pid / (GM * npn), m_first = group * GM;
+    const int gsz = min(npm - m_first, GM);
+    const int pm = m_first + (pid % (GM * npn)) % gsz, pn = (pid % (GM * npn)) / gsz;
     float f[16]; half h[16];
     for (int r = 0; r < 16; r++) { f[r] = 0; h[r] = 0; }
     __global const ushort *pa = Ap + (size_t)pm * (K / 16) * 256;
@@ -370,7 +370,7 @@ __kernel void hgemm_16x16kc(__global const ushort *Ap, __global const ushort *Bp
         intel_sub_group_block_write_us((__global ushort *)(C + (size_t)(pm * 16 + r) * ldc + pn * 16),
                                        as_ushort((half)(f[r] + (float)h[r])));
 }
-// Pakowanie A3 z brzegami: siatka (Kp, Mp); wersja z transpozycją (A zapisana K×M): siatka (Mp, Kp).
+// Packing A3 with edges: grid (Kp, Mp); transposed version (A stored K×M): grid (Mp, Kp).
 __kernel void pack_a3_pad(__global const half *A, __global half *Ap, int M, int K, int lda, int Kp) {
     const int k = get_global_id(0), m = get_global_id(1);
     const int r = m % 16, kk = k % 16, q = kk / 4, kl = kk % 4, g = 2 * (r / 8) + ((kl % 2 == 0) ? 1 : 0);
