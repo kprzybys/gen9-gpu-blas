@@ -1,8 +1,8 @@
 #!/bin/sh
-# Kompiluje plik .cl dla UHD 620 (cfl) i zapisuje kod maszynowy każdego kernela do experiments/isa/out/<plik>/<kernel>.asm
+# Compiles a .cl file for the UHD 620 (cfl) and writes the machine code of each kernel to experiments/isa/out/<file>/<kernel>.asm
 set -e
 cd -P "$(dirname "$0")"
-src=${1:-mapa.cl}; opts=${2:-}
+src=${1:-map.cl}; opts=${2:-}
 name=$(basename "$src" .cl); out=out/$name; tmp=$(mktemp -d)
 rm -rf "$out"; mkdir -p "$out"
 ocloc compile -q -file "$src" -device cfl -output "$tmp/k" -options "$opts" >/dev/null

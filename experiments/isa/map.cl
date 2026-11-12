@@ -1,4 +1,4 @@
-// Mapa instrukcji: każdy kernel testuje jedną kategorię operacji.
+// Instruction map: each kernel tests one category of operations.
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
 

@@ -1,31 +1,31 @@
-# 2026-11-11T02:52:48+01:00  GPU: 1100 MHz max, zasilanie AC=1
-clblast sgemm N=128   czas=    0.121 ms     34.7 GFLOPS  blad_wzgl: sr=1.76e-08 max=1.02e-07  (1. wywolanie 15 ms)
-clblast hgemm N=128   czas=    0.132 ms     31.7 GFLOPS  blad_wzgl: sr=1.48e-04 max=8.93e-04  (1. wywolanie 15 ms)
-clblast dgemm N=128   czas=    0.189 ms     22.2 GFLOPS  blad_wzgl: sr=2.29e-17 max=1.65e-16  (1. wywolanie 14 ms)
-openblas f32gemm N=128   czas=    0.026 ms    161.5 GFLOPS  blad_wzgl: sr=1.50e-08 max=7.26e-08
-openblas f64gemm N=128   czas=    2.920 ms      1.4 GFLOPS  blad_wzgl: sr=3.40e-17 max=2.09e-16
-clblast sgemm N=256   czas=    0.392 ms     85.5 GFLOPS  blad_wzgl: sr=1.88e-08 max=1.43e-07  (1. wywolanie 16 ms)
-clblast hgemm N=256   czas=    0.443 ms     75.7 GFLOPS  blad_wzgl: sr=1.49e-04 max=9.68e-04  (1. wywolanie 16 ms)
-clblast dgemm N=256   czas=    1.010 ms     33.2 GFLOPS  blad_wzgl: sr=1.89e-17 max=8.38e-17  (1. wywolanie 15 ms)
-openblas f32gemm N=256   czas=    0.109 ms    308.0 GFLOPS  blad_wzgl: sr=1.56e-08 max=9.29e-08
-openblas f64gemm N=256   czas=    0.247 ms    136.0 GFLOPS  blad_wzgl: sr=3.77e-17 max=1.98e-16
-clblast sgemm N=512   czas=    1.051 ms    255.5 GFLOPS  blad_wzgl: sr=1.66e-08 max=1.70e-07  (1. wywolanie 20 ms)
-clblast hgemm N=512   czas=    1.241 ms    216.4 GFLOPS  blad_wzgl: sr=1.34e-04 max=7.68e-04  (1. wywolanie 15 ms)
-clblast dgemm N=512   czas=    7.897 ms     34.0 GFLOPS  blad_wzgl: sr=1.61e-17 max=9.20e-17  (1. wywolanie 23 ms)
-openblas f32gemm N=512   czas=    0.800 ms    335.3 GFLOPS  blad_wzgl: sr=1.22e-08 max=5.30e-08
-openblas f64gemm N=512   czas=    1.930 ms    139.1 GFLOPS  blad_wzgl: sr=2.38e-17 max=1.11e-16
-clblast sgemm N=1024  czas=    6.964 ms    308.4 GFLOPS  blad_wzgl: sr=1.51e-08 max=1.04e-07  (1. wywolanie 32 ms)
-clblast hgemm N=1024  czas=    8.441 ms    254.4 GFLOPS  blad_wzgl: sr=1.22e-04 max=7.94e-04  (1. wywolanie 29 ms)
-clblast dgemm N=1024  czas=   62.415 ms     34.4 GFLOPS  blad_wzgl: sr=1.29e-17 max=7.69e-17  (1. wywolanie 85 ms)
-openblas f32gemm N=1024  czas=    6.800 ms    315.8 GFLOPS  blad_wzgl: sr=9.27e-09 max=4.37e-08
-openblas f64gemm N=1024  czas=   15.923 ms    134.9 GFLOPS  blad_wzgl: sr=1.89e-17 max=6.80e-17
-clblast sgemm N=2048  czas=  319.385 ms     53.8 GFLOPS  blad_wzgl: sr=1.44e-08 max=1.08e-07  (1. wywolanie 370 ms)
-clblast hgemm N=2048  czas=   91.295 ms    188.2 GFLOPS  blad_wzgl: sr=1.28e-04 max=8.49e-04  (1. wywolanie 114 ms)
-clblast dgemm N=2048  czas=  526.419 ms     32.6 GFLOPS  blad_wzgl: sr=1.17e-17 max=4.91e-17  (1. wywolanie 563 ms)
-openblas f32gemm N=2048  czas=   57.414 ms    299.2 GFLOPS  blad_wzgl: sr=7.16e-09 max=3.90e-08
-openblas f64gemm N=2048  czas=  165.254 ms    104.0 GFLOPS  blad_wzgl: sr=1.38e-17 max=5.59e-17
-clblast sgemm N=4096  czas= 3949.801 ms     34.8 GFLOPS  blad_wzgl: sr=1.90e-08 max=1.50e-07  (1. wywolanie 4253 ms)
-clblast hgemm N=4096  czas=  667.108 ms    206.0 GFLOPS  blad_wzgl: sr=1.29e-04 max=1.28e-03  (1. wywolanie 736 ms)
-clblast dgemm N=4096  czas= 4136.940 ms     33.2 GFLOPS  blad_wzgl: sr=1.03e-17 max=4.71e-17  (1. wywolanie 4412 ms)
-openblas f32gemm N=4096  czas=  584.216 ms    235.3 GFLOPS  blad_wzgl: sr=5.21e-09 max=1.88e-08
-openblas f64gemm N=4096  czas= 2082.050 ms     66.0 GFLOPS  blad_wzgl: sr=9.06e-18 max=4.29e-17
+# 2026-11-11T02:52:48+01:00  GPU: 1100 MHz max, power AC=1
+clblast sgemm N=128   time=    0.121 ms     34.7 GFLOPS  rel_err: avg=1.76e-08 max=1.02e-07  (1st call 15 ms)
+clblast hgemm N=128   time=    0.132 ms     31.7 GFLOPS  rel_err: avg=1.48e-04 max=8.93e-04  (1st call 15 ms)
+clblast dgemm N=128   time=    0.189 ms     22.2 GFLOPS  rel_err: avg=2.29e-17 max=1.65e-16  (1st call 14 ms)
+openblas f32gemm N=128   time=    0.026 ms    161.5 GFLOPS  rel_err: avg=1.50e-08 max=7.26e-08
+openblas f64gemm N=128   time=    2.920 ms      1.4 GFLOPS  rel_err: avg=3.40e-17 max=2.09e-16
+clblast sgemm N=256   time=    0.392 ms     85.5 GFLOPS  rel_err: avg=1.88e-08 max=1.43e-07  (1st call 16 ms)
+clblast hgemm N=256   time=    0.443 ms     75.7 GFLOPS  rel_err: avg=1.49e-04 max=9.68e-04  (1st call 16 ms)
+clblast dgemm N=256   time=    1.010 ms     33.2 GFLOPS  rel_err: avg=1.89e-17 max=8.38e-17  (1st call 15 ms)
+openblas f32gemm N=256   time=    0.109 ms    308.0 GFLOPS  rel_err: avg=1.56e-08 max=9.29e-08
+openblas f64gemm N=256   time=    0.247 ms    136.0 GFLOPS  rel_err: avg=3.77e-17 max=1.98e-16
+clblast sgemm N=512   time=    1.051 ms    255.5 GFLOPS  rel_err: avg=1.66e-08 max=1.70e-07  (1st call 20 ms)
+clblast hgemm N=512   time=    1.241 ms    216.4 GFLOPS  rel_err: avg=1.34e-04 max=7.68e-04  (1st call 15 ms)
+clblast dgemm N=512   time=    7.897 ms     34.0 GFLOPS  rel_err: avg=1.61e-17 max=9.20e-17  (1st call 23 ms)
+openblas f32gemm N=512   time=    0.800 ms    335.3 GFLOPS  rel_err: avg=1.22e-08 max=5.30e-08
+openblas f64gemm N=512   time=    1.930 ms    139.1 GFLOPS  rel_err: avg=2.38e-17 max=1.11e-16
+clblast sgemm N=1024  time=    6.964 ms    308.4 GFLOPS  rel_err: avg=1.51e-08 max=1.04e-07  (1st call 32 ms)
+clblast hgemm N=1024  time=    8.441 ms    254.4 GFLOPS  rel_err: avg=1.22e-04 max=7.94e-04  (1st call 29 ms)
+clblast dgemm N=1024  time=   62.415 ms     34.4 GFLOPS  rel_err: avg=1.29e-17 max=7.69e-17  (1st call 85 ms)
+openblas f32gemm N=1024  time=    6.800 ms    315.8 GFLOPS  rel_err: avg=9.27e-09 max=4.37e-08
+openblas f64gemm N=1024  time=   15.923 ms    134.9 GFLOPS  rel_err: avg=1.89e-17 max=6.80e-17
+clblast sgemm N=2048  time=  319.385 ms     53.8 GFLOPS  rel_err: avg=1.44e-08 max=1.08e-07  (1st call 370 ms)
+clblast hgemm N=2048  time=   91.295 ms    188.2 GFLOPS  rel_err: avg=1.28e-04 max=8.49e-04  (1st call 114 ms)
+clblast dgemm N=2048  time=  526.419 ms     32.6 GFLOPS  rel_err: avg=1.17e-17 max=4.91e-17  (1st call 563 ms)
+openblas f32gemm N=2048  time=   57.414 ms    299.2 GFLOPS  rel_err: avg=7.16e-09 max=3.90e-08
+openblas f64gemm N=2048  time=  165.254 ms    104.0 GFLOPS  rel_err: avg=1.38e-17 max=5.59e-17
+clblast sgemm N=4096  time= 3949.801 ms     34.8 GFLOPS  rel_err: avg=1.90e-08 max=1.50e-07  (1st call 4253 ms)
+clblast hgemm N=4096  time=  667.108 ms    206.0 GFLOPS  rel_err: avg=1.29e-04 max=1.28e-03  (1st call 736 ms)
+clblast dgemm N=4096  time= 4136.940 ms     33.2 GFLOPS  rel_err: avg=1.03e-17 max=4.71e-17  (1st call 4412 ms)
+openblas f32gemm N=4096  time=  584.216 ms    235.3 GFLOPS  rel_err: avg=5.21e-09 max=1.88e-08
+openblas f64gemm N=4096  time= 2082.050 ms     66.0 GFLOPS  rel_err: avg=9.06e-18 max=4.29e-17

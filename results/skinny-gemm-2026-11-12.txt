@@ -1,56 +1,56 @@
-Chudy GEMM (małe M), 2026-11-12, zasilanie sieciowe. Plan: PLAN_CHUDY_GEMM.md. Pomiar: bench/skinny_gemm.py [usm|zwykla].
+Skinny GEMM (small M), 2026-11-12, mains power. Plan: docs/skinny-gemm.md. Measurement: bench/skinny_gemm.py [usm|plain].
 
-== PRZEWIDYWANIE (przed kodem jądra) ==
-Jądro chude: bez pakowania, wagi czytane raz na kafel M (MT = 16 wierszy A dla wag ciągłych wzdłuż K, MT = 8 dla wag
-ciągłych wzdłuż N), akumulacja w FP32 także dla FP16 -> sufit obliczeń = FMA FP32 410 GFLOPS [POM], dla prostego jądra
-bez asm [HIP] 50–70%: F ≈ 200–290 GFLOPS. Pamięć: BW ≈ 22–25 GB/s (USM), userptr ≤ 20% mniej przy małej liczbie stron.
-t ≈ max(N·K·e·⌈M/MT⌉ / BW, 2·M·N·K / F) + ~0,05 ms (wywołanie).
-Punkt przejścia M* = F·e / (2·BW): FP16 ≈ 9–13, FP32 ≈ 18–26.
-N = K = 4096 (dziś: H 10,4–12,5 ms, S 14–17 ms dla M ≤ 64):
-  FP16 wagi W (N×K): M ≤ 8: 1,4–1,8 ms (6–7×); M = 16: 1,9–2,7 ms (4–5×); M = 32: 3,7–5,4 ms (2–3×);
-                     M = 64: 7,4–10,7 ms (1,2–1,7×); M = 128: wolniej niż asm -> próg przełączenia ~64 (FP16).
-  FP32 wagi W:       M ≤ 8: 2,7–3,1 ms (4,5–5×); M = 16: 2,7–3,1; M = 32: 3,7–5,4 (2,6–3,8×); M = 64: 7,4–10,7 (1,6–2,3×);
-                     M = 128: 15–21 wobec asm ~20–25 -> próg ~128 (FP32).
-  wagi B (K×N, MT = 8): jak wyżej dla M ≤ 8; M = 16 wagi czytane 2× -> FP16 ~2,9 ms.
-Błąd FP16 (akumulacja FP32): rzędu HD (~1e-3 względem max), nie gorszy niż dziś.
+== PREDICTION (before the kernel code) ==
+Skinny kernel: no packing, weights read once per M tile (MT = 16 rows of A for weights contiguous along K, MT = 8 for weights
+contiguous along N), accumulation in FP32 also for FP16 -> compute ceiling = FP32 FMA 410 GFLOPS [MEAS], for a simple kernel
+without asm [HYP] 50–70%: F ≈ 200–290 GFLOPS. Memory: BW ≈ 22–25 GB/s (USM), userptr ≤ 20% less with a small number of pages.
+t ≈ max(N·K·e·⌈M/MT⌉ / BW, 2·M·N·K / F) + ~0.05 ms (call).
+Crossover point M* = F·e / (2·BW): FP16 ≈ 9–13, FP32 ≈ 18–26.
+N = K = 4096 (today: H 10.4–12.5 ms, S 14–17 ms for M ≤ 64):
+  FP16 weights W (N×K): M ≤ 8: 1.4–1.8 ms (6–7×); M = 16: 1.9–2.7 ms (4–5×); M = 32: 3.7–5.4 ms (2–3×);
+                     M = 64: 7.4–10.7 ms (1.2–1.7×); M = 128: slower than asm -> switching threshold ~64 (FP16).
+  FP32 weights W:       M ≤ 8: 2.7–3.1 ms (4.5–5×); M = 16: 2.7–3.1; M = 32: 3.7–5.4 (2.6–3.8×); M = 64: 7.4–10.7 (1.6–2.3×);
+                     M = 128: 15–21 vs asm ~20–25 -> threshold ~128 (FP32).
+  weights B (K×N, MT = 8): as above for M ≤ 8; M = 16 weights read 2× -> FP16 ~2.9 ms.
+FP16 error (FP32 accumulation): order of HD (~1e-3 relative to max), no worse than today.
 
-== PRZEBIEG ==
-1. Wersja 1 (lane = wiersz wag, A wspólne dla subgrupy; A·B: A[m][k] osobno dla każdego k): poprawna (432 przypadki),
-   ale ograniczona instrukcjami: ~60 GFLOPS, FP16 M = 1 7,5 GB/s. Każdy odczyt A = osobny komunikat + konwersje.
-2. Wersja 2 (układ gemv_nw: lane = 4 kolejne k, A ciągłe; A·B: A raz na 16 k + sub_group_broadcast): M = 1 18–23 GB/s,
-   ALE warianty MT = 8 liczyły źle (wszystkie wiersze): kompilator odłożył rejestry do scratch (spill_size 448–960 B),
-   a kcl nie konfiguruje scratch; generator sprawdzał tylko per_thread_scratch_size. Przez NEO to samo jądro poprawne.
-   Poprawki: gen_kernels.py odrzuca jądra ze spill_size (kcl zgłasza błąd zamiast liczyć źle); MT = 8 przy RW = 2,
-   A·B tylko MT = 4 (kafle M obok części K w siatce -- wagi z LLC).
-3. Wersja 3: wskaźniki wierszy liczone raz przed pętlą (mnożenie 64-bit na Gen9 jest emulowane), szybka ścieżka dla
-   kroku 1, ogon poza pętlą: FP16 A·B do 177 GFLOPS (z 96), A·Wᵀ ~90; FP32 60–90.
+== PROCESS ==
+1. Version 1 (lane = weight row, A shared by the subgroup; A·B: A[m][k] separately for each k): correct (432 cases),
+   but instruction-bound: ~60 GFLOPS, FP16 M = 1 7.5 GB/s. Each read of A = a separate message + conversions.
+2. Version 2 (gemv_nw layout: lane = 4 consecutive k, A contiguous; A·B: A once per 16 k + sub_group_broadcast): M = 1 18–23 GB/s,
+   BUT the MT = 8 variants computed wrongly (all rows): the compiler spilled registers to scratch (spill_size 448–960 B),
+   and kcl does not configure scratch; the generator checked only per_thread_scratch_size. Through NEO the same kernel is correct.
+   Fixes: gen_kernels.py rejects kernels with spill_size (kcl reports an error instead of computing wrongly); MT = 8 with RW = 2,
+   A·B only MT = 4 (M tiles next to K parts in the grid -- weights from LLC).
+3. Version 3: row pointers computed once before the loop (64-bit multiplication on Gen9 is emulated), fast path for
+   stride 1, tail outside the loop: FP16 A·B up to 177 GFLOPS (from 96), A·Wᵀ ~90; FP32 60–90.
 
-== WYNIK (wersja 3, próg min(M, N) ≤ 16; mediany, ms; pełne tabele poniżej) ==
+== RESULT (version 3, threshold min(M, N) ≤ 16; medians, ms; full tables below) ==
 N = K = 4096, USM:      M = 1          M = 4          M = 8          M = 16
-  FP16 A·Wᵀ   10,38 -> 1,85 (5,6×)  11,12 -> 2,43 (4,6×)  11,00 -> 3,92 (2,8×)  10,77 -> 6,83 (1,6×)
-  FP16 A·B     6,49 -> 1,94 (3,3×)   6,74 -> 2,00 (3,4×)   7,11 -> 2,75 (2,6×)   7,23 -> 4,34 (1,7×)
-  FP32 A·Wᵀ   14,15 -> 3,10 (4,6×)  13,89 -> 3,73 (3,7×)  14,05 -> 4,89 (2,9×)  13,89 -> 6,93 (2,0×)
-  FP32 A·B    10,58 -> 3,43 (3,1×)  10,39 -> 3,34 (3,1×)  11,26 -> 4,93 (2,3×)  10,57 -> 8,26 (1,3×)
-Kształty LLM (M = 1): 11008×4096 FP16 6,6–6,9×, FP32 4,9–5,3×; 51866×1280 FP16 4,5–5,5×, FP32 4,0–5,2×.
-Zwykła pamięć (userptr): FP16 4096² M = 1 2,19–2,29 ms (4,7×/3,0×), zysk zwykle 10–20% mniejszy niż na USM.
-Błąd FP16 (akumulacja FP32): 1,2e-2–2,9e-2 -> 2,5e-4–3,8e-4 (~50× mniejszy); FP32 2e-6 -> 1,3e-7–1,2e-6.
-CPU na wywołanie (z Pythona): 0,1–0,6 ms, bez zmian.
-Przy M = 32 chude jądro FP16 0,3–1,0× dawnego, FP32 0,8–1,2× -> próg 16 dla obu typów.
+  FP16 A·Wᵀ   10.38 -> 1.85 (5.6×)  11.12 -> 2.43 (4.6×)  11.00 -> 3.92 (2.8×)  10.77 -> 6.83 (1.6×)
+  FP16 A·B     6.49 -> 1.94 (3.3×)   6.74 -> 2.00 (3.4×)   7.11 -> 2.75 (2.6×)   7.23 -> 4.34 (1.7×)
+  FP32 A·Wᵀ   14.15 -> 3.10 (4.6×)  13.89 -> 3.73 (3.7×)  14.05 -> 4.89 (2.9×)  13.89 -> 6.93 (2.0×)
+  FP32 A·B    10.58 -> 3.43 (3.1×)  10.39 -> 3.34 (3.1×)  11.26 -> 4.93 (2.3×)  10.57 -> 8.26 (1.3×)
+LLM shapes (M = 1): 11008×4096 FP16 6.6–6.9×, FP32 4.9–5.3×; 51866×1280 FP16 4.5–5.5×, FP32 4.0–5.2×.
+Plain memory (userptr): FP16 4096² M = 1 2.19–2.29 ms (4.7×/3.0×), the gain is usually 10–20% smaller than on USM.
+FP16 error (FP32 accumulation): 1.2e-2–2.9e-2 -> 2.5e-4–3.8e-4 (~50× smaller); FP32 2e-6 -> 1.3e-7–1.2e-6.
+CPU per call (from Python): 0.1–0.6 ms, unchanged.
+At M = 32 the skinny FP16 kernel is 0.3–1.0× the old one, FP32 0.8–1.2× -> threshold 16 for both types.
 
-== PRZEWIDYWANIE A POMIAR ==
-- M = 1 trafione (FP16 1,85 wobec 1,4–1,8 ms; FP32 3,1 wobec 2,7–3,1 ms; wagi czytane z 18–27 GB/s).
-- M ≥ 4 chybione: zakładany sufit obliczeń 200–290 GFLOPS, zmierzony 70–180. Braki modelu (do MODEL.md):
-  (a) ruch A z L3 rośnie jak M/RW (każda grupa czyta całe A), a RW ograniczają rejestry; (b) w A·B przy M > MT wagi
-  czytane ⌈M/MT⌉ razy (z LLC tylko, gdy fragment części K się mieści); (c) arytmetyka adresów 64-bit w pętli
-  (emulowane mnożenie) kosztowała 1,2–1,9×; (d) limit rejestrów bez spilla: 16 akumulatorów float na lane w SIMD16
-  przy 4 wektorach wag, 32 już przechodzi do scratch.
-- Kryterium z planu: FP16 M ≤ 8 ≤ 1,8 ms -- spełnione tylko dla M = 1 (M = 4: 2,0–2,4, M = 8: 2,8–3,9); FP32 M ≤ 8
-  ≤ 3,5 ms -- spełnione dla M ≤ 4 (3,1–3,7), nie dla M = 8 (4,9). Zysk wobec stanu wyjściowego 1,3–6,9× przy M ≤ 16.
-- Dalsze możliwości (nie robione): A w pamięci lokalnej raz na grupę (mniej ruchu z L3 i konwersji), większe RW przy
-  małym MT, kod w asemblerze z ręcznym przydziałem rejestrów (jak HGEMM) -- sufit 400+ GFLOPS dla M = 16–64.
+== PREDICTION VS MEASUREMENT ==
+- M = 1 hit (FP16 1.85 vs 1.4–1.8 ms; FP32 3.1 vs 2.7–3.1 ms; weights read at 18–27 GB/s).
+- M ≥ 4 missed: assumed compute ceiling 200–290 GFLOPS, measured 70–180. Model gaps (for docs/performance-model.md):
+  (a) A traffic from L3 grows as M/RW (each group reads all of A), and RW is limited by registers; (b) in A·B with M > MT the weights
+  are read ⌈M/MT⌉ times (from LLC only when the K-part fragment fits); (c) 64-bit address arithmetic in the loop
+  (emulated multiplication) cost 1.2–1.9×; (d) register limit without spill: 16 float accumulators per lane in SIMD16
+  with 4 weight vectors, 32 already goes to scratch.
+- Plan criterion: FP16 M ≤ 8 ≤ 1.8 ms -- met only for M = 1 (M = 4: 2.0–2.4, M = 8: 2.8–3.9); FP32 M ≤ 8
+  ≤ 3.5 ms -- met for M ≤ 4 (3.1–3.7), not for M = 8 (4.9). Gain vs the baseline 1.3–6.9× for M ≤ 16.
+- Further options (not done): A in local memory once per group (less L3 traffic and conversions), larger RW with
+  small MT, assembly code with manual register allocation (like HGEMM) -- ceiling 400+ GFLOPS for M = 16–64.
 
-== TABELE: przed (dawna ścieżka) -> po, USM ==
-typ uk N K M                  przed ms    po ms przysp.  GB/s po  CPU po     błąd przed/po
+== TABLES: before (old path) -> after, USM ==
+type lay N K M               before ms after ms speedup GB/s aft CPU aft  error before/after
 H W N=  4096 K=  4096 M=   1     10.38     1.85   5.60×     18.1   0.290  1.6e-02/ 3.8e-04
 H B N=  4096 K=  4096 M=   1      6.49     1.94   3.34×     17.3   0.270  1.9e-02/ 3.5e-04
 H W N=  4096 K=  4096 M=   2     10.81     2.35   4.61×     14.3   0.276  1.8e-02/ 3.6e-04
@@ -340,8 +340,8 @@ S B N= 51866 K=  1280 M= 128     96.23    85.76   1.12×      3.1   0.353  1.7e-
 S W N= 51866 K=  1280 M= 256    169.16   161.83   1.05×      1.6  16.997  1.7e-06/ 1.7e-06
 S B N= 51866 K=  1280 M= 256    157.29   155.20   1.01×      1.7  17.694  1.8e-06/ 1.8e-06
 
-== TABELE: przed -> po, zwykła pamięć (userptr) ==
-typ uk N K M                  przed ms    po ms przysp.  GB/s po  CPU po     błąd przed/po
+== TABLES: before -> after, plain memory (userptr) ==
+type lay N K M               before ms after ms speedup GB/s aft CPU aft  error before/after
 H W N=  4096 K=  4096 M=   1     10.32     2.19   4.70×     15.3   0.406  1.6e-02/ 3.8e-04
 H B N=  4096 K=  4096 M=   1      6.93     2.29   3.03×     14.6   0.380  1.9e-02/ 3.5e-04
 H W N=  4096 K=  4096 M=   2     10.13     2.69   3.76×     12.5   0.505  1.8e-02/ 3.6e-04
@@ -630,12 +630,12 @@ S W N= 51866 K=  1280 M= 128     92.78    91.62   1.01×      2.9   0.255  1.5e-
 S B N= 51866 K=  1280 M= 128     79.33    79.63   1.00×      3.3   0.248  1.7e-06/ 1.7e-06
 S W N= 51866 K=  1280 M= 256    146.13   144.25   1.01×      1.8   0.394  1.7e-06/ 1.7e-06
 S B N= 51866 K=  1280 M= 256    130.66   132.44   0.99×      2.0   0.403  1.8e-06/ 1.8e-06
-Uwaga: kolumna CPU w pomiarze „przed” zawyżona (wątki OpenBLAS po liczeniu odniesienia FP64); w „po” OPENBLAS_NUM_THREADS=1. Wiersze M = 32/64 w „po” mierzone przy progu 32 (później próg 16).
-Sprawdzone (plan, sekcja 1): gen9blas.gemv FP16 4096² zużywa 0,16 ms CPU (OPENBLAS_NUM_THREADS=1); wcześniejsze 5,5 ms to wirujące wątki OpenBLAS w tym samym procesie, nie biblioteka.
+Note: the CPU column in the "before" measurement is inflated (OpenBLAS threads after computing the FP64 reference); in "after" OPENBLAS_NUM_THREADS=1. Rows M = 32/64 in "after" measured at threshold 32 (threshold 16 later).
+Checked (plan, section 1): gen9blas.gemv FP16 4096² uses 0.16 ms CPU (OPENBLAS_NUM_THREADS=1); the earlier 5.5 ms were spinning OpenBLAS threads in the same process, not the library.
 
-== POPRAWKA (później 2026-11-12): FP16 A·Wᵀ odczytami blokowymi ==
-Przewidywanie: vload4 half -> bajtowe odczyty kompilatora; blokowe (us4, K % 64 = 0, wyrównanie 16 B) -> 1,5–2×.
-Wynik (ms, USM): 4096²: M1 1,85 -> 1,53, M4 2,43 -> 2,00, M8 3,92 -> 3,11, M16 6,83 -> 4,92; 11008×4096: M1 4,31 -> 3,69,
-M4 5,80 -> 4,58, M8 9,00 -> 6,64, M16 16,3 -> 11,9 (1,2–1,4×, przewidywanie trafione tylko w połowie). Obliczenia
-~110–120 GFLOPS -- dalej ogranicza struktura jądra (ruch A z L3 ~M/RW, limit rejestrów), nie typ komunikatu.
-Dalszy krok wymagałby przebudowy (A w pamięci lokalnej raz na grupę, więcej wierszy wag na grupę) albo asemblera.
+== IMPROVEMENT (later 2026-11-12): FP16 A·Wᵀ with block reads ==
+Prediction: vload4 half -> compiler byte reads; block reads (us4, K % 64 = 0, 16 B alignment) -> 1.5–2×.
+Result (ms, USM): 4096²: M1 1.85 -> 1.53, M4 2.43 -> 2.00, M8 3.92 -> 3.11, M16 6.83 -> 4.92; 11008×4096: M1 4.31 -> 3.69,
+M4 5.80 -> 4.58, M8 9.00 -> 6.64, M16 16.3 -> 11.9 (1.2–1.4×, prediction hit only halfway). Compute
+~110–120 GFLOPS -- still limited by the kernel structure (A traffic from L3 ~M/RW, register limit), not by the message type.
+A further step would require a rework (A in local memory once per group, more weight rows per group) or assembly.

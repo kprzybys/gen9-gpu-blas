@@ -1,60 +1,60 @@
-Przebudowa chudego GEMM A·Wᵀ (wagi ciągłe wzdłuż K), 2026-11-12, zasilanie sieciowe. Punkt wyjścia: commit 40a71dc
-(chudy_k1/k4/k8, odczyty blokowe FP16). Kryterium (STATUS): FP16 4096² M ≤ 8 ≤ 1,8 ms, M = 16 ≤ 3 ms, bez regresji M = 1.
+Rework of skinny GEMM A·Wᵀ (weights contiguous along K), 2026-11-12, mains power. Starting point: commit 40a71dc
+(skinny_k1/k4/k8, FP16 block reads). Criterion (docs/roadmap.md): FP16 4096² M ≤ 8 ≤ 1.8 ms, M = 16 ≤ 3 ms, no regression for M = 1.
 
-== DIAGNOZA Z ASEMBLERA (lib/.kernels/p3.d/.text.chudy_k4_h.asm, ścieżka blokowa) ==
-- Pętla: 165 instrukcji na 64 użyteczne FMA (16 dot4): mad 48, mul 32, mov 48, add 25, send 8.
-  * dot(w, a) + s nie jest łączone w akumulator: mul + 3 mad + add na dot4 zamiast 4 mad;
-  * działania mieszane hf->f (mov, mul) Gen9 dzieli na 2 × SIMD8 (ograniczenie trybu mieszanego);
-  * konwersje: 4·(RW+MT) na przebieg.
-- Wątek: K = 4096, 16 subgrup na grupę co 64 k -> tylko 4 przebiegi pętli; prolog ~118 instrukcji, epilog ~316
-  (sub_group_reduce_add na każdy akumulator, zapisy SLM, bariera, sumowanie 16 części).
-  Razem ~1100 instrukcji na wątek, z czego ~256 mad użytecznych -> ~25% szczytu FMA. Pomiar: 110–120 GFLOPS = 27–29%
-  z 410 [POM]. Model (koszt instrukcji, nie pamięć) wyjaśnia pomiar.
-- Ruch A z L3 = (N/RW)·M·K·e: k8 (RW = 2) przy M = 16: 268 MB -> 1,7–2,3 ms przy 116–156 GB/s (odczyt blokowy z L3 [POM]).
+== DIAGNOSIS FROM ASSEMBLY (lib/.kernels/p3.d/.text.skinny_k4_h.asm, block path) ==
+- Loop: 165 instructions for 64 useful FMA (16 dot4): mad 48, mul 32, mov 48, add 25, send 8.
+  * dot(w, a) + s is not fused into the accumulator: mul + 3 mad + add per dot4 instead of 4 mad;
+  * mixed operations hf->f (mov, mul) Gen9 splits into 2 × SIMD8 (mixed-mode restriction);
+  * conversions: 4·(RW+MT) per pass.
+- Thread: K = 4096, 16 subgroups per group every 64 k -> only 4 loop passes; prologue ~118 instructions, epilogue ~316
+  (sub_group_reduce_add per accumulator, SLM writes, barrier, accumulation of 16 parts).
+  Total ~1100 instructions per thread, of which ~256 useful mad -> ~25% of FMA peak. Measurement: 110–120 GFLOPS = 27–29%
+  of 410 [MEAS]. The model (instruction cost, not memory) explains the measurement.
+- A traffic from L3 = (N/RW)·M·K·e: k8 (RW = 2) at M = 16: 268 MB -> 1.7–2.3 ms at 116–156 GB/s (block read from L3 [MEAS]).
 
-== WARIANT (jeden): chudy_r<MT>, SIMD8, RW = 8 wierszy wag, S = 4 subgrupy na grupę ==
-- SIMD8: float na lane = 1 GRF (w SIMD16 = 2) -> 64 akumulatory (RW·MT = 8·8) mieszczą się w 128 GRF; tryb mieszany
-  hf->f natywnie SIMD8 (bez dzielenia). Lane czyta 8 B (FP16: 4 k, FP32: 2 k) -> komunikat 64 B = 1 linia.
-- Akumulacja jawnym fma po składowych (bez dot), konwersja składowa po składowej (mniej żywych rejestrów).
-- S = 4 subgrupy co 8·KL k, krok 32·KL: K = 4096 FP16 -> 32 przebiegi (było 4); wątków 2048 przy N = 4096 (zapas
-  na 168 wątków sprzętowych, ogon ≤ 1/12).
-- Epilog: redukcja transpozycyjna w subgrupie (shuffle_xor, 64 -> 8 wartości na lane, lane = wiersz wag), potem
-  SLM [4][64], bariera, 32 work-itemy sumują po 4 części. ~300 instrukcji na wątek wobec ~32 × 340 w pętli (< 3%).
-- Tylko ścieżka blokowa: sak = 1, K % (32·KL) = 0, wyrównanie 16 B; inaczej dawne jądra. M = 1 zostaje na chudy_k1.
-  MT = 4 dla M = 2–4, MT = 8 dla M = 5–16 (M > 8: kafle po 8, kafel M najszybszy w siatce -> drugi odczyt wag z LLC).
+== VARIANT (one): skinny_r<MT>, SIMD8, RW = 8 weight rows, S = 4 subgroups per group ==
+- SIMD8: float per lane = 1 GRF (in SIMD16 = 2) -> 64 accumulators (RW·MT = 8·8) fit in 128 GRF; mixed mode
+  hf->f natively SIMD8 (no splitting). A lane reads 8 B (FP16: 4 k, FP32: 2 k) -> a 64 B message = 1 line.
+- Accumulation with explicit fma per component (no dot), conversion component by component (fewer live registers).
+- S = 4 subgroups every 8·KL k, stride 32·KL: K = 4096 FP16 -> 32 passes (was 4); 2048 threads at N = 4096 (margin
+  over 168 hardware threads, tail ≤ 1/12).
+- Epilogue: transposed reduction in the subgroup (shuffle_xor, 64 -> 8 values per lane, lane = weight row), then
+  SLM [4][64], barrier, 32 work-items sum 4 parts each. ~300 instructions per thread vs ~32 × 340 in the loop (< 3%).
+- Block path only: sak = 1, K % (32·KL) = 0, 16 B alignment; otherwise the old kernels. M = 1 stays on skinny_k1.
+  MT = 4 for M = 2–4, MT = 8 for M = 5–16 (M > 8: tiles of 8, the M tile varies fastest in the grid -> second read of weights from LLC).
 
-== PRZEWIDYWANIE (FP16, N = K = 4096, USM) ==
-Pętla (SIMD8, MT = 8): 256 mad + 64 konwersje + 16 send + ~10 adresy/pętla -> ~77% instrukcji to FMA;
-MT = 4: 128 / (128 + 48 + ~10) ~ 70%. Opóźnienia i obsadzenie [HIP] 0,7–0,9 -> F ≈ 200–285 GFLOPS (MT = 8),
+== PREDICTION (FP16, N = K = 4096, USM) ==
+Loop (SIMD8, MT = 8): 256 mad + 64 conversions + 16 send + ~10 addresses/loop -> ~77% of the instructions are FMA;
+MT = 4: 128 / (128 + 48 + ~10) ~ 70%. Latencies and occupancy [HYP] 0.7–0.9 -> F ≈ 200–285 GFLOPS (MT = 8),
 180–260 (MT = 4).
-Ruch: wagi 32 MB z RAM (22–25 GB/s -> 1,3–1,5 ms); A z L3: (N/8)·M·K·2 = 4 MB·M... M = 8: 32 MB, M = 16: 64 MB (< 0,5 ms).
-  M = 2–4:  max(1,3–1,5 pamięć; 0,5 obliczenia)            -> 1,4–1,7 ms  (dziś 1,9–2,0)
-  M = 8:    max(1,3–1,5; 268 MFLOP / 200–285 = 0,94–1,34)   -> 1,4–1,8 ms  (dziś 3,1)
-  M = 16:   537 MFLOP / 200–285 = 1,9–2,7 ms (+ drugi odczyt wag z LLC, nakłada się) -> 2,0–2,8 ms (dziś 4,9)
-FP32: wagi 64 MB -> 2,6–2,9 ms dla M ≤ 8 (pamięć), M = 16: 2,6–3,0.
-Ryzyko [HIP]: S = 4 przy RW = 8 to ~42 grupy × 8 wierszy = ~340 strumieni odczytu naraz (dziś ~20) -- jeśli M = 2–4
-nie dojdzie do 20+ GB/s wag, brak w modelu = liczba strumieni (mikrotest: gemv po wierszach z różną liczbą wierszy na grupę).
-Ryzyko: spill (gen_kernels.py odrzuci) -> wtedy RW = 4 dla MT = 8.
+Traffic: weights 32 MB from RAM (22–25 GB/s -> 1.3–1.5 ms); A from L3: (N/8)·M·K·2 = 4 MB·M... M = 8: 32 MB, M = 16: 64 MB (< 0.5 ms).
+  M = 2–4:  max(1.3–1.5 memory; 0.5 compute)            -> 1.4–1.7 ms  (today 1.9–2.0)
+  M = 8:    max(1.3–1.5; 268 MFLOP / 200–285 = 0.94–1.34)   -> 1.4–1.8 ms  (today 3.1)
+  M = 16:   537 MFLOP / 200–285 = 1.9–2.7 ms (+ second read of weights from LLC, overlaps) -> 2.0–2.8 ms (today 4.9)
+FP32: weights 64 MB -> 2.6–2.9 ms for M ≤ 8 (memory), M = 16: 2.6–3.0.
+Risk [HYP]: S = 4 with RW = 8 is ~42 groups × 8 rows = ~340 read streams at once (today ~20) -- if M = 2–4
+does not reach 20+ GB/s of weights, the model gap = number of streams (microbenchmark: row-wise gemv with different number of rows per group).
+Risk: spill (gen_kernels.py will reject) -> then RW = 4 for MT = 8.
 
-== PRZEBIEG ==
-1. Pierwsza wersja (S = 4, FP16 ushort4): asembler pętli blokowej FP16 r8: 293 instrukcje, 256 mad (87%) -- konwersje
-   hf->f weszły w mad trybu mieszanego (lepiej niż przewidywane 77%).
-2. chudy_r8 liczył źle przez kcl (wiersze wag 0–3 = sumy wiersza r + 3), przez NEO dobrze: float s[8][8] (256 B na lane)
-   IGC umieścił w pamięci prywatnej (private_size 2048, per_thread_memory_buffers scratch); s[8][4] (128 B) przechodziło
-   do rejestrów. kcl nie konfiguruje scratch. Naprawa: osobne wektory s0..s7 (float8). Jawne liczby rozwinięcia nie pomagały.
-   gemv_n/gemv_nw też deklarują private_size 256, ale nie sięgają do scratch -- dlatego generator nie odrzuca samego
-   private_size (do zrobienia: sprawdzanie dostępów do scratch w asm).
-3. Spill w FP16 r8: surowe ushort4 = 1 GRF na składową; ścieżka zapasowa bez wyrównania (odczyty po 2 B) w tym samym
-   jądrze przelewała rejestry. Wyrównanie sprawdza teraz host (adres GPU ma to samo przesunięcie w stronie co host:
-   USM, userptr kcl; bufor roboczy wyrównany); surowe dane jako uint2.
-4. Pomiar S = 4: obliczenia szybkie (FP16 M = 16: 167–208 GFLOPS), ale wagi tylko 14–18 GB/s przy M = 2–8 (czas
-   niezależny od M) -> ryzyko z przewidywania się potwierdziło. Test S (subgrupy na grupę = bajty ciągiem z wiersza na
-   krok grupy): FP32 S = 4/8/16 -> 4096² M = 2: 4,06/3,89/3,50 ms, 11008×4096: 10,3/9,4/7,9 ms (22,8 GB/s);
-   FP16 KL = 2 (32 B na komunikat) zysk mniejszy; FP16 KL = 4 (uint2, 64 B) S = 16: M = 2 1,58 ms (21 GB/s).
-   Wybór: S = 16, KL = 8 B na lane (FP16 4, FP32 2), MT = 4 dla M ≤ 4, 8 dla M > 4 (MT = 4 dla M = 8 nie lepsze).
+== PROCESS ==
+1. First version (S = 4, FP16 ushort4): assembly of the FP16 r8 block loop: 293 instructions, 256 mad (87%) -- conversions
+   hf->f went into mixed-mode mad (better than the predicted 77%).
+2. skinny_r8 computed wrongly through kcl (weight rows 0–3 = sums of row r + 3), correctly through NEO: float s[8][8] (256 B per lane)
+   IGC placed in private memory (private_size 2048, per_thread_memory_buffers scratch); s[8][4] (128 B) went
+   to registers. kcl does not configure scratch. Fix: separate vectors s0..s7 (float8). Explicit unroll counts did not help.
+   gemv_n/gemv_nw also declare private_size 256, but do not touch scratch -- so the generator does not reject private_size alone
+   (to do: checking scratch accesses in asm).
+3. Spill in FP16 r8: raw ushort4 = 1 GRF per component; the fallback path without alignment (2 B reads) in the same
+   kernel spilled registers. Alignment is now checked by the host (the GPU address has the same offset within a page as the host:
+   USM, kcl userptr; working buffer aligned); raw data as uint2.
+4. Measurement S = 4: compute fast (FP16 M = 16: 167–208 GFLOPS), but weights only 14–18 GB/s for M = 2–8 (time
+   independent of M) -> the risk from the prediction confirmed. S test (subgroups per group = bytes read contiguously from a row per
+   group step): FP32 S = 4/8/16 -> 4096² M = 2: 4.06/3.89/3.50 ms, 11008×4096: 10.3/9.4/7.9 ms (22.8 GB/s);
+   FP16 KL = 2 (32 B per message) smaller gain; FP16 KL = 4 (uint2, 64 B) S = 16: M = 2 1.58 ms (21 GB/s).
+   Choice: S = 16, KL = 8 B per lane (FP16 4, FP32 2), MT = 4 for M ≤ 4, 8 for M > 4 (MT = 4 for M = 8 not better).
 
-== WYNIK (S = 16; 3 serie na przemian z dawną ścieżką GEN9BLAS_SKINNY_R=0, mediany ms, USM, zasilanie sieciowe) ==
-typ     N     K  M   dawne ms [min-max]       nowe ms [min-max]     przysp.  GFLOPS  GB/s wag
+== RESULT (S = 16; 3 alternating runs with the old path GEN9BLAS_SKINNY_R=0, medians ms, USM, mains power) ==
+type     N     K  M   old ms [min-max]       new ms [min-max]     speedup GFLOPS  GB/s weights
 H  4096  4096  1     1.515 [1.46-1.78]     1.687 [1.57-1.85]    0.90x      20   19.9
 H  4096  4096  2     2.271 [2.26-2.28]     1.553 [1.54-1.61]    1.46x      43   21.6
 H  4096  4096  4     2.296 [1.86-2.30]     1.679 [1.60-1.90]    1.37x      80   20.0
@@ -95,37 +95,37 @@ S  2048  2048  2     1.275 [1.06-1.28]     1.055 [0.89-1.36]    1.21x      16   
 S  2048  2048  4     1.124 [1.10-1.56]     0.960 [0.93-1.02]    1.17x      35   17.5
 S  2048  2048  8     1.526 [1.50-1.95]     0.997 [0.99-1.01]    1.53x      67   16.8
 S  2048  2048 16     2.702 [2.33-2.71]     1.158 [1.14-1.64]    2.33x     116   14.5
-(M = 1 w obu kolumnach to to samo jądro chudy_k1 -- różnice to rozrzut.)
-Po pomiarze: M ≤ 4 przy wierszu wag > 16 KB zostaje na dawnym jądrze (wiersz FP32 K = 11008: 0,7×).
+(M = 1 in both columns is the same kernel skinny_k1 -- the differences are scatter.)
+After the measurement: M ≤ 4 with a weight row > 16 KB stays on the old kernel (FP32 row K = 11008: 0.7×).
 
-== PRZEWIDYWANIE A POMIAR ==
-- FP16 4096²: M = 2–4 1,55–1,68 ms (przewidywane 1,4–1,7) -- trafione, ale dopiero po S = 16; M = 8 1,9 ms (1,79–2,17;
-  przewidywane 1,4–1,8, kryterium 1,8) -- blisko, nie spełnione; M = 16 3,19 ms (przewidywane 2,0–2,8, kryterium 3) -- nie.
-- Obliczenia: 168–225 GFLOPS przy M = 16 (przewidywane 200–285) -- dolna granica.
-- Braki modelu:
-  (a) przepustowość wag zależy od bajtów czytanych ciągiem z wiersza na krok grupy (S·64 B): 256 B -> 14–18 GB/s,
-      512 B -> ~19–20, 1 KB -> 21–24 [POM]; dawne jądra czytały 2–4 KB;
-  (b) przy długich wierszach (44 KB) i 8 wierszach na grupę przepustowość spada (FP32 K = 11008: 16–17 GB/s) [HIP strony/TLB];
-  (c) M = 8–16: czas bliżej sumy t_pam + t_obl niż maksimum (4096² FP16 M = 8: 1,4 + 0,64 ≈ 1,9-2,0 ms) -- wątek
-      ładuje, czeka, liczy; za mało nakładania [HIP]. Kierunek: wcześniejsze ładowanie (rejestry: przy 64 akumulatorach brak
-      miejsca na podwójny bufor), A w SLM (zwalnia 16 GRF na podwójny bufor wag).
+== PREDICTION VS MEASUREMENT ==
+- FP16 4096²: M = 2–4 1.55–1.68 ms (predicted 1.4–1.7) -- hit, but only after S = 16; M = 8 1.9 ms (1.79–2.17;
+  predicted 1.4–1.8, criterion 1.8) -- close, not met; M = 16 3.19 ms (predicted 2.0–2.8, criterion 3) -- no.
+- Compute: 168–225 GFLOPS at M = 16 (predicted 200–285) -- lower bound.
+- Model gaps:
+  (a) weight bandwidth depends on the bytes read contiguously from a row per group step (S·64 B): 256 B -> 14–18 GB/s,
+      512 B -> ~19–20, 1 KB -> 21–24 [MEAS]; the old kernels read 2–4 KB;
+  (b) with long rows (44 KB) and 8 rows per group the bandwidth drops (FP32 K = 11008: 16–17 GB/s) [HYP pages/TLB];
+  (c) M = 8–16: time closer to the sum t_mem + t_comp than to the maximum (4096² FP16 M = 8: 1.4 + 0.64 ≈ 1.9-2.0 ms) -- the thread
+      loads, waits, computes; too little overlap [HYP]. Direction: earlier loading (registers: with 64 accumulators there is no
+      room for a double buffer), A in SLM (frees 16 GRF for a double weight buffer).
 
-== PORÓWNANIE ETAPÓW (A·Wᵀ, USM, mediany ms; granica pamięci FP16 4096²: 32 MB / 22–25 GB/s = 1,3–1,5 ms) ==
-Etapy: (0) dawna ścieżka z pakowaniem wag; (1) chudy GEMM wersja 3 (results/skinny-gemm-2026-11-12.txt);
-(2) odczyty blokowe FP16 (commit 40a71dc; kolumna „dawne” z pomiaru końcowego); (3) przebudowa chudy_r (ten plik).
+== STAGE COMPARISON (A·Wᵀ, USM, median ms; FP16 4096² memory limit: 32 MB / 22–25 GB/s = 1.3–1.5 ms) ==
+Stages: (0) old path with weight packing; (1) skinny GEMM version 3 (results/skinny-gemm-2026-11-12.txt);
+(2) FP16 block reads (commit 40a71dc; column "old" from the final measurement); (3) rework skinny_r (this file).
 FP16 4096²        (0)     (1)     (2)     (3)    (0)->(3)
-  M = 1          10,38    1,85    1,52    1,52*   6,8×     * to samo jądro co (2)
-  M = 2          10,81    2,35    2,27    1,55    7,0×
-  M = 4          11,12    2,43    2,30    1,68    6,6×
-  M = 8          11,00    3,92    2,94    1,90    5,8×
-  M = 16         10,77    6,83    4,92    3,19    3,4×
+  M = 1          10.38    1.85    1.52    1.52*   6.8×     * same kernel as (2)
+  M = 2          10.81    2.35    2.27    1.55    7.0×
+  M = 4          11.12    2.43    2.30    1.68    6.6×
+  M = 8          11.00    3.92    2.94    1.90    5.8×
+  M = 16         10.77    6.83    4.92    3.19    3.4×
 FP16 11008×4096
-  M = 1          28,24    4,31    3,71    3,71*   7,6×
-  M = 8          27,09    9,00    6,50    4,21    6,4×
-  M = 16         28,13   16,27   11,69    7,21    3,9×
+  M = 1          28.24    4.31    3.71    3.71*   7.6×
+  M = 8          27.09    9.00    6.50    4.21    6.4×
+  M = 16         28.13   16.27   11.69    7.21    3.9×
 FP32 4096²
-  M = 1          14,15    3,10    3,23    3,07*   4,6×
-  M = 4          13,89    3,73    3,52    3,48    4,0×
-  M = 8          14,05    4,89    4,70    3,47    4,0×
-  M = 16         13,89    6,93    6,88    4,11    3,4×
-Etap (3) wobec (2): M = 2–16 1,2–1,8× (FP16 4096² M = 8: 1,54×, M = 16: 1,54×); M ≤ 4 przy wierszu > 16 KB bez zmian.
+  M = 1          14.15    3.10    3.23    3.07*   4.6×
+  M = 4          13.89    3.73    3.52    3.48    4.0×
+  M = 8          14.05    4.89    4.70    3.47    4.0×
+  M = 16         13.89    6.93    6.88    4.11    3.4×
+Stage (3) vs (2): M = 2–16 1.2–1.8× (FP16 4096² M = 8: 1.54×, M = 16: 1.54×); M ≤ 4 with a row > 16 KB unchanged.

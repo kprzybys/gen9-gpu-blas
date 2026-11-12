@@ -1,14 +1,14 @@
-Test ViennaCL 1.7.1 dense_blas (OpenBenchmarking pts/viennacl-1.1.0) powtórzony na libgen9blas, 2026-11-12, zasilanie sieciowe.
-Rozmiary i metoda z examples/benchmarks/dense_blas.cpp: BLAS1 N = 10^7, GEMV 3840², GEMM 1976³; pętla ≥ 1 s, średni czas
-wywołania. Mediany 3 serii (jak PTS).
-- 2021: wynik OpenBenchmarking 2103278-IB-KABYLAKET61 (i7-8550U, UHD 620 KBL GT2 1150 MHz, NEO z Ubuntu 20.10, jądro 5.8);
-  PTS zapisał tylko FP32 wektorowe i FP64; dane: results/zewnetrzne/openbenchmarking-2103278-IB-KABYLAKET61/.
-- ViennaCL dziś: ten sam program (ViennaCL 1.7.1 z GitHuba, sha256 tar.gz dddb8d40…), nasz laptop (i5-8265U, UHD 620 WHL GT2),
-  NEO (OpenCL), jądro 7.0.0-43. Program liczy też FP32 GEMV/GEMM (PTS ich nie zapisywał).
-- libgen9blas: te same operacje, rozmiary i metoda (bench/compare/viennacl_gen9blas.py), dane w USM, bez NEO (kcl).
-  FP16 („h”) poza testem ViennaCL -- dla porównania.
+ViennaCL 1.7.1 dense_blas test (OpenBenchmarking pts/viennacl-1.1.0) repeated on libgen9blas, 2026-11-12, mains power.
+Sizes and method from examples/benchmarks/dense_blas.cpp: BLAS1 N = 10^7, GEMV 3840², GEMM 1976³; loop ≥ 1 s, mean call
+time. Medians of 3 runs (as PTS).
+- 2021: OpenBenchmarking result 2103278-IB-KABYLAKET61 (i7-8550U, UHD 620 KBL GT2 1150 MHz, NEO from Ubuntu 20.10, Linux kernel 5.8);
+  PTS recorded only FP32 vector and FP64; data: results/external/openbenchmarking-2103278-IB-KABYLAKET61/.
+- ViennaCL today: the same program (ViennaCL 1.7.1 from GitHub, sha256 tar.gz dddb8d40…), our laptop (i5-8265U, UHD 620 WHL GT2),
+  NEO (OpenCL), Linux kernel 7.0.0-43. The program also computes FP32 GEMV/GEMM (PTS did not record them).
+- libgen9blas: the same operations, sizes and method (bench/compare/viennacl_gen9blas.py), data in USM, without NEO (kcl).
+  FP16 ("h") outside the ViennaCL test -- for comparison.
 
-operacja      2021 ViennaCL   ViennaCL dziś    libgen9blas dziś    libgen9blas / ViennaCL dziś
+operation      2021 ViennaCL   ViennaCL today   libgen9blas today   libgen9blas / ViennaCL today
 sCOPY          20.0          22.5            23.2  GB/s       1.03×
 sAXPY          18.9          21.4            23.2  GB/s       1.08×
 sDOT           19.5          25.5            24.2  GB/s       0.95×
@@ -37,16 +37,16 @@ hGEMM-NT          -             -           604.0  GFLOPS         -
 hGEMM-TN          -             -           597.0  GFLOPS         -
 hGEMM-TT          -             -           584.0  GFLOPS         -
 
-Wnioski:
-- Powtórzenie testu: ViennaCL dziś daje wektory/GEMV +10–25% wobec 2021, dGEMM NN/NT ~2× (34 wobec 17,8), TN/TT +15–25% --
-  nowszy sterownik/kompilator IGC i inna platforma; rząd wielkości zgodny, metoda działa na naszym sprzęcie.
-- GEMM: libgen9blas sGEMM 317–326 GFLOPS wobec 22–60 (5–14×), dGEMM ~55 wobec 17–34 (1,6–3,2×; wobec wyniku z 2021: 3,1–3,7×);
-  FP16 (brak w ViennaCL) 584–618 GFLOPS. libgen9blas równe we wszystkich transpozycjach, ViennaCL traci 1,5–2,7× na TN/TT.
-- Wektory i GEMV (ograniczone pamięcią): remis (0,95–1,08×) poza dwoma słabościami do poprawienia: dCOPY 17,4 wobec
-  22,9 GB/s (0,76×) i dGEMV-T (u nas gemv N w FP64, wiersze) 21,6 wobec 25,3 GB/s (0,85×); FP16 COPY/GEMV 14–15 GB/s.
+Conclusions:
+- Repeating the test: ViennaCL today gives vectors/GEMV +10–25% vs 2021, dGEMM NN/NT ~2× (34 vs 17.8), TN/TT +15–25% --
+  newer driver/IGC compiler and a different platform; order of magnitude consistent, the method works on our hardware.
+- GEMM: libgen9blas sGEMM 317–326 GFLOPS vs 22–60 (5–14×), dGEMM ~55 vs 17–34 (1.6–3.2×; vs the 2021 result: 3.1–3.7×);
+  FP16 (absent in ViennaCL) 584–618 GFLOPS. libgen9blas is even across all transpositions, ViennaCL loses 1.5–2.7× on TN/TT.
+- Vectors and GEMV (memory-bound): tie (0.95–1.08×) except for two weaknesses to fix: dCOPY 17.4 vs
+  22.9 GB/s (0.76×) and dGEMV-T (for us gemv N in FP64, rows) 21.6 vs 25.3 GB/s (0.85×); FP16 COPY/GEMV 14–15 GB/s.
 
-== PO POPRAWKACH (results/message-16B-2026-11-12.txt), mediany 3 serii ==
-operacja    ViennaCL dziś   libgen9blas przed   libgen9blas po   po / ViennaCL
+== AFTER THE FIXES (results/message-16B-2026-11-12.txt), medians of 3 runs ==
+operation   ViennaCL today   libgen9blas before   libgen9blas after   after / ViennaCL
 sCOPY          22.5           23.2        23.5 GB/s      1.04×
 sAXPY          21.4           23.2        22.3 GB/s      1.04×
 sDOT           25.5           24.2        24.0 GB/s      0.94×
