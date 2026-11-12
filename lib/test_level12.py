@@ -146,35 +146,40 @@ for dt in DTYPES:
                  abs(Ad) + 0.25 * (np.outer(abs(Xs), abs(Ys)) + np.outer(abs(Ys), abs(Xs))), tol)
 
 # ROTG, ROTMG (CPU) and ROTM (GPU) against OpenBLAS (SciPy): random and extreme data (zeros, 1e-30, 1e30, d1 < 0)
-import scipy.linalg.blas as sb  # noqa: E402
-cases = [(0.0, 0.0), (0.0, 2.0), (3.0, 0.0), (1e-30, 3e-30), (1e30, -2e30), (-4.0, 3.0)] + \
-            [tuple(rng.uniform(-10, 10, 2) * 10.0 ** rng.integers(-5, 5)) for _ in range(200)]
-for a_, b_ in cases:
-    r, z, c, s_ = gen9blas.rotg(a_, b_)
-    c0, s0 = sb.srotg(a_, b_)
-    if not (np.isclose(c, c0, rtol=1e-5, atol=1e-7) and np.isclose(s_, s0, rtol=1e-5, atol=1e-7)):
-        errors += 1; print(f"  ERR rotg({a_}, {b_}): ({c}, {s_}) != ({c0}, {s0})")
-    rr = np.float32(c) * np.float32(a_) + np.float32(s_) * np.float32(b_)   # r = c·a + s·b
-    if not np.isclose(r, rr, rtol=1e-5, atol=1e-30):
-        errors += 1; print(f"  ERR rotg r({a_}, {b_}): {r} != {rr}")
-cases = [(1.0, 1.0, 0.0, 1.0), (1.0, 0.0, 1.0, 1.0), (-1.0, 2.0, 1.0, 1.0), (1e-10, 1.0, 1.0, 1e-3), (1e10, 1.0, 1e3, 1.0),
-             (1.0, 1e-9, 2.0, 3.0), (1.0, 1e9, 2.0, 3.0)] + \
-            [tuple(np.abs(rng.uniform(0.1, 10, 2)) ** rng.uniform(-3, 3, 2)) + tuple(rng.uniform(-5, 5, 2)) for _ in range(200)]
-for d1, d2, x1, y1 in cases:
-    w = gen9blas.rotmg(d1, d2, x1, y1)
-    p0 = sb.srotmg(d1, d2, x1, y1)
-    fl = w[3][0]
-    relevant = {-2.0: [], -1.0: [1, 2, 3, 4], 0.0: [2, 3], 1.0: [1, 4]}.get(float(fl), [1, 2, 3, 4])
-    if fl != p0[0] or not np.allclose(w[3][relevant], p0[relevant], rtol=1e-4, atol=1e-12):
-        errors += 1; print(f"  ERR rotmg{(d1, d2, x1, y1)}: {w[3]} != {p0}")
-for dt in DTYPES:
-    for param in ([-1.0, 0.5, -0.3, 0.2, 1.5], [0.0, 9, -0.3, 0.2, 9], [1.0, 0.5, 9, 9, 1.5], [-2.0, 9, 9, 9, 9]):
-        x = vector(1001, dt, -2, 1); y = vector(1001, dt, 3); X, Y = x.astype(np.float64), y.astype(np.float64)
-        rt = np.float64 if dt == np.float64 else np.float32   # reference: OpenBLAS srotm / drotm
-        rx, ry = (sb.drotm if dt == np.float64 else sb.srotm)(X.astype(rt), Y.astype(rt), np.array(param, rt))
-        gen9blas.rotm(x, y, param)
-        check(f"rotm {np.dtype(dt).name} flag {param[0]}", np.concatenate([x, y]), np.concatenate([rx, ry]).astype(np.float64),
-             np.concatenate([abs(X) + abs(Y)] * 2) * 2, TOL[dt])
+try:
+    import scipy.linalg.blas as sb  # noqa: E402
+except ImportError:   # e.g. a machine with only the GPU library (Gen8 bring-up)
+    sb = None
+    print("NOTE: SciPy not installed, skipping ROTG/ROTMG/ROTM (they need OpenBLAS from SciPy as the reference)")
+if sb is not None:
+    cases = [(0.0, 0.0), (0.0, 2.0), (3.0, 0.0), (1e-30, 3e-30), (1e30, -2e30), (-4.0, 3.0)] + \
+                [tuple(rng.uniform(-10, 10, 2) * 10.0 ** rng.integers(-5, 5)) for _ in range(200)]
+    for a_, b_ in cases:
+        r, z, c, s_ = gen9blas.rotg(a_, b_)
+        c0, s0 = sb.srotg(a_, b_)
+        if not (np.isclose(c, c0, rtol=1e-5, atol=1e-7) and np.isclose(s_, s0, rtol=1e-5, atol=1e-7)):
+            errors += 1; print(f"  ERR rotg({a_}, {b_}): ({c}, {s_}) != ({c0}, {s0})")
+        rr = np.float32(c) * np.float32(a_) + np.float32(s_) * np.float32(b_)   # r = c·a + s·b
+        if not np.isclose(r, rr, rtol=1e-5, atol=1e-30):
+            errors += 1; print(f"  ERR rotg r({a_}, {b_}): {r} != {rr}")
+    cases = [(1.0, 1.0, 0.0, 1.0), (1.0, 0.0, 1.0, 1.0), (-1.0, 2.0, 1.0, 1.0), (1e-10, 1.0, 1.0, 1e-3), (1e10, 1.0, 1e3, 1.0),
+                 (1.0, 1e-9, 2.0, 3.0), (1.0, 1e9, 2.0, 3.0)] + \
+                [tuple(np.abs(rng.uniform(0.1, 10, 2)) ** rng.uniform(-3, 3, 2)) + tuple(rng.uniform(-5, 5, 2)) for _ in range(200)]
+    for d1, d2, x1, y1 in cases:
+        w = gen9blas.rotmg(d1, d2, x1, y1)
+        p0 = sb.srotmg(d1, d2, x1, y1)
+        fl = w[3][0]
+        relevant = {-2.0: [], -1.0: [1, 2, 3, 4], 0.0: [2, 3], 1.0: [1, 4]}.get(float(fl), [1, 2, 3, 4])
+        if fl != p0[0] or not np.allclose(w[3][relevant], p0[relevant], rtol=1e-4, atol=1e-12):
+            errors += 1; print(f"  ERR rotmg{(d1, d2, x1, y1)}: {w[3]} != {p0}")
+    for dt in DTYPES:
+        for param in ([-1.0, 0.5, -0.3, 0.2, 1.5], [0.0, 9, -0.3, 0.2, 9], [1.0, 0.5, 9, 9, 1.5], [-2.0, 9, 9, 9, 9]):
+            x = vector(1001, dt, -2, 1); y = vector(1001, dt, 3); X, Y = x.astype(np.float64), y.astype(np.float64)
+            rt = np.float64 if dt == np.float64 else np.float32   # reference: OpenBLAS srotm / drotm
+            rx, ry = (sb.drotm if dt == np.float64 else sb.srotm)(X.astype(rt), Y.astype(rt), np.array(param, rt))
+            gen9blas.rotm(x, y, param)
+            check(f"rotm {np.dtype(dt).name} flag {param[0]}", np.concatenate([x, y]), np.concatenate([rx, ry]).astype(np.float64),
+                 np.concatenate([abs(X) + abs(Y)] * 2) * 2, TOL[dt])
 
 # Banded and packed (row layout): reference from a dense matrix packed into the format
 def to_band(D, KL, KU):
