@@ -1,4 +1,4 @@
-# Poziom 3: libgen9blas bez NEO (kcl, i915) wobec libgen9blas_neo (NEO), bench/level3_cpu.py, OPENBLAS_NUM_THREADS=1, 2026-11-11
+# Level 3: libgen9blas without NEO (kcl, i915) vs libgen9blas_neo (NEO), bench/level3_cpu.py, OPENBLAS_NUM_THREADS=1, 2026-11-11
 ### libgen9blas.so n=1024
 == n = 1024, float32
   gemm    287.0 GFLOPS       7 ms   CPU      1 ms (  7%)

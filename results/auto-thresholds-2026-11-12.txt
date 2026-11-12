@@ -1,445 +1,445 @@
-Progi trybu auto w libgen9blas_blas po userptr, 2026-11-12, UHD 620 (bez NEO, kcl), OpenBLAS pthread, 8 wątków sprzętowych.
+Auto mode thresholds in libgen9blas_blas after userptr, 2026-11-12, UHD 620 (without NEO, kcl), OpenBLAS pthread, 8 hardware threads.
 
-Pytanie: od jakiego rozmiaru poziomy 1–2 na zwykłej pamięci (nie USM) opłaca się wysłać na GPU, skoro po userptr
-(BEZNEO.md 6g) nie ma już kopii przez CPU? Kryterium (cel Karola: odciążyć CPU): czas CPU procesu na wywołanie
-na GPU < czas CPU procesu w OpenBLAS (8 wątków = ustawienie domyślne programów; 1 wątek dla porównania).
-Czas ściany raportowany obok -- nie jest kryterium, ale duża strata czasu ma być widoczna.
+Question: from what size is it worthwhile to send level 1–2 on plain memory (not USM) to the GPU, since after userptr
+(docs/no-neo.md 6g) there is no CPU copy any more? Criterion (the author's goal: offload the CPU): process CPU time per call
+on the GPU < process CPU time in OpenBLAS (8 threads = the programs' default setting; 1 thread for comparison).
+Wall time reported alongside -- not the criterion, but a large time loss should be visible.
 
-== PRZEWIDYWANIE (przed pomiarem) ==
-Stałe: przypięcie userptr ~0,45 µs CPU/stronę [POM 6g]; jedno jądro bez NEO 36 µs / 7 µs CPU [POM 6c];
-RAM GPU ~20 GB/s, CPU 1 wątek 17–18 GB/s [POM]; z Pythona gen9blas.axpy na tych samych tablicach 0,25 ms CPU,
-z czego nakładka Pythona ~50 µs [POM/OPR].
-[HIP] c0 = koszt CPU jednego wywołania GPU z C przez libgen9blas_blas na tych samych tablicach: 20–60 µs
-      (execbuf + gen9blas/kcl: argumenty, wyszukanie userptr w pamięci podręcznej, budzenia nanosleep).
-TRSV: ok. n/256 jąder -> c0 rośnie z n.
+== PREDICTION (before the measurement) ==
+Constants: userptr pinning ~0.45 µs CPU/page [MEAS 6g]; one kernel without NEO 36 µs / 7 µs CPU [MEAS 6c];
+GPU RAM ~20 GB/s, CPU 1 thread 17–18 GB/s [MEAS]; from Python gen9blas.axpy on the same arrays 0.25 ms CPU,
+of which the Python wrapper ~50 µs [MEAS/SW].
+[HYP] c0 = CPU cost of one GPU call from C through libgen9blas_blas on the same arrays: 20–60 µs
+      (execbuf + gen9blas/kcl: arguments, userptr cache lookup, nanosleep wakeups).
+TRSV: about n/256 kernels -> c0 grows with n.
 
-1. Te same tablice, poziom 1 (axpy 12 B/el.): OpenBLAS 1 wątek w LLC ~0,25 ns/el. -> próg n ≈ c0 / 0,25 ns ≈ 2^17;
-   8 wątków (dzieli od n ~ 10^4, CPU ≈ 8 × ściana + wirowanie wątków) -> próg niższy, ~2^14–2^16.
-   Dziś: zwykła pamięć zawsze CPU -> przewiduję zmianę na próg ~2^16 jak dla USM.
-2. Te same tablice, poziom 2 (gemv 4 B/el.): 1 wątek ~0,13 ns/el. -> próg ~3·10^5 el. (n ≈ 550);
-   8 wątków -> ~6·10^4 (n ≈ 256). Dziś 2^18 (n = 512) -> przewiduję obniżenie do ~2^16 jak dla USM.
-3. Nowe tablice: przypięcie 0,11 ns/B danych wejścia ≥ koszt OpenBLAS 1 wątek (0,06 ns/B) -> GPU nie wygrywa
-   z 1 wątkiem; z 8 wątkami w przybliżeniu remis. Prawdziwe programy w pętli używają tych samych buforów, więc progi
-   ustalać według przypadku 1–2, o ile przypadek „nowe” nie jest drastycznie gorszy (> 2× CPU).
+1. Same arrays, level 1 (axpy 12 B/el.): OpenBLAS 1 thread in LLC ~0.25 ns/el. -> threshold n ≈ c0 / 0.25 ns ≈ 2^17;
+   8 threads (splits from n ~ 10^4, CPU ≈ 8 × wall + thread spinning) -> lower threshold, ~2^14–2^16.
+   Today: plain memory always CPU -> I predict a change to a threshold ~2^16 as for USM.
+2. Same arrays, level 2 (gemv 4 B/el.): 1 thread ~0.13 ns/el. -> threshold ~3·10^5 el. (n ≈ 550);
+   8 threads -> ~6·10^4 (n ≈ 256). Today 2^18 (n = 512) -> I predict lowering to ~2^16 as for USM.
+3. New arrays: pinning 0.11 ns/B of input data ≥ cost of OpenBLAS 1 thread (0.06 ns/B) -> GPU does not win
+   against 1 thread; with 8 threads roughly a tie. Real programs in a loop use the same buffers, so the thresholds are
+   to be set from cases 1–2, as long as the "new" case is not drastically worse (> 2× CPU).
 
-== POMIAR ==
-bench/auto_thresholds.py (osobne procesy na tryb, 3 rundy na przemian, mediany; CPU wywołania = (CPU procesu w pętli
-− CPU wątku głównego na przygotowanie danych) / R, więc wirowanie wątków OpenBLAS po wywołaniu jest wliczone).
+== MEASUREMENT ==
+bench/auto_thresholds.py (separate processes per mode, 3 alternating rounds, medians; CPU of the call = (process CPU in the loop
+− main thread CPU for data preparation) / R, so OpenBLAS thread spinning after the call is included).
 
-Uwaga do metody: pierwszy przebieg był błędny -- OPENBLAS_NUM_THREADS ustawiane w procesie potomnym po imporcie NumPy
-(NumPy ładuje systemowy OpenBLAS i ten od razu startuje 8 wątków), a scal z alfa = 1 OpenBLAS pomija. Poprawione:
-zmienne ustawia rodzic, scal z 0,999, przerwa 0,2 s przed każdym przypadkiem (wirowanie wątków po poprzednim).
+Note on the method: the first run was wrong -- OPENBLAS_NUM_THREADS set in the child process after importing NumPy
+(NumPy loads the system OpenBLAS and it starts 8 threads at once), and OpenBLAS skips scal with alpha = 1. Fixed:
+the parent sets the variables, scal with 0.999, 0.2 s pause before each case (thread spinning after the previous one).
 
-!! Tabela i wnioski poniżej („na baterii”) zmierzone na BATERII (AC = 0, CPU ~900 MHz, EPP balance_power) -- koszty CPU
-!! 2–3× zawyżone. Obowiązuje sekcja „ZASILANIE SIECIOWE” na końcu pliku.
+!! The table and conclusions below ("on battery") measured on BATTERY (AC = 0, CPU ~900 MHz, EPP balance_power) -- CPU costs
+!! 2–3× inflated. The "MAINS POWER" section at the end of the file applies.
 
-== WYNIK NA BATERII (typ S, 3 rundy; tabela pełna niżej) ==
-- c0 (CPU wywołania GPU, te same tablice): 45–100 µs przy krótkim wywołaniu, rośnie do 200–300 µs przy wywołaniach
-  > 1 ms (budzenia nanosleep w czekaniu), TRSV 170–570 µs. Przewidywanie 20–60 µs -- za nisko.
-- OpenBLAS dzieli na wątki axpy (od n ~ 10^4), gemv, ger, symv, trmv, syr (od n = 128, czyli 2^14 el.): CPU ≈ 6–8 × ściana
-  (wirowanie), np. axpy n = 16 384: 42 µs ściany / 331 µs CPU. Tu GPU odciąża CPU już od progu podziału OpenBLAS
-  (iloraz CPU 0,05–0,3). Tego model nie przewidział (zakładał CPU ∝ dane).
-- Nie dzieli (dot, nrm2, scal do 1M, copy, iamax, trsv): koszt CPU = ściana jednego wątku. GPU odciąża od:
-  nrm2 2^16 (0,6), axpy 2^18, pozostałe 2^20 (0,2–0,5), trsv n = 1024 (te 0,30, nowe 0,98), n = 2048 (0,11 / 0,42).
-- OpenBLAS 1 wątek, poziom 2: GPU odciąża od n = 1024 (2^20 el.: 0,4–0,65), przy n = 512 remis (0,85–1,4).
-  Przewidywanie (2^16–2^17 dla poz. 1, ~3·10^5 dla poz. 2) -- za nisko, bo c0 wyższe, a OpenBLAS w LLC szybszy.
-- Nowe tablice: przy 4M el. przypięcie ~3 ms CPU (0,37 µs/stronę) -- GPU = 1–1,3 × CPU jednowątkowego OpenBLAS
-  (dot, copy, axpy); przy 2^20 el. jeszcze 0,25–0,5. Z 8 wątkami GPU wygrywa zawsze od progu podziału.
-- Czas ściany: przy progu 2^14 (funkcje dzielone) GPU 2–5× dłużej; przy 2^20 równo (0,6–1,8×).
+== RESULT ON BATTERY (type S, 3 rounds; full table below) ==
+- c0 (CPU of a GPU call, same arrays): 45–100 µs for a short call, grows to 200–300 µs for calls
+  > 1 ms (nanosleep wakeups while waiting), TRSV 170–570 µs. Prediction 20–60 µs -- too low.
+- OpenBLAS splits into threads axpy (from n ~ 10^4), gemv, ger, symv, trmv, syr (from n = 128, i.e. 2^14 el.): CPU ≈ 6–8 × wall
+  (spinning), e.g. axpy n = 16 384: 42 µs wall / 331 µs CPU. Here the GPU offloads the CPU already from the OpenBLAS split threshold
+  (CPU ratio 0.05–0.3). The model did not predict this (it assumed CPU ∝ data).
+- Does not split (dot, nrm2, scal up to 1M, copy, iamax, trsv): CPU cost = wall time of one thread. GPU offloads from:
+  nrm2 2^16 (0.6), axpy 2^18, the rest 2^20 (0.2–0.5), trsv n = 1024 (same 0.30, new 0.98), n = 2048 (0.11 / 0.42).
+- OpenBLAS 1 thread, level 2: GPU offloads from n = 1024 (2^20 el.: 0.4–0.65), at n = 512 a tie (0.85–1.4).
+  Prediction (2^16–2^17 for level 1, ~3·10^5 for level 2) -- too low, because c0 is higher and OpenBLAS in LLC is faster.
+- New arrays: at 4M el. pinning ~3 ms CPU (0.37 µs/page) -- GPU = 1–1.3 × CPU of single-threaded OpenBLAS
+  (dot, copy, axpy); at 2^20 el. still 0.25–0.5. With 8 threads the GPU always wins from the split threshold.
+- Wall time: at threshold 2^14 (split functions) GPU 2–5× longer; at 2^20 even (0.6–1.8×).
 
-Wniosek (propozycja): jeden próg 2^20 el. (poziom 1: n, poziom 2: M·N) dla zwykłej pamięci, gdy OpenBLAS liczy jednym
-wątkiem albo funkcja nie jest dzielona; 2^14, gdy OpenBLAS ma > 1 wątek i funkcja jest dzielona (axpy, gemv, ger, symv,
-trmv, syr/syr2). Liczbę wątków można odczytać z OpenBLAS (openblas_get_num_threads).
+Conclusion (proposal): one threshold 2^20 el. (level 1: n, level 2: M·N) for plain memory, when OpenBLAS computes with one
+thread or the function is not split; 2^14, when OpenBLAS has > 1 thread and the function is split (axpy, gemv, ger, symv,
+trmv, syr/syr2). The number of threads can be read from OpenBLAS (openblas_get_num_threads).
 
-typ s; czas ściany / CPU procesu na wywołanie [µs], mediany 3 rund; GPU/cpu8 i GPU/cpu1: iloraz CPU (< 1: GPU odciąża)
-funkcja          n przyp |               gpu |              cpu1 |              cpu8 | CPU g/8    g/1 ściana g/8
-axpy          1024 te    |    146.5 /   100.7 |     16.0 /    16.0 |     14.5 /    14.5 |    6.94   6.28      10.10
-axpy          1024 nowe  |    139.0 /    98.2 |     21.6 /    25.3 |     16.8 /    19.7 |    4.97   3.87       8.29
-axpy          4096 te    |    117.5 /    72.5 |     18.1 /    18.1 |     15.4 /    15.4 |    4.71   4.01       7.64
-axpy          4096 nowe  |    152.3 /   105.4 |     21.8 /    25.2 |     17.1 /    19.8 |    5.31   4.18       8.90
-axpy         16384 te    |    141.6 /    91.5 |     24.5 /    24.3 |     41.6 /   331.0 |    0.28   3.77       3.40
-axpy         16384 nowe  |    160.0 /   100.7 |     30.1 /    33.7 |    226.6 /  1849.6 |    0.05   2.99       0.71
-axpy         65536 te    |    163.3 /    97.6 |     63.7 /    63.6 |     55.4 /   431.7 |    0.23   1.53       2.95
-axpy         65536 nowe  |    194.9 /   103.8 |     56.5 /    60.1 |     83.5 /  1884.1 |    0.06   1.73       2.33
-axpy        262144 te    |    249.1 /   106.1 |    187.1 /   187.2 |    133.5 /   913.8 |    0.12   0.57       1.87
-axpy        262144 nowe  |    579.8 /   219.1 |    125.6 /   128.2 |    151.5 /  4389.7 |    0.05   1.71       3.83
-axpy       1048576 te    |    803.4 /   217.3 |    913.5 /   909.4 |    794.1 /  6119.7 |    0.04   0.24       1.01
-axpy       1048576 nowe  |    890.4 /   228.1 |    617.6 /   620.6 |    659.4 / 11473.1 |    0.02   0.37       1.35
-axpy       4194304 te    |   2601.7 /   242.0 |   4629.5 /  4628.3 |   3867.4 / 30555.6 |    0.01   0.05       0.67
-axpy       4194304 nowe  |   5488.2 /  3175.9 |   2651.5 /  2657.7 |   2465.6 /103560.3 |    0.03   1.19       2.23
-axpy      16777216 te    |   9168.9 /   270.5 |  14419.2 / 14417.8 |  16432.7 /129029.1 |    0.00   0.02       0.56
-dot           1024 te    |     84.9 /    45.9 |     13.8 /    13.8 |     13.1 /    13.1 |    3.51   3.32       6.50
-dot           1024 nowe  |     93.7 /    55.7 |     16.4 /    19.5 |     18.5 /    21.9 |    2.54   2.86       5.07
-dot           4096 te    |    129.3 /    82.5 |     15.0 /    15.0 |     15.0 /    15.0 |    5.49   5.51       8.61
-dot           4096 nowe  |    134.6 /    90.0 |     16.9 /    19.6 |     17.3 /    20.2 |    4.46   4.58       7.77
-dot          16384 te    |    152.3 /    87.7 |     21.6 /    21.6 |     19.1 /    19.1 |    4.60   4.06       7.99
-dot          16384 nowe  |    163.2 /   100.8 |     24.6 /    27.7 |     22.2 /    25.1 |    4.01   3.64       7.36
-dot          65536 te    |    170.5 /    88.7 |     45.8 /    45.8 |     46.4 /    46.5 |    1.91   1.94       3.67
-dot          65536 nowe  |    187.2 /   103.6 |     47.7 /    51.0 |     46.6 /    49.9 |    2.08   2.03       4.02
-dot         262144 te    |    251.3 /   110.3 |    148.1 /   148.1 |    141.5 /   141.5 |    0.78   0.74       1.78
-dot         262144 nowe  |    528.9 /   214.1 |    107.8 /   110.4 |    117.5 /   120.6 |    1.78   1.94       4.50
-dot        1048576 te    |    783.7 /   227.0 |    839.8 /   839.7 |    718.9 /   719.0 |    0.32   0.27       1.09
-dot        1048576 nowe  |   1005.2 /   279.2 |    581.3 /   576.4 |    580.1 /   583.2 |    0.48   0.48       1.73
-dot        4194304 te    |   1988.9 /   190.4 |   4401.2 /  4400.2 |   3429.6 /  3429.8 |    0.06   0.04       0.58
-dot        4194304 nowe  |   4900.6 /  2993.4 |   2337.2 /  2343.4 |   2439.8 /  2445.7 |    1.22   1.28       2.01
-dot       16777216 te    |   6859.4 /   176.0 |  17951.8 / 17948.6 |  19322.7 / 19317.9 |    0.01   0.01       0.35
-nrm2          1024 te    |    140.8 /    86.3 |      9.6 /     9.6 |      5.4 /     5.4 |   16.10   8.97      26.29
-nrm2          1024 nowe  |    138.1 /    88.4 |     12.7 /    15.5 |      7.6 /     9.2 |    9.57   5.68      18.24
-nrm2          4096 te    |    149.3 /    90.2 |     11.6 /    11.6 |      6.7 /     6.7 |   13.46   7.79      22.29
-nrm2          4096 nowe  |    151.5 /   104.7 |     14.5 /    17.2 |     10.4 /    12.0 |    8.75   6.11      14.60
-nrm2         16384 te    |    134.2 /    75.0 |     21.2 /    21.2 |     27.3 /    27.3 |    2.75   3.54       4.92
-nrm2         16384 nowe  |    140.0 /    86.9 |     22.7 /    25.3 |     29.0 /    32.3 |    2.69   3.43       4.82
-nrm2         65536 te    |    105.9 /    41.1 |     62.1 /    60.7 |     75.0 /    74.9 |    0.55   0.68       1.41
-nrm2         65536 nowe  |    100.1 /    43.4 |     67.3 /    70.1 |     70.4 /    74.2 |    0.58   0.62       1.42
-nrm2        262144 te    |    139.5 /    50.2 |    208.7 /   208.8 |    276.3 /   276.3 |    0.18   0.24       0.50
-nrm2        262144 nowe  |    137.9 /    50.8 |    174.6 /   177.5 |    168.6 /   171.6 |    0.30   0.29       0.82
-nrm2       1048576 te    |    417.9 /   146.4 |    834.1 /   834.1 |    924.1 /   923.6 |    0.16   0.18       0.45
-nrm2       1048576 nowe  |    624.5 /   204.7 |    618.9 /   621.3 |    622.4 /   625.2 |    0.33   0.33       1.00
-nrm2       4194304 te    |   1142.2 /   200.5 |   3900.1 /  3898.5 |   4503.7 /  4495.4 |    0.04   0.05       0.25
-nrm2       4194304 nowe  |   1279.7 /   285.5 |   2446.5 /  2448.4 |   2460.6 /  2464.3 |    0.12   0.12       0.52
-nrm2      16777216 te    |   3410.7 /   196.3 |  15355.3 / 15354.8 |  17801.5 / 17790.6 |    0.01   0.01       0.19
-scal          1024 te    |    116.1 /    74.8 |     10.3 /    10.3 |     10.0 /    10.0 |    7.51   7.28      11.67
-scal          1024 nowe  |    132.6 /    96.5 |     14.3 /    17.7 |     14.8 /    18.1 |    5.32   5.44       8.96
-scal          4096 te    |    109.0 /    64.0 |     10.8 /    10.8 |     11.1 /    11.1 |    5.75   5.91       9.79
-scal          4096 nowe  |    127.7 /    85.1 |     14.1 /    16.9 |     15.2 /    18.5 |    4.60   5.03       8.42
-scal         16384 te    |    117.9 /    68.4 |     17.8 /    17.8 |     15.6 /    15.6 |    4.40   3.85       7.57
-scal         16384 nowe  |    133.1 /    85.8 |     21.6 /    25.6 |     21.4 /    25.2 |    3.41   3.35       6.22
-scal         65536 te    |    131.4 /    70.8 |     33.2 /    33.2 |     34.8 /    34.8 |    2.04   2.13       3.78
-scal         65536 nowe  |    164.8 /    90.4 |     31.4 /    34.6 |     38.8 /    42.8 |    2.11   2.61       4.25
-scal        262144 te    |    177.6 /    73.9 |    100.8 /   100.8 |     65.0 /    64.7 |    1.14   0.73       2.73
-scal        262144 nowe  |    333.2 /   131.5 |     87.9 /    91.2 |     70.1 /    73.0 |    1.80   1.44       4.75
-scal       1048576 te    |    427.6 /   109.1 |    375.2 /   375.2 |    489.7 /   489.6 |    0.22   0.29       0.87
-scal       1048576 nowe  |    651.0 /   186.0 |    407.8 /   410.0 |    423.7 /   425.8 |    0.44   0.45       1.54
-scal       4194304 te    |   1620.0 /   217.1 |   2560.7 /  2560.6 |   2245.3 / 17120.3 |    0.01   0.08       0.72
-scal       4194304 nowe  |   1668.0 /   332.4 |   1599.5 /  1602.9 |   1849.8 / 26776.0 |    0.01   0.21       0.90
-scal      16777216 te    |   5535.8 /   243.7 |  11356.2 / 11356.9 |   7921.5 / 48402.3 |    0.01   0.02       0.70
-copy          1024 te    |    135.8 /    90.2 |     15.2 /    15.2 |     11.5 /    11.5 |    7.85   5.94      11.83
-copy          1024 nowe  |    134.4 /    96.0 |     18.1 /    21.3 |     20.9 /    24.7 |    3.88   4.51       6.44
-copy          4096 te    |    111.8 /    55.8 |     18.8 /    18.8 |     19.0 /    19.0 |    2.94   2.97       5.90
-copy          4096 nowe  |    137.9 /    75.5 |     27.8 /    32.3 |     25.8 /    29.9 |    2.52   2.34       5.34
-copy         16384 te    |    133.4 /    87.3 |     13.5 /    13.4 |     26.5 /    26.5 |    3.30   6.53       5.03
-copy         16384 nowe  |    149.3 /    86.2 |     16.4 /    17.6 |     30.0 /    34.0 |    2.53   4.89       4.97
-copy         65536 te    |    152.1 /    85.5 |     51.9 /    51.9 |     59.0 /    58.7 |    1.46   1.65       2.58
-copy         65536 nowe  |    136.5 /    60.5 |     32.2 /    34.5 |     66.7 /    71.3 |    0.85   1.75       2.05
-copy        262144 te    |    212.5 /    91.0 |    154.8 /   154.8 |    126.2 /   125.7 |    0.72   0.59       1.68
-copy        262144 nowe  |    465.1 /   167.6 |    127.8 /   130.7 |    149.9 /   153.7 |    1.09   1.28       3.10
-copy       1048576 te    |    784.2 /   207.8 |    863.1 /   862.8 |    753.6 /   753.7 |    0.28   0.24       1.04
-copy       1048576 nowe  |    854.2 /   167.7 |    677.4 /   680.8 |    779.8 /   785.4 |    0.21   0.25       1.10
-copy       4194304 te    |   2328.5 /   235.1 |   4174.8 /  4173.4 |   3137.0 /  3123.9 |    0.08   0.06       0.74
-copy       4194304 nowe  |   5078.3 /  3010.4 |   2600.4 /  2604.5 |   2897.7 /  2873.5 |    1.05   1.16       1.75
-copy      16777216 te    |   8315.1 /   255.6 |  17231.8 / 17230.2 |  12896.5 / 12860.5 |    0.02   0.01       0.64
-iamax         1024 te    |    128.8 /    75.6 |      9.2 /     9.2 |      8.0 /     7.9 |    9.60   8.24      16.10
-iamax         1024 nowe  |    130.0 /    83.8 |     12.2 /    14.9 |     13.4 /    16.5 |    5.08   5.61       9.71
-iamax         4096 te    |    121.8 /    72.4 |     11.8 /    11.8 |     12.1 /    12.1 |    5.99   6.16      10.09
-iamax         4096 nowe  |    123.8 /    81.3 |     17.5 /    21.1 |     17.3 /    20.9 |    3.88   3.85       7.17
-iamax        16384 te    |    154.7 /    80.7 |     19.2 /    19.2 |     12.5 /    12.5 |    6.46   4.21      12.39
-iamax        16384 nowe  |    142.5 /    89.5 |     20.4 /    23.0 |     14.9 /    16.7 |    5.35   3.89       9.54
-iamax        65536 te    |    138.4 /    74.3 |     51.9 /    51.9 |     38.4 /    37.3 |    1.99   1.43       3.61
-iamax        65536 nowe  |    160.6 /    91.8 |     36.7 /    38.9 |     40.0 /    42.5 |    2.16   2.36       4.01
-iamax       262144 te    |    220.6 /    92.6 |    146.0 /   146.0 |    107.6 /   107.6 |    0.86   0.63       2.05
-iamax       262144 nowe  |    406.6 /   157.6 |    103.8 /   106.5 |    101.8 /   104.6 |    1.51   1.48       3.99
-iamax      1048576 te    |    411.9 /   136.6 |    638.7 /   609.3 |    655.5 /   646.4 |    0.21   0.22       0.63
-iamax      1048576 nowe  |    645.5 /   224.3 |    727.9 /   731.2 |    759.2 /   754.7 |    0.30   0.31       0.85
-iamax      4194304 te    |   1171.2 /   214.4 |   3119.5 /  3118.9 |   2249.8 /  2216.2 |    0.10   0.07       0.52
-iamax      4194304 nowe  |   1320.0 /   316.9 |   1775.6 /  1780.1 |   1810.7 /  1799.7 |    0.18   0.18       0.73
-iamax     16777216 te    |   3569.7 /   226.2 |  10969.5 / 10966.5 |  11618.7 / 11615.8 |    0.02   0.02       0.31
-gemv N          64 te    |    153.0 /    93.3 |     18.1 /    18.1 |     20.0 /    20.0 |    4.68   5.15       7.67
-gemv N          64 nowe  |    185.3 /   134.4 |     17.9 /    20.0 |     25.9 /    29.1 |    4.62   6.71       7.16
-gemv N         128 te    |    123.5 /    62.3 |     28.6 /    28.6 |    127.3 /   815.8 |    0.08   2.17       0.97
-gemv N         128 nowe  |    105.0 /    61.2 |     30.9 /    34.4 |     86.1 /  1135.0 |    0.05   1.78       1.22
-gemv N         256 te    |    152.4 /    89.1 |     45.5 /    45.5 |     69.2 /   536.5 |    0.17   1.96       2.20
-gemv N         256 nowe  |    136.3 /    60.3 |     45.7 /    49.3 |     52.8 /   628.5 |    0.10   1.22       2.58
-gemv N         512 te    |    180.5 /    96.5 |    104.3 /   104.2 |     68.2 /   527.2 |    0.18   0.93       2.65
-gemv N         512 nowe  |    286.8 /   131.9 |     86.5 /    90.0 |    123.7 /  3023.1 |    0.04   1.47       2.32
-gemv N        1024 te    |    586.6 /   193.5 |    351.7 /   351.7 |    186.6 /  1176.4 |    0.16   0.55       3.14
-gemv N        1024 nowe  |    837.6 /   263.2 |    336.6 /   339.2 |    562.6 /  8399.5 |    0.03   0.78       1.49
-gemv N        2048 te    |   1962.7 /   238.3 |   2083.0 /  2082.8 |   1178.3 /  9328.3 |    0.03   0.11       1.67
-gemv N        2048 nowe  |   2064.1 /   310.0 |   1106.3 /  1109.4 |   1307.6 / 18938.0 |    0.02   0.28       1.58
-gemv N        4096 te    |   6292.9 /   244.9 |   7380.8 /  7381.1 |   5544.2 / 41948.3 |    0.01   0.03       1.14
-gemv N        8192 te    |  23659.6 /   311.2 |  31246.2 / 31240.3 |  25708.5 /179109.7 |    0.00   0.01       0.92
-gemv T          64 te    |    163.7 /    93.3 |     24.2 /    24.2 |     12.5 /    12.5 |    7.44   3.86      13.06
-gemv T          64 nowe  |    172.9 /   109.1 |     28.0 /    31.5 |     17.0 /    19.1 |    5.70   3.46      10.15
-gemv T         128 te    |    207.5 /   112.0 |     32.7 /    32.7 |     63.0 /   452.7 |    0.25   3.43       3.29
-gemv T         128 nowe  |    151.6 /    70.7 |     29.4 /    32.8 |     66.7 /  1068.1 |    0.07   2.16       2.27
-gemv T         256 te    |    291.0 /   134.8 |     47.4 /    47.3 |     76.1 /   577.4 |    0.23   2.85       3.82
-gemv T         256 nowe  |    311.5 /   142.6 |     55.6 /    60.0 |     93.4 /  1621.2 |    0.09   2.38       3.34
-gemv T         512 te    |    288.9 /   133.5 |    112.3 /   112.3 |    154.0 /  1169.1 |    0.11   1.19       1.88
-gemv T         512 nowe  |    513.5 /   205.5 |     76.8 /    79.8 |    152.5 /  3419.7 |    0.06   2.58       3.37
-gemv T        1024 te    |    517.2 /   196.4 |    455.5 /   454.9 |    281.9 /  1860.2 |    0.11   0.43       1.83
-gemv T        1024 nowe  |    742.0 /   263.9 |    313.8 /   316.6 |    257.2 /  4739.2 |    0.06   0.83       2.88
-gemv T        2048 te    |   1257.9 /   241.9 |   2278.4 /  2277.1 |   1947.2 / 11584.8 |    0.02   0.11       0.65
-gemv T        2048 nowe  |   1350.4 /   332.9 |   1173.1 /  1176.9 |   1149.4 / 20137.2 |    0.02   0.28       1.17
-gemv T        4096 te    |   4038.7 /   255.5 |   8428.8 /  8415.3 |   6787.6 / 53523.7 |    0.00   0.03       0.60
-gemv T        8192 te    |  14193.0 /   314.7 |  18634.4 / 18635.8 |  34051.3 /245565.0 |    0.00   0.02       0.42
-ger             64 te    |    139.9 /    91.3 |     14.4 /    14.4 |     26.2 /    26.2 |    3.48   6.34       5.34
-ger             64 nowe  |    146.9 /    97.1 |     13.4 /    15.2 |     29.1 /    32.5 |    2.99   6.39       5.04
-ger            128 te    |    152.6 /    93.2 |     36.5 /    36.6 |     73.9 /   471.7 |    0.20   2.55       2.07
-ger            128 nowe  |    151.4 /    99.7 |     34.4 /    38.0 |     65.8 /   834.2 |    0.12   2.62       2.30
-ger            256 te    |    173.1 /    90.8 |     47.6 /    47.6 |     61.6 /   423.6 |    0.21   1.91       2.81
-ger            256 nowe  |    183.2 /    92.6 |     58.4 /    62.6 |     77.6 /  1078.4 |    0.09   1.48       2.36
-ger            512 te    |    346.8 /   130.2 |    148.6 /   148.6 |    103.4 /   749.8 |    0.17   0.88       3.36
-ger            512 nowe  |    438.7 /   155.3 |     97.1 /   100.4 |    128.7 /  1694.4 |    0.09   1.55       3.41
-ger           1024 te    |    805.2 /   199.0 |    509.2 /   508.6 |    209.0 /  1642.5 |    0.12   0.39       3.85
-ger           1024 nowe  |    956.2 /   246.9 |    421.8 /   424.5 |    939.0 /  9119.6 |    0.03   0.58       1.02
-ger           2048 te    |   2317.6 /   241.0 |   2603.6 /  2603.9 |   2933.4 / 16128.6 |    0.01   0.09       0.79
-ger           2048 nowe  |   2404.2 /   320.7 |   1639.2 /  1642.7 |   1656.4 / 19367.7 |    0.02   0.20       1.45
-ger           4096 te    |   8012.5 /   260.4 |  12833.6 / 12829.3 |  10746.2 / 75924.7 |    0.00   0.02       0.75
-ger           8192 te    |  30813.8 /   283.0 |  42294.4 / 42282.1 |  41595.3 /297427.4 |    0.00   0.01       0.74
-symv            64 te    |    169.0 /   100.1 |     25.6 /    25.6 |     26.5 /    26.3 |    3.81   3.91       6.38
-symv            64 nowe  |    166.9 /   104.1 |     29.3 /    32.9 |     31.1 /    34.7 |    3.00   3.16       5.36
-symv           128 te    |    188.4 /    99.8 |     39.5 /    28.0 |     31.1 /    31.1 |    3.21   3.57       6.06
-symv           128 nowe  |    201.5 /   110.0 |     34.2 /    37.7 |     34.7 /    38.4 |    2.87   2.91       5.81
-symv           256 te    |    280.5 /   124.2 |     40.9 /    40.9 |    192.9 /  1096.8 |    0.11   3.04       1.45
-symv           256 nowe  |    293.8 /   124.8 |     41.3 /    44.5 |     79.1 /   694.0 |    0.18   2.81       3.72
-symv           512 te    |    273.3 /   127.2 |     92.4 /    92.5 |     65.8 /   371.5 |    0.34   1.38       4.15
-symv           512 nowe  |    414.1 /   162.0 |     90.1 /    94.2 |     80.9 /  1348.0 |    0.12   1.72       5.12
-symv          1024 te    |    380.6 /   146.3 |    249.5 /   249.6 |    145.5 /  1157.9 |    0.13   0.59       2.62
-symv          1024 nowe  |    579.8 /   208.6 |    305.9 /   310.8 |    501.3 /  5828.0 |    0.04   0.67       1.16
-symv          2048 te    |    894.5 /   251.5 |   1092.8 /  1092.5 |    806.1 /  6403.5 |    0.04   0.23       1.11
-symv          2048 nowe  |   1017.3 /   314.6 |    877.9 /   880.3 |    923.5 / 15646.1 |    0.02   0.36       1.10
-symv          4096 te    |   2481.2 /   253.4 |   4369.5 /  4369.2 |   2972.4 / 19156.2 |    0.01   0.06       0.83
-symv          8192 te    |   8400.8 /   276.2 |  22692.4 / 22628.3 |   8606.6 / 48497.9 |    0.01   0.01       0.98
-trmv            64 te    |    143.4 /    84.2 |     25.5 /    25.4 |     25.4 /    95.1 |    0.89   3.32       5.64
-trmv            64 nowe  |    151.9 /   100.5 |     32.6 /    36.7 |     34.5 /   236.2 |    0.43   2.74       4.40
-trmv           128 te    |    142.8 /    87.0 |     30.4 /    30.4 |     30.8 /   170.8 |    0.51   2.86       4.63
-trmv           128 nowe  |    153.7 /   101.7 |     36.1 /    40.2 |     53.1 /   529.0 |    0.19   2.53       2.89
-trmv           256 te    |    149.5 /    86.1 |     39.4 /    39.4 |     55.7 /   441.9 |    0.19   2.19       2.69
-trmv           256 nowe  |    160.8 /   100.2 |     42.7 /    45.9 |     40.1 /   614.4 |    0.16   2.18       4.01
-trmv           512 te    |    178.9 /    96.8 |    108.1 /   106.8 |     82.9 /   588.9 |    0.16   0.91       2.16
-trmv           512 nowe  |    329.1 /   147.2 |     79.6 /    82.6 |    124.3 /  2988.4 |    0.05   1.78       2.65
-trmv          1024 te    |    361.0 /   138.5 |    212.4 /   212.5 |    208.6 /  1343.0 |    0.10   0.65       1.73
-trmv          1024 nowe  |    584.2 /   224.4 |    286.3 /   286.7 |    306.4 /  8071.1 |    0.03   0.78       1.91
-trmv          2048 te    |   1000.2 /   222.8 |    967.5 /   967.1 |    760.3 /  6004.1 |    0.04   0.23       1.32
-trmv          2048 nowe  |   1126.7 /   297.0 |    818.5 /   812.4 |    634.3 / 15269.5 |    0.02   0.37       1.78
-trmv          4096 te    |   3023.0 /   248.8 |   4352.3 /  4351.3 |   2102.1 / 12866.5 |    0.02   0.06       1.44
-trmv          8192 te    |  11054.1 /   264.4 |  17161.3 / 17162.1 |  11870.3 / 90004.7 |    0.00   0.02       0.93
-trsv            64 te    |    189.1 /    96.1 |     22.5 /    22.5 |     30.1 /    30.1 |    3.20   4.27       6.29
-trsv            64 nowe  |    182.1 /    83.5 |     24.6 /    27.9 |     34.8 /    39.4 |    2.12   2.99       5.24
-trsv           128 te    |    335.1 /   144.0 |     43.6 /    43.5 |     38.7 /    38.7 |    3.72   3.31       8.67
-trsv           128 nowe  |    373.3 /   158.7 |     37.5 /    41.6 |     37.8 /    41.5 |    3.83   3.82       9.88
-trsv           256 te    |    494.6 /   172.0 |     66.4 /    66.3 |     83.0 /    83.0 |    2.07   2.59       5.96
-trsv           256 nowe  |    555.2 /   175.8 |     35.5 /    37.8 |     32.1 /    34.4 |    5.11   4.65      17.29
-trsv           512 te    |    775.0 /   195.1 |    145.5 /   145.4 |    149.2 /   149.1 |    1.31   1.34       5.20
-trsv           512 nowe  |    953.8 /   217.1 |     66.4 /    68.8 |     52.6 /    54.5 |    3.99   3.16      18.13
-trsv          1024 te    |   1380.4 /   236.4 |    776.1 /   775.1 |    695.4 /   695.3 |    0.34   0.30       1.98
-trsv          1024 nowe  |   1579.1 /   273.3 |    299.8 /   302.7 |    276.8 /   279.3 |    0.98   0.90       5.71
-trsv          2048 te    |   3047.9 /   309.6 |   2738.8 /  2727.1 |   2735.4 /  2735.1 |    0.11   0.11       1.11
-trsv          2048 nowe  |   2989.1 /   366.3 |    899.5 /   904.2 |    876.5 /   876.2 |    0.42   0.41       3.41
-trsv          4096 te    |   6443.7 /   435.4 |   4779.4 /  4778.2 |   5499.2 /  5467.4 |    0.08   0.09       1.17
-trsv          8192 te    |  15604.6 /   573.6 |  18226.9 / 18225.5 |  19982.9 / 19977.0 |    0.03   0.03       0.78
-syr             64 te    |    136.8 /    83.9 |     21.0 /    19.7 |     19.0 /    19.0 |    4.41   4.26       7.19
-syr             64 nowe  |    141.5 /    96.8 |     23.3 /    26.5 |     24.6 /    27.9 |    3.47   3.65       5.76
-syr            128 te    |    134.6 /    80.6 |     25.1 /    25.1 |     28.0 /   167.7 |    0.48   3.21       4.80
-syr            128 nowe  |    142.1 /    90.7 |     28.5 /    31.4 |     36.8 /   455.7 |    0.20   2.89       3.86
-syr            256 te    |    151.1 /    81.4 |     37.0 /    37.0 |     67.8 /   498.5 |    0.16   2.20       2.23
-syr            256 nowe  |    160.4 /    98.7 |     36.7 /    39.7 |     93.3 /  1525.6 |    0.06   2.48       1.72
-syr            512 te    |    260.6 /   105.8 |    124.0 /   124.0 |     84.3 /   652.8 |    0.16   0.85       3.09
-syr            512 nowe  |    394.0 /   145.9 |     78.7 /    81.8 |    163.8 /  3222.5 |    0.05   1.78       2.41
-syr           1024 te    |    591.1 /   159.7 |    267.1 /   267.1 |    162.5 /  1249.9 |    0.13   0.60       3.64
-syr           1024 nowe  |    730.9 /   188.2 |    296.7 /   299.5 |    368.8 /  8116.3 |    0.02   0.63       1.98
-syr           2048 te    |   1577.0 /   211.1 |   1629.8 /  1629.9 |   1108.3 /  8711.5 |    0.02   0.13       1.42
-syr           2048 nowe  |   1689.7 /   291.0 |   1252.3 /  1258.2 |    923.1 / 18633.8 |    0.02   0.23       1.83
-syr           4096 te    |   5257.6 /   236.1 |   6770.0 /  6743.3 |   5343.5 / 39031.0 |    0.01   0.04       0.98
-syr           8192 te    |  20766.7 /   264.6 |  28378.1 / 28371.4 |  17383.5 /135665.6 |    0.00   0.01       1.19
+type s; wall time / process CPU per call [µs], medians of 3 rounds; GPU/cpu8 and GPU/cpu1: CPU ratio (< 1: GPU offloads)
+function         n case |               gpu |              cpu1 |              cpu8 | CPU g/8    g/1 wall   g/8
+axpy          1024 same  |    146.5 /   100.7 |     16.0 /    16.0 |     14.5 /    14.5 |    6.94   6.28      10.10
+axpy          1024 new   |    139.0 /    98.2 |     21.6 /    25.3 |     16.8 /    19.7 |    4.97   3.87       8.29
+axpy          4096 same  |    117.5 /    72.5 |     18.1 /    18.1 |     15.4 /    15.4 |    4.71   4.01       7.64
+axpy          4096 new   |    152.3 /   105.4 |     21.8 /    25.2 |     17.1 /    19.8 |    5.31   4.18       8.90
+axpy         16384 same  |    141.6 /    91.5 |     24.5 /    24.3 |     41.6 /   331.0 |    0.28   3.77       3.40
+axpy         16384 new   |    160.0 /   100.7 |     30.1 /    33.7 |    226.6 /  1849.6 |    0.05   2.99       0.71
+axpy         65536 same  |    163.3 /    97.6 |     63.7 /    63.6 |     55.4 /   431.7 |    0.23   1.53       2.95
+axpy         65536 new   |    194.9 /   103.8 |     56.5 /    60.1 |     83.5 /  1884.1 |    0.06   1.73       2.33
+axpy        262144 same  |    249.1 /   106.1 |    187.1 /   187.2 |    133.5 /   913.8 |    0.12   0.57       1.87
+axpy        262144 new   |    579.8 /   219.1 |    125.6 /   128.2 |    151.5 /  4389.7 |    0.05   1.71       3.83
+axpy       1048576 same  |    803.4 /   217.3 |    913.5 /   909.4 |    794.1 /  6119.7 |    0.04   0.24       1.01
+axpy       1048576 new   |    890.4 /   228.1 |    617.6 /   620.6 |    659.4 / 11473.1 |    0.02   0.37       1.35
+axpy       4194304 same  |   2601.7 /   242.0 |   4629.5 /  4628.3 |   3867.4 / 30555.6 |    0.01   0.05       0.67
+axpy       4194304 new   |   5488.2 /  3175.9 |   2651.5 /  2657.7 |   2465.6 /103560.3 |    0.03   1.19       2.23
+axpy      16777216 same  |   9168.9 /   270.5 |  14419.2 / 14417.8 |  16432.7 /129029.1 |    0.00   0.02       0.56
+dot           1024 same  |     84.9 /    45.9 |     13.8 /    13.8 |     13.1 /    13.1 |    3.51   3.32       6.50
+dot           1024 new   |     93.7 /    55.7 |     16.4 /    19.5 |     18.5 /    21.9 |    2.54   2.86       5.07
+dot           4096 same  |    129.3 /    82.5 |     15.0 /    15.0 |     15.0 /    15.0 |    5.49   5.51       8.61
+dot           4096 new   |    134.6 /    90.0 |     16.9 /    19.6 |     17.3 /    20.2 |    4.46   4.58       7.77
+dot          16384 same  |    152.3 /    87.7 |     21.6 /    21.6 |     19.1 /    19.1 |    4.60   4.06       7.99
+dot          16384 new   |    163.2 /   100.8 |     24.6 /    27.7 |     22.2 /    25.1 |    4.01   3.64       7.36
+dot          65536 same  |    170.5 /    88.7 |     45.8 /    45.8 |     46.4 /    46.5 |    1.91   1.94       3.67
+dot          65536 new   |    187.2 /   103.6 |     47.7 /    51.0 |     46.6 /    49.9 |    2.08   2.03       4.02
+dot         262144 same  |    251.3 /   110.3 |    148.1 /   148.1 |    141.5 /   141.5 |    0.78   0.74       1.78
+dot         262144 new   |    528.9 /   214.1 |    107.8 /   110.4 |    117.5 /   120.6 |    1.78   1.94       4.50
+dot        1048576 same  |    783.7 /   227.0 |    839.8 /   839.7 |    718.9 /   719.0 |    0.32   0.27       1.09
+dot        1048576 new   |   1005.2 /   279.2 |    581.3 /   576.4 |    580.1 /   583.2 |    0.48   0.48       1.73
+dot        4194304 same  |   1988.9 /   190.4 |   4401.2 /  4400.2 |   3429.6 /  3429.8 |    0.06   0.04       0.58
+dot        4194304 new   |   4900.6 /  2993.4 |   2337.2 /  2343.4 |   2439.8 /  2445.7 |    1.22   1.28       2.01
+dot       16777216 same  |   6859.4 /   176.0 |  17951.8 / 17948.6 |  19322.7 / 19317.9 |    0.01   0.01       0.35
+nrm2          1024 same  |    140.8 /    86.3 |      9.6 /     9.6 |      5.4 /     5.4 |   16.10   8.97      26.29
+nrm2          1024 new   |    138.1 /    88.4 |     12.7 /    15.5 |      7.6 /     9.2 |    9.57   5.68      18.24
+nrm2          4096 same  |    149.3 /    90.2 |     11.6 /    11.6 |      6.7 /     6.7 |   13.46   7.79      22.29
+nrm2          4096 new   |    151.5 /   104.7 |     14.5 /    17.2 |     10.4 /    12.0 |    8.75   6.11      14.60
+nrm2         16384 same  |    134.2 /    75.0 |     21.2 /    21.2 |     27.3 /    27.3 |    2.75   3.54       4.92
+nrm2         16384 new   |    140.0 /    86.9 |     22.7 /    25.3 |     29.0 /    32.3 |    2.69   3.43       4.82
+nrm2         65536 same  |    105.9 /    41.1 |     62.1 /    60.7 |     75.0 /    74.9 |    0.55   0.68       1.41
+nrm2         65536 new   |    100.1 /    43.4 |     67.3 /    70.1 |     70.4 /    74.2 |    0.58   0.62       1.42
+nrm2        262144 same  |    139.5 /    50.2 |    208.7 /   208.8 |    276.3 /   276.3 |    0.18   0.24       0.50
+nrm2        262144 new   |    137.9 /    50.8 |    174.6 /   177.5 |    168.6 /   171.6 |    0.30   0.29       0.82
+nrm2       1048576 same  |    417.9 /   146.4 |    834.1 /   834.1 |    924.1 /   923.6 |    0.16   0.18       0.45
+nrm2       1048576 new   |    624.5 /   204.7 |    618.9 /   621.3 |    622.4 /   625.2 |    0.33   0.33       1.00
+nrm2       4194304 same  |   1142.2 /   200.5 |   3900.1 /  3898.5 |   4503.7 /  4495.4 |    0.04   0.05       0.25
+nrm2       4194304 new   |   1279.7 /   285.5 |   2446.5 /  2448.4 |   2460.6 /  2464.3 |    0.12   0.12       0.52
+nrm2      16777216 same  |   3410.7 /   196.3 |  15355.3 / 15354.8 |  17801.5 / 17790.6 |    0.01   0.01       0.19
+scal          1024 same  |    116.1 /    74.8 |     10.3 /    10.3 |     10.0 /    10.0 |    7.51   7.28      11.67
+scal          1024 new   |    132.6 /    96.5 |     14.3 /    17.7 |     14.8 /    18.1 |    5.32   5.44       8.96
+scal          4096 same  |    109.0 /    64.0 |     10.8 /    10.8 |     11.1 /    11.1 |    5.75   5.91       9.79
+scal          4096 new   |    127.7 /    85.1 |     14.1 /    16.9 |     15.2 /    18.5 |    4.60   5.03       8.42
+scal         16384 same  |    117.9 /    68.4 |     17.8 /    17.8 |     15.6 /    15.6 |    4.40   3.85       7.57
+scal         16384 new   |    133.1 /    85.8 |     21.6 /    25.6 |     21.4 /    25.2 |    3.41   3.35       6.22
+scal         65536 same  |    131.4 /    70.8 |     33.2 /    33.2 |     34.8 /    34.8 |    2.04   2.13       3.78
+scal         65536 new   |    164.8 /    90.4 |     31.4 /    34.6 |     38.8 /    42.8 |    2.11   2.61       4.25
+scal        262144 same  |    177.6 /    73.9 |    100.8 /   100.8 |     65.0 /    64.7 |    1.14   0.73       2.73
+scal        262144 new   |    333.2 /   131.5 |     87.9 /    91.2 |     70.1 /    73.0 |    1.80   1.44       4.75
+scal       1048576 same  |    427.6 /   109.1 |    375.2 /   375.2 |    489.7 /   489.6 |    0.22   0.29       0.87
+scal       1048576 new   |    651.0 /   186.0 |    407.8 /   410.0 |    423.7 /   425.8 |    0.44   0.45       1.54
+scal       4194304 same  |   1620.0 /   217.1 |   2560.7 /  2560.6 |   2245.3 / 17120.3 |    0.01   0.08       0.72
+scal       4194304 new   |   1668.0 /   332.4 |   1599.5 /  1602.9 |   1849.8 / 26776.0 |    0.01   0.21       0.90
+scal      16777216 same  |   5535.8 /   243.7 |  11356.2 / 11356.9 |   7921.5 / 48402.3 |    0.01   0.02       0.70
+copy          1024 same  |    135.8 /    90.2 |     15.2 /    15.2 |     11.5 /    11.5 |    7.85   5.94      11.83
+copy          1024 new   |    134.4 /    96.0 |     18.1 /    21.3 |     20.9 /    24.7 |    3.88   4.51       6.44
+copy          4096 same  |    111.8 /    55.8 |     18.8 /    18.8 |     19.0 /    19.0 |    2.94   2.97       5.90
+copy          4096 new   |    137.9 /    75.5 |     27.8 /    32.3 |     25.8 /    29.9 |    2.52   2.34       5.34
+copy         16384 same  |    133.4 /    87.3 |     13.5 /    13.4 |     26.5 /    26.5 |    3.30   6.53       5.03
+copy         16384 new   |    149.3 /    86.2 |     16.4 /    17.6 |     30.0 /    34.0 |    2.53   4.89       4.97
+copy         65536 same  |    152.1 /    85.5 |     51.9 /    51.9 |     59.0 /    58.7 |    1.46   1.65       2.58
+copy         65536 new   |    136.5 /    60.5 |     32.2 /    34.5 |     66.7 /    71.3 |    0.85   1.75       2.05
+copy        262144 same  |    212.5 /    91.0 |    154.8 /   154.8 |    126.2 /   125.7 |    0.72   0.59       1.68
+copy        262144 new   |    465.1 /   167.6 |    127.8 /   130.7 |    149.9 /   153.7 |    1.09   1.28       3.10
+copy       1048576 same  |    784.2 /   207.8 |    863.1 /   862.8 |    753.6 /   753.7 |    0.28   0.24       1.04
+copy       1048576 new   |    854.2 /   167.7 |    677.4 /   680.8 |    779.8 /   785.4 |    0.21   0.25       1.10
+copy       4194304 same  |   2328.5 /   235.1 |   4174.8 /  4173.4 |   3137.0 /  3123.9 |    0.08   0.06       0.74
+copy       4194304 new   |   5078.3 /  3010.4 |   2600.4 /  2604.5 |   2897.7 /  2873.5 |    1.05   1.16       1.75
+copy      16777216 same  |   8315.1 /   255.6 |  17231.8 / 17230.2 |  12896.5 / 12860.5 |    0.02   0.01       0.64
+iamax         1024 same  |    128.8 /    75.6 |      9.2 /     9.2 |      8.0 /     7.9 |    9.60   8.24      16.10
+iamax         1024 new   |    130.0 /    83.8 |     12.2 /    14.9 |     13.4 /    16.5 |    5.08   5.61       9.71
+iamax         4096 same  |    121.8 /    72.4 |     11.8 /    11.8 |     12.1 /    12.1 |    5.99   6.16      10.09
+iamax         4096 new   |    123.8 /    81.3 |     17.5 /    21.1 |     17.3 /    20.9 |    3.88   3.85       7.17
+iamax        16384 same  |    154.7 /    80.7 |     19.2 /    19.2 |     12.5 /    12.5 |    6.46   4.21      12.39
+iamax        16384 new   |    142.5 /    89.5 |     20.4 /    23.0 |     14.9 /    16.7 |    5.35   3.89       9.54
+iamax        65536 same  |    138.4 /    74.3 |     51.9 /    51.9 |     38.4 /    37.3 |    1.99   1.43       3.61
+iamax        65536 new   |    160.6 /    91.8 |     36.7 /    38.9 |     40.0 /    42.5 |    2.16   2.36       4.01
+iamax       262144 same  |    220.6 /    92.6 |    146.0 /   146.0 |    107.6 /   107.6 |    0.86   0.63       2.05
+iamax       262144 new   |    406.6 /   157.6 |    103.8 /   106.5 |    101.8 /   104.6 |    1.51   1.48       3.99
+iamax      1048576 same  |    411.9 /   136.6 |    638.7 /   609.3 |    655.5 /   646.4 |    0.21   0.22       0.63
+iamax      1048576 new   |    645.5 /   224.3 |    727.9 /   731.2 |    759.2 /   754.7 |    0.30   0.31       0.85
+iamax      4194304 same  |   1171.2 /   214.4 |   3119.5 /  3118.9 |   2249.8 /  2216.2 |    0.10   0.07       0.52
+iamax      4194304 new   |   1320.0 /   316.9 |   1775.6 /  1780.1 |   1810.7 /  1799.7 |    0.18   0.18       0.73
+iamax     16777216 same  |   3569.7 /   226.2 |  10969.5 / 10966.5 |  11618.7 / 11615.8 |    0.02   0.02       0.31
+gemv N          64 same  |    153.0 /    93.3 |     18.1 /    18.1 |     20.0 /    20.0 |    4.68   5.15       7.67
+gemv N          64 new   |    185.3 /   134.4 |     17.9 /    20.0 |     25.9 /    29.1 |    4.62   6.71       7.16
+gemv N         128 same  |    123.5 /    62.3 |     28.6 /    28.6 |    127.3 /   815.8 |    0.08   2.17       0.97
+gemv N         128 new   |    105.0 /    61.2 |     30.9 /    34.4 |     86.1 /  1135.0 |    0.05   1.78       1.22
+gemv N         256 same  |    152.4 /    89.1 |     45.5 /    45.5 |     69.2 /   536.5 |    0.17   1.96       2.20
+gemv N         256 new   |    136.3 /    60.3 |     45.7 /    49.3 |     52.8 /   628.5 |    0.10   1.22       2.58
+gemv N         512 same  |    180.5 /    96.5 |    104.3 /   104.2 |     68.2 /   527.2 |    0.18   0.93       2.65
+gemv N         512 new   |    286.8 /   131.9 |     86.5 /    90.0 |    123.7 /  3023.1 |    0.04   1.47       2.32
+gemv N        1024 same  |    586.6 /   193.5 |    351.7 /   351.7 |    186.6 /  1176.4 |    0.16   0.55       3.14
+gemv N        1024 new   |    837.6 /   263.2 |    336.6 /   339.2 |    562.6 /  8399.5 |    0.03   0.78       1.49
+gemv N        2048 same  |   1962.7 /   238.3 |   2083.0 /  2082.8 |   1178.3 /  9328.3 |    0.03   0.11       1.67
+gemv N        2048 new   |   2064.1 /   310.0 |   1106.3 /  1109.4 |   1307.6 / 18938.0 |    0.02   0.28       1.58
+gemv N        4096 same  |   6292.9 /   244.9 |   7380.8 /  7381.1 |   5544.2 / 41948.3 |    0.01   0.03       1.14
+gemv N        8192 same  |  23659.6 /   311.2 |  31246.2 / 31240.3 |  25708.5 /179109.7 |    0.00   0.01       0.92
+gemv T          64 same  |    163.7 /    93.3 |     24.2 /    24.2 |     12.5 /    12.5 |    7.44   3.86      13.06
+gemv T          64 new   |    172.9 /   109.1 |     28.0 /    31.5 |     17.0 /    19.1 |    5.70   3.46      10.15
+gemv T         128 same  |    207.5 /   112.0 |     32.7 /    32.7 |     63.0 /   452.7 |    0.25   3.43       3.29
+gemv T         128 new   |    151.6 /    70.7 |     29.4 /    32.8 |     66.7 /  1068.1 |    0.07   2.16       2.27
+gemv T         256 same  |    291.0 /   134.8 |     47.4 /    47.3 |     76.1 /   577.4 |    0.23   2.85       3.82
+gemv T         256 new   |    311.5 /   142.6 |     55.6 /    60.0 |     93.4 /  1621.2 |    0.09   2.38       3.34
+gemv T         512 same  |    288.9 /   133.5 |    112.3 /   112.3 |    154.0 /  1169.1 |    0.11   1.19       1.88
+gemv T         512 new   |    513.5 /   205.5 |     76.8 /    79.8 |    152.5 /  3419.7 |    0.06   2.58       3.37
+gemv T        1024 same  |    517.2 /   196.4 |    455.5 /   454.9 |    281.9 /  1860.2 |    0.11   0.43       1.83
+gemv T        1024 new   |    742.0 /   263.9 |    313.8 /   316.6 |    257.2 /  4739.2 |    0.06   0.83       2.88
+gemv T        2048 same  |   1257.9 /   241.9 |   2278.4 /  2277.1 |   1947.2 / 11584.8 |    0.02   0.11       0.65
+gemv T        2048 new   |   1350.4 /   332.9 |   1173.1 /  1176.9 |   1149.4 / 20137.2 |    0.02   0.28       1.17
+gemv T        4096 same  |   4038.7 /   255.5 |   8428.8 /  8415.3 |   6787.6 / 53523.7 |    0.00   0.03       0.60
+gemv T        8192 same  |  14193.0 /   314.7 |  18634.4 / 18635.8 |  34051.3 /245565.0 |    0.00   0.02       0.42
+ger             64 same  |    139.9 /    91.3 |     14.4 /    14.4 |     26.2 /    26.2 |    3.48   6.34       5.34
+ger             64 new   |    146.9 /    97.1 |     13.4 /    15.2 |     29.1 /    32.5 |    2.99   6.39       5.04
+ger            128 same  |    152.6 /    93.2 |     36.5 /    36.6 |     73.9 /   471.7 |    0.20   2.55       2.07
+ger            128 new   |    151.4 /    99.7 |     34.4 /    38.0 |     65.8 /   834.2 |    0.12   2.62       2.30
+ger            256 same  |    173.1 /    90.8 |     47.6 /    47.6 |     61.6 /   423.6 |    0.21   1.91       2.81
+ger            256 new   |    183.2 /    92.6 |     58.4 /    62.6 |     77.6 /  1078.4 |    0.09   1.48       2.36
+ger            512 same  |    346.8 /   130.2 |    148.6 /   148.6 |    103.4 /   749.8 |    0.17   0.88       3.36
+ger            512 new   |    438.7 /   155.3 |     97.1 /   100.4 |    128.7 /  1694.4 |    0.09   1.55       3.41
+ger           1024 same  |    805.2 /   199.0 |    509.2 /   508.6 |    209.0 /  1642.5 |    0.12   0.39       3.85
+ger           1024 new   |    956.2 /   246.9 |    421.8 /   424.5 |    939.0 /  9119.6 |    0.03   0.58       1.02
+ger           2048 same  |   2317.6 /   241.0 |   2603.6 /  2603.9 |   2933.4 / 16128.6 |    0.01   0.09       0.79
+ger           2048 new   |   2404.2 /   320.7 |   1639.2 /  1642.7 |   1656.4 / 19367.7 |    0.02   0.20       1.45
+ger           4096 same  |   8012.5 /   260.4 |  12833.6 / 12829.3 |  10746.2 / 75924.7 |    0.00   0.02       0.75
+ger           8192 same  |  30813.8 /   283.0 |  42294.4 / 42282.1 |  41595.3 /297427.4 |    0.00   0.01       0.74
+symv            64 same  |    169.0 /   100.1 |     25.6 /    25.6 |     26.5 /    26.3 |    3.81   3.91       6.38
+symv            64 new   |    166.9 /   104.1 |     29.3 /    32.9 |     31.1 /    34.7 |    3.00   3.16       5.36
+symv           128 same  |    188.4 /    99.8 |     39.5 /    28.0 |     31.1 /    31.1 |    3.21   3.57       6.06
+symv           128 new   |    201.5 /   110.0 |     34.2 /    37.7 |     34.7 /    38.4 |    2.87   2.91       5.81
+symv           256 same  |    280.5 /   124.2 |     40.9 /    40.9 |    192.9 /  1096.8 |    0.11   3.04       1.45
+symv           256 new   |    293.8 /   124.8 |     41.3 /    44.5 |     79.1 /   694.0 |    0.18   2.81       3.72
+symv           512 same  |    273.3 /   127.2 |     92.4 /    92.5 |     65.8 /   371.5 |    0.34   1.38       4.15
+symv           512 new   |    414.1 /   162.0 |     90.1 /    94.2 |     80.9 /  1348.0 |    0.12   1.72       5.12
+symv          1024 same  |    380.6 /   146.3 |    249.5 /   249.6 |    145.5 /  1157.9 |    0.13   0.59       2.62
+symv          1024 new   |    579.8 /   208.6 |    305.9 /   310.8 |    501.3 /  5828.0 |    0.04   0.67       1.16
+symv          2048 same  |    894.5 /   251.5 |   1092.8 /  1092.5 |    806.1 /  6403.5 |    0.04   0.23       1.11
+symv          2048 new   |   1017.3 /   314.6 |    877.9 /   880.3 |    923.5 / 15646.1 |    0.02   0.36       1.10
+symv          4096 same  |   2481.2 /   253.4 |   4369.5 /  4369.2 |   2972.4 / 19156.2 |    0.01   0.06       0.83
+symv          8192 same  |   8400.8 /   276.2 |  22692.4 / 22628.3 |   8606.6 / 48497.9 |    0.01   0.01       0.98
+trmv            64 same  |    143.4 /    84.2 |     25.5 /    25.4 |     25.4 /    95.1 |    0.89   3.32       5.64
+trmv            64 new   |    151.9 /   100.5 |     32.6 /    36.7 |     34.5 /   236.2 |    0.43   2.74       4.40
+trmv           128 same  |    142.8 /    87.0 |     30.4 /    30.4 |     30.8 /   170.8 |    0.51   2.86       4.63
+trmv           128 new   |    153.7 /   101.7 |     36.1 /    40.2 |     53.1 /   529.0 |    0.19   2.53       2.89
+trmv           256 same  |    149.5 /    86.1 |     39.4 /    39.4 |     55.7 /   441.9 |    0.19   2.19       2.69
+trmv           256 new   |    160.8 /   100.2 |     42.7 /    45.9 |     40.1 /   614.4 |    0.16   2.18       4.01
+trmv           512 same  |    178.9 /    96.8 |    108.1 /   106.8 |     82.9 /   588.9 |    0.16   0.91       2.16
+trmv           512 new   |    329.1 /   147.2 |     79.6 /    82.6 |    124.3 /  2988.4 |    0.05   1.78       2.65
+trmv          1024 same  |    361.0 /   138.5 |    212.4 /   212.5 |    208.6 /  1343.0 |    0.10   0.65       1.73
+trmv          1024 new   |    584.2 /   224.4 |    286.3 /   286.7 |    306.4 /  8071.1 |    0.03   0.78       1.91
+trmv          2048 same  |   1000.2 /   222.8 |    967.5 /   967.1 |    760.3 /  6004.1 |    0.04   0.23       1.32
+trmv          2048 new   |   1126.7 /   297.0 |    818.5 /   812.4 |    634.3 / 15269.5 |    0.02   0.37       1.78
+trmv          4096 same  |   3023.0 /   248.8 |   4352.3 /  4351.3 |   2102.1 / 12866.5 |    0.02   0.06       1.44
+trmv          8192 same  |  11054.1 /   264.4 |  17161.3 / 17162.1 |  11870.3 / 90004.7 |    0.00   0.02       0.93
+trsv            64 same  |    189.1 /    96.1 |     22.5 /    22.5 |     30.1 /    30.1 |    3.20   4.27       6.29
+trsv            64 new   |    182.1 /    83.5 |     24.6 /    27.9 |     34.8 /    39.4 |    2.12   2.99       5.24
+trsv           128 same  |    335.1 /   144.0 |     43.6 /    43.5 |     38.7 /    38.7 |    3.72   3.31       8.67
+trsv           128 new   |    373.3 /   158.7 |     37.5 /    41.6 |     37.8 /    41.5 |    3.83   3.82       9.88
+trsv           256 same  |    494.6 /   172.0 |     66.4 /    66.3 |     83.0 /    83.0 |    2.07   2.59       5.96
+trsv           256 new   |    555.2 /   175.8 |     35.5 /    37.8 |     32.1 /    34.4 |    5.11   4.65      17.29
+trsv           512 same  |    775.0 /   195.1 |    145.5 /   145.4 |    149.2 /   149.1 |    1.31   1.34       5.20
+trsv           512 new   |    953.8 /   217.1 |     66.4 /    68.8 |     52.6 /    54.5 |    3.99   3.16      18.13
+trsv          1024 same  |   1380.4 /   236.4 |    776.1 /   775.1 |    695.4 /   695.3 |    0.34   0.30       1.98
+trsv          1024 new   |   1579.1 /   273.3 |    299.8 /   302.7 |    276.8 /   279.3 |    0.98   0.90       5.71
+trsv          2048 same  |   3047.9 /   309.6 |   2738.8 /  2727.1 |   2735.4 /  2735.1 |    0.11   0.11       1.11
+trsv          2048 new   |   2989.1 /   366.3 |    899.5 /   904.2 |    876.5 /   876.2 |    0.42   0.41       3.41
+trsv          4096 same  |   6443.7 /   435.4 |   4779.4 /  4778.2 |   5499.2 /  5467.4 |    0.08   0.09       1.17
+trsv          8192 same  |  15604.6 /   573.6 |  18226.9 / 18225.5 |  19982.9 / 19977.0 |    0.03   0.03       0.78
+syr             64 same  |    136.8 /    83.9 |     21.0 /    19.7 |     19.0 /    19.0 |    4.41   4.26       7.19
+syr             64 new   |    141.5 /    96.8 |     23.3 /    26.5 |     24.6 /    27.9 |    3.47   3.65       5.76
+syr            128 same  |    134.6 /    80.6 |     25.1 /    25.1 |     28.0 /   167.7 |    0.48   3.21       4.80
+syr            128 new   |    142.1 /    90.7 |     28.5 /    31.4 |     36.8 /   455.7 |    0.20   2.89       3.86
+syr            256 same  |    151.1 /    81.4 |     37.0 /    37.0 |     67.8 /   498.5 |    0.16   2.20       2.23
+syr            256 new   |    160.4 /    98.7 |     36.7 /    39.7 |     93.3 /  1525.6 |    0.06   2.48       1.72
+syr            512 same  |    260.6 /   105.8 |    124.0 /   124.0 |     84.3 /   652.8 |    0.16   0.85       3.09
+syr            512 new   |    394.0 /   145.9 |     78.7 /    81.8 |    163.8 /  3222.5 |    0.05   1.78       2.41
+syr           1024 same  |    591.1 /   159.7 |    267.1 /   267.1 |    162.5 /  1249.9 |    0.13   0.60       3.64
+syr           1024 new   |    730.9 /   188.2 |    296.7 /   299.5 |    368.8 /  8116.3 |    0.02   0.63       1.98
+syr           2048 same  |   1577.0 /   211.1 |   1629.8 /  1629.9 |   1108.3 /  8711.5 |    0.02   0.13       1.42
+syr           2048 new   |   1689.7 /   291.0 |   1252.3 /  1258.2 |    923.1 / 18633.8 |    0.02   0.23       1.83
+syr           4096 same  |   5257.6 /   236.1 |   6770.0 /  6743.3 |   5343.5 / 39031.0 |    0.01   0.04       0.98
+syr           8192 same  |  20766.7 /   264.6 |  28378.1 / 28371.4 |  17383.5 /135665.6 |    0.00   0.01       1.19
 
-== ZASILANIE SIECIOWE (AC = 1, CPU ~3,7 GHz, EPP balance_performance), te same warunki pomiaru, 3 rundy ==
-OpenBLAS przyspiesza bardziej niż ścieżka GPU (koszt CPU wywołania GPU w tym pomiarze z Pythona 50–100 µs przy małych,
-~200–250 µs przy dużych -- rozkład: results/overhead-2026-11-12.txt). Progi, przy których iloraz CPU GPU/OpenBLAS < 1:
-- 8 wątków, funkcje dzielone: gemv, ger, trmv od 128² (0,3–0,7); axpy od 2^14 (0,66); symv od 256² (0,90); syr od 256²
-  (0,49; przy 128² 1,16) -> wspólny próg 2^16.
-- 1 wątek albo funkcja niedzielona, poziom 1: od 2^20 (dot 0,40, copy 0,49, iamax 0,40, nrm2 0,34, axpy 0,39; scal 1,19
-  -> 2^22). Poziom 2: n = 1024 1,1–1,4 (ger 0,76, trsv 0,61), n = 2048 0,25–0,42 -> 2^22.
-WDROŻONE (lib/gen9blas_blas.c): poziom 1 od 2^20, poziom 2 od 2^22, od 2^16 gdy OpenBLAS > 1 wątek i funkcja dzielona.
-Czas ściany przy progu 2^16 (8 wątków): GPU 2,5–15× dłużej (stałe ~50 µs opóźnienia wobec ~15–40 µs OpenBLAS);
-przy dużych rozmiarach 0,4–2,5× (gemv N 2–2,4× -- krok 3).
+== MAINS POWER (AC = 1, CPU ~3.7 GHz, EPP balance_performance), same measurement conditions, 3 rounds ==
+OpenBLAS speeds up more than the GPU path (CPU cost of a GPU call in this Python measurement 50–100 µs for small,
+~200–250 µs for large calls -- breakdown: results/overhead-2026-11-12.txt). Thresholds at which the CPU ratio GPU/OpenBLAS < 1:
+- 8 threads, split functions: gemv, ger, trmv from 128² (0.3–0.7); axpy from 2^14 (0.66); symv from 256² (0.90); syr from 256²
+  (0.49; at 128² 1.16) -> common threshold 2^16.
+- 1 thread or a non-split function, level 1: from 2^20 (dot 0.40, copy 0.49, iamax 0.40, nrm2 0.34, axpy 0.39; scal 1.19
+  -> 2^22). Level 2: n = 1024 1.1–1.4 (ger 0.76, trsv 0.61), n = 2048 0.25–0.42 -> 2^22.
+DEPLOYED (lib/gen9blas_blas.c): level 1 from 2^20, level 2 from 2^22, from 2^16 when OpenBLAS > 1 thread and the function is split.
+Wall time at threshold 2^16 (8 threads): GPU 2.5–15× longer (constant ~50 µs latency vs ~15–40 µs OpenBLAS);
+for large sizes 0.4–2.5× (gemv N 2–2.4× -- step 3).
 
-typ s; czas ściany / CPU procesu na wywołanie [µs], mediany 3 rund; GPU/cpu8 i GPU/cpu1: iloraz CPU (< 1: GPU odciąża)
-funkcja          n przyp |               gpu |              cpu1 |              cpu8 | CPU g/8    g/1 ściana g/8
-axpy          1024 te    |    159.2 /   103.3 |     18.3 /    18.3 |      4.9 /     4.9 |   21.10   5.66      32.23
-axpy          1024 nowe  |    137.3 /    93.9 |     13.1 /    15.5 |      7.0 /     8.0 |   11.68   6.07      19.72
-axpy          4096 te    |    117.0 /    70.9 |     19.2 /    19.2 |     16.7 /    16.7 |    4.25   3.69       7.01
-axpy          4096 nowe  |     81.1 /    41.3 |     11.4 /    13.2 |     14.4 /    16.7 |    2.48   3.14       5.62
-axpy         16384 te    |    112.6 /    66.3 |     21.5 /    21.6 |     12.7 /   101.1 |    0.66   3.07       8.86
-axpy         16384 nowe  |    129.0 /    81.9 |     11.5 /    12.9 |     26.4 /   382.0 |    0.21   6.36       4.89
-axpy         65536 te    |    138.5 /    71.4 |     33.7 /    33.7 |     14.8 /   116.4 |    0.61   2.12       9.39
-axpy         65536 nowe  |    203.2 /   104.9 |     16.9 /    18.0 |     28.1 /   539.2 |    0.19   5.82       7.22
-axpy        262144 te    |    262.9 /   118.1 |     71.4 /    71.5 |     28.9 /   227.6 |    0.52   1.65       9.11
-axpy        262144 nowe  |    301.1 /   100.7 |     52.2 /    53.4 |     70.9 /  1447.9 |    0.07   1.89       4.24
-axpy       1048576 te    |    806.3 /   222.5 |    564.9 /   564.8 |    324.8 /  2450.6 |    0.09   0.39       2.48
-axpy       1048576 nowe  |    817.3 /   134.3 |    533.8 /   534.8 |    530.7 /  8956.8 |    0.01   0.25       1.54
-axpy       4194304 te    |   2552.3 /   246.8 |   3142.2 /  3141.6 |   2622.4 / 19676.3 |    0.01   0.08       0.97
-axpy       4194304 nowe  |   4023.5 /  1682.1 |   2304.5 /  2304.7 |   2213.5 / 78529.4 |    0.02   0.73       1.82
-axpy      16777216 te    |   9104.6 /   245.8 |  13016.1 / 12985.6 |  10283.5 / 77162.4 |    0.00   0.02       0.89
-dot           1024 te    |     62.2 /    26.3 |     16.5 /    16.4 |      4.7 /     4.7 |    5.57   1.60      13.15
-dot           1024 nowe  |     58.9 /    28.1 |     10.4 /    12.2 |      6.5 /     7.6 |    3.70   2.30       9.12
-dot           4096 te    |     99.1 /    55.2 |     18.3 /    18.4 |     21.0 /    21.0 |    2.63   3.01       4.72
-dot           4096 nowe  |     56.4 /    23.8 |     11.3 /    13.2 |     31.1 /    35.9 |    0.66   1.80       1.81
-dot          16384 te    |     71.6 /    26.1 |     22.2 /    22.2 |     22.4 /    22.5 |    1.16   1.18       3.19
-dot          16384 nowe  |     67.4 /    23.8 |     11.7 /    13.2 |     11.8 /    13.3 |    1.79   1.81       5.71
-dot          65536 te    |    147.5 /    76.1 |     32.4 /    32.2 |     29.9 /    29.9 |    2.54   2.36       4.93
-dot          65536 nowe  |    143.9 /    66.2 |     15.9 /    17.1 |     15.0 /    16.1 |    4.10   3.88       9.61
-dot         262144 te    |    264.3 /   114.4 |     63.6 /    63.6 |     47.8 /    47.8 |    2.39   1.80       5.53
-dot         262144 nowe  |    328.2 /   104.2 |     44.6 /    45.8 |     42.1 /    43.2 |    2.41   2.28       7.80
-dot        1048576 te    |    741.3 /   222.3 |    556.4 /   556.4 |    526.1 /   526.1 |    0.42   0.40       1.41
-dot        1048576 nowe  |    799.9 /   128.6 |    435.8 /   437.8 |    447.8 /   449.8 |    0.29   0.29       1.79
-dot        4194304 te    |   2054.4 /   221.1 |   2672.7 /  2671.7 |   2546.8 /  2546.5 |    0.09   0.08       0.81
-dot        4194304 nowe  |   3590.0 /  1640.5 |   1965.5 /  1969.7 |   2062.7 /  2068.0 |    0.79   0.83       1.74
-dot       16777216 te    |   6681.8 /   250.4 |  11799.8 / 11773.5 |   9343.1 /  9342.5 |    0.03   0.02       0.72
-nrm2          1024 te    |    135.5 /    82.6 |     11.9 /    11.9 |     12.3 /    12.3 |    6.69   6.96      10.98
-nrm2          1024 nowe  |     84.4 /    47.6 |     14.7 /    18.0 |     16.4 /    19.9 |    2.39   2.65       5.16
-nrm2          4096 te    |    132.2 /    81.1 |     15.8 /    15.8 |      5.0 /     5.0 |   16.32   5.13      26.62
-nrm2          4096 nowe  |     85.3 /    44.9 |     12.4 /    14.7 |      5.7 /     6.8 |    6.66   3.06      15.00
-nrm2         16384 te    |    139.9 /    78.4 |     21.8 /    21.8 |     22.1 /    21.9 |    3.57   3.60       6.35
-nrm2         16384 nowe  |     84.0 /    39.3 |     11.3 /    12.7 |     11.6 /    13.0 |    3.02   3.09       7.22
-nrm2         65536 te    |     79.3 /    22.9 |     37.5 /    37.5 |     37.5 /    37.5 |    0.61   0.61       2.12
-nrm2         65536 nowe  |     94.7 /    34.5 |     21.8 /    23.0 |     21.1 /    22.1 |    1.56   1.50       4.49
-nrm2        262144 te    |    164.5 /    76.2 |     99.0 /    98.9 |     87.8 /    87.4 |    0.87   0.77       1.87
-nrm2        262144 nowe  |    213.1 /    86.4 |     73.1 /    74.3 |     73.1 /    74.1 |    1.17   1.16       2.92
-nrm2       1048576 te    |    418.0 /   152.3 |    443.2 /   443.2 |    365.8 /   362.6 |    0.42   0.34       1.14
-nrm2       1048576 nowe  |    507.8 /   105.7 |    354.5 /   356.1 |    389.9 /   390.9 |    0.27   0.30       1.30
-nrm2       4194304 te    |   1175.7 /   209.0 |   1973.4 /  1969.2 |   1993.1 /  1992.0 |    0.10   0.11       0.59
-nrm2       4194304 nowe  |   1260.9 /   126.0 |   1402.8 /  1405.2 |   1478.8 /  1481.3 |    0.09   0.09       0.85
-nrm2      16777216 te    |   3478.7 /   206.4 |   8028.3 /  8012.1 |   7831.4 /  7824.5 |    0.03   0.03       0.44
-scal          1024 te    |    132.6 /    83.2 |      9.4 /     9.4 |     12.0 /    12.0 |    6.94   8.88      11.07
-scal          1024 nowe  |    131.8 /    86.7 |      6.5 /     8.0 |     13.6 /    16.6 |    5.23  10.80       9.68
-scal          4096 te    |    106.5 /    62.0 |     14.1 /    14.0 |     11.6 /    11.6 |    5.35   4.42       9.14
-scal          4096 nowe  |     65.6 /    33.2 |     13.6 /    16.5 |     11.1 /    13.7 |    2.42   2.01       5.93
-scal         16384 te    |     93.0 /    50.7 |     13.8 /    13.9 |     16.9 /    16.9 |    3.00   3.66       5.50
-scal         16384 nowe  |     74.4 /    38.9 |     10.0 /    11.9 |     11.4 /    13.4 |    2.89   3.27       6.53
-scal         65536 te    |    142.7 /    80.8 |     26.9 /    26.9 |     25.0 /    25.0 |    3.23   3.00       5.71
-scal         65536 nowe  |    104.0 /    53.3 |     11.9 /    13.3 |     12.2 /    13.6 |    3.93   4.02       8.52
-scal        262144 te    |    198.1 /    87.4 |     49.2 /    49.1 |     46.8 /    46.7 |    1.87   1.78       4.23
-scal        262144 nowe  |    194.3 /    56.7 |     32.0 /    33.2 |     31.3 /    32.4 |    1.75   1.71       6.20
-scal       1048576 te    |    448.8 /   154.5 |    129.5 /   129.5 |    223.2 /   223.2 |    0.69   1.19       2.01
-scal       1048576 nowe  |    539.7 /   101.5 |    304.3 /   305.5 |    305.3 /   305.8 |    0.33   0.33       1.77
-scal       4194304 te    |   1662.1 /   217.5 |   1789.2 /  1786.3 |   1408.1 / 10136.1 |    0.02   0.12       1.18
-scal       4194304 nowe  |   1669.8 /   165.5 |   1369.9 /  1373.8 |   1750.6 / 21144.9 |    0.01   0.12       0.95
-scal      16777216 te    |   5754.8 /   253.1 |   7502.9 /  7501.7 |   7188.4 / 44366.5 |    0.01   0.03       0.80
-copy          1024 te    |    148.7 /    95.2 |      4.2 /     4.2 |      4.8 /     4.8 |   19.89  22.45      30.96
-copy          1024 nowe  |    124.8 /    81.3 |      5.5 /     6.4 |      6.2 /     7.3 |   11.21  12.67      20.26
-copy          4096 te    |    106.1 /    62.9 |     17.4 /    17.3 |      5.1 /     5.1 |   12.38   3.64      20.90
-copy          4096 nowe  |     68.1 /    34.5 |     10.3 /    12.0 |      5.8 /     6.8 |    5.06   2.87      11.67
-copy         16384 te    |    126.6 /    76.2 |     20.8 /    20.8 |      8.0 /     8.0 |    9.49   3.66      15.73
-copy         16384 nowe  |    120.1 /    70.1 |     10.8 /    12.2 |      8.1 /     9.4 |    7.48   5.72      14.78
-copy         65536 te    |    138.6 /    73.5 |     33.7 /    33.7 |     21.5 /    21.5 |    3.43   2.18       6.46
-copy         65536 nowe  |    106.2 /    45.0 |     16.9 /    17.9 |     15.7 /    16.9 |    2.66   2.52       6.76
-copy        262144 te    |    189.8 /    73.1 |     68.1 /    67.9 |     71.3 /    71.3 |    1.03   1.08       2.66
-copy        262144 nowe  |    205.0 /    65.2 |     53.1 /    54.2 |     51.0 /    52.3 |    1.25   1.20       4.02
-copy       1048576 te    |    807.8 /   217.9 |    544.0 /   542.6 |    445.2 /   443.9 |    0.49   0.40       1.81
-copy       1048576 nowe  |    786.8 /   129.2 |    527.3 /   529.8 |    547.1 /   549.2 |    0.24   0.24       1.44
-copy       4194304 te    |   2378.3 /   238.6 |   2938.3 /  2938.4 |   2363.6 /  2357.7 |    0.10   0.08       1.01
-copy       4194304 nowe  |   3947.8 /  1722.1 |   2227.2 /  2230.6 |   2199.7 /  2204.6 |    0.78   0.77       1.79
-copy      16777216 te    |   8597.7 /   280.5 |  11884.5 / 11885.7 |  10547.5 / 10528.6 |    0.03   0.02       0.82
-iamax         1024 te    |    129.1 /    81.2 |     12.0 /    11.9 |     11.3 /    11.1 |    7.29   6.80      11.42
-iamax         1024 nowe  |     91.6 /    56.8 |     16.1 /    19.8 |      8.8 /    11.1 |    5.10   2.88      10.43
-iamax         4096 te    |    117.3 /    69.0 |     14.3 /    14.3 |      3.5 /     3.5 |   19.61   4.81      33.37
-iamax         4096 nowe  |     90.2 /    47.8 |     11.3 /    13.8 |      7.3 /     8.8 |    5.46   3.46      12.38
-iamax        16384 te    |    144.6 /    80.6 |     18.1 /    18.1 |      7.0 /     7.0 |   11.58   4.46      20.78
-iamax        16384 nowe  |    131.7 /    72.5 |     11.7 /    13.0 |      7.0 /     7.9 |    9.19   5.55      18.79
-iamax        65536 te    |    148.9 /    79.9 |     33.7 /    33.6 |     34.6 /    34.5 |    2.32   2.37       4.30
-iamax        65536 nowe  |    162.9 /    89.4 |     17.9 /    19.0 |     18.8 /    19.8 |    4.52   4.72       8.69
-iamax       262144 te    |    177.2 /    83.6 |     64.8 /    64.7 |     46.8 /    46.7 |    1.79   1.29       3.79
-iamax       262144 nowe  |    185.0 /    64.7 |     46.2 /    47.4 |     46.1 /    46.7 |    1.39   1.36       4.01
-iamax      1048576 te    |    418.7 /   151.2 |    360.1 /   360.2 |    380.4 /   379.3 |    0.40   0.42       1.10
-iamax      1048576 nowe  |    538.6 /   127.7 |    463.4 /   464.5 |    464.7 /   466.5 |    0.27   0.27       1.16
-iamax      4194304 te    |   1171.2 /   212.1 |   1811.2 /  1807.3 |   1730.3 /  1730.4 |    0.12   0.12       0.68
-iamax      4194304 nowe  |   1267.4 /   165.6 |   1279.9 /  1282.4 |   1238.1 /  1240.7 |    0.13   0.13       1.02
-iamax     16777216 te    |   3497.7 /   219.1 |   6194.9 /  6193.6 |   6028.5 /  6028.7 |    0.04   0.04       0.58
-gemv N          64 te    |    153.9 /    92.5 |     15.5 /    15.5 |     22.5 /    22.5 |    4.11   5.96       6.84
-gemv N          64 nowe  |    142.1 /    90.9 |     10.4 /    11.7 |     12.0 /    13.4 |    6.81   7.80      11.88
-gemv N         128 te    |    107.3 /    56.5 |     23.4 /    23.4 |     17.2 /   122.6 |    0.46   2.42       6.24
-gemv N         128 nowe  |     86.1 /    39.4 |     11.5 /    12.8 |     21.7 /   270.4 |    0.15   3.09       3.97
-gemv N         256 te    |    146.6 /    82.8 |     30.9 /    30.9 |     58.0 /   352.4 |    0.23   2.68       2.53
-gemv N         256 nowe  |    116.2 /    58.1 |     14.1 /    15.2 |     36.2 /   536.1 |    0.11   3.82       3.21
-gemv N         512 te    |    151.1 /    68.9 |     46.3 /    46.3 |     38.8 /   271.7 |    0.25   1.49       3.90
-gemv N         512 nowe  |    186.8 /    81.4 |     29.6 /    30.7 |     35.1 /   765.2 |    0.11   2.65       5.32
-gemv N        1024 te    |    592.0 /   200.3 |    182.2 /   182.2 |     46.5 /   323.3 |    0.62   1.10      12.74
-gemv N        1024 nowe  |    698.7 /   142.9 |    205.5 /   206.8 |    200.8 /  3231.7 |    0.04   0.69       3.48
-gemv N        2048 te    |   1987.7 /   242.8 |    940.6 /   938.5 |    577.1 /  4489.0 |    0.05   0.26       3.44
-gemv N        2048 nowe  |   2070.9 /   186.7 |    775.8 /   778.2 |    692.1 / 11499.9 |    0.02   0.24       2.99
-gemv N        4096 te    |   6258.5 /   260.6 |   3889.1 /  3889.5 |   2649.7 / 19096.2 |    0.01   0.07       2.36
-gemv N        8192 te    |  23562.8 /   309.2 |  18404.6 / 18405.6 |  11054.1 / 80462.0 |    0.00   0.02       2.13
-gemv T          64 te    |    187.1 /   113.1 |     20.1 /    20.2 |      6.9 /     6.9 |   16.49   5.61      27.20
-gemv T          64 nowe  |    183.2 /   118.0 |     10.9 /    12.2 |      8.6 /     9.7 |   12.11   9.67      21.25
-gemv T         128 te    |    114.3 /    37.6 |     23.9 /    23.9 |     17.9 /   139.6 |    0.27   1.57       6.37
-gemv T         128 nowe  |    122.0 /    44.0 |     11.8 /    13.1 |     25.3 /   314.2 |    0.14   3.35       4.82
-gemv T         256 te    |    300.8 /   137.3 |     28.8 /    28.8 |     28.2 /   213.5 |    0.64   4.76      10.65
-gemv T         256 nowe  |    298.4 /   125.6 |     13.0 /    14.1 |     28.1 /   497.4 |    0.25   8.93      10.64
-gemv T         512 te    |    309.3 /   147.6 |     44.1 /    44.1 |     34.7 /   241.5 |    0.61   3.34       8.90
-gemv T         512 nowe  |    482.3 /   188.2 |     27.4 /    28.6 |     46.7 /   808.1 |    0.23   6.58      10.33
-gemv T        1024 te    |    502.8 /   197.0 |    173.6 /   173.6 |     77.6 /   555.0 |    0.36   1.14       6.48
-gemv T        1024 nowe  |    574.3 /   128.6 |    205.1 /   206.5 |    176.0 /  3227.6 |    0.04   0.62       3.26
-gemv T        2048 te    |   1264.9 /   248.6 |    996.5 /   994.4 |   1217.9 /  9376.6 |    0.03   0.25       1.04
-gemv T        2048 nowe  |   1308.1 /   159.7 |    785.6 /   787.9 |    737.7 / 14343.1 |    0.01   0.20       1.77
-gemv T        4096 te    |   4015.4 /   265.8 |   4389.4 /  4389.9 |   3731.4 / 28819.0 |    0.01   0.06       1.08
-gemv T        8192 te    |  14185.6 /   307.6 |  20192.4 / 20192.8 |  15523.9 /111089.7 |    0.00   0.02       0.91
-ger             64 te    |    156.8 /    99.6 |     21.1 /    21.1 |      8.8 /     8.8 |   11.31   4.72      17.80
-ger             64 nowe  |    151.8 /    99.7 |     11.3 /    12.7 |     11.1 /    12.4 |    8.01   7.87      13.63
-ger            128 te    |    117.2 /    68.3 |     25.2 /    25.2 |     19.9 /   154.6 |    0.44   2.71       5.90
-ger            128 nowe  |    142.5 /    91.1 |     12.3 /    13.5 |     28.5 /   403.6 |    0.23   6.77       5.00
-ger            256 te    |    181.0 /    96.9 |     33.6 /    33.6 |     20.0 /   155.0 |    0.62   2.88       9.05
-ger            256 nowe  |    198.6 /   105.7 |     15.1 /    16.1 |     25.2 /   445.5 |    0.24   6.56       7.87
-ger            512 te    |    356.2 /   135.8 |     52.4 /    52.4 |     43.2 /   319.8 |    0.42   2.59       8.25
-ger            512 nowe  |    231.8 /    40.7 |     37.2 /    38.5 |     66.1 /  1140.6 |    0.04   1.06       3.51
-ger           1024 te    |    816.0 /   206.9 |    270.6 /   270.6 |     72.6 /   527.8 |    0.39   0.76      11.24
-ger           1024 nowe  |    893.1 /   158.2 |    312.8 /   314.7 |    285.8 /  4870.3 |    0.03   0.50       3.12
-ger           2048 te    |   2308.0 /   246.8 |   1813.9 /  1814.0 |   1409.1 / 10754.4 |    0.02   0.14       1.64
-ger           2048 nowe  |   2432.0 /   245.2 |   1361.6 /  1362.6 |   1391.8 / 22307.7 |    0.01   0.18       1.75
-ger           4096 te    |   8050.4 /   263.0 |   7928.6 /  7929.4 |   6410.0 / 47057.3 |    0.01   0.03       1.26
-ger           8192 te    |  30950.6 /   307.9 |  28998.5 / 29000.1 |  24200.3 /182859.5 |    0.00   0.01       1.28
-symv            64 te    |    185.3 /   113.1 |     22.0 /    22.0 |      7.5 /     7.6 |   14.98   5.14      24.54
-symv            64 nowe  |    165.2 /    99.3 |     11.4 /    12.8 |     10.9 /    12.2 |    8.13   7.74      15.13
-symv           128 te    |    207.8 /   112.6 |     23.9 /    23.9 |     34.4 /    34.4 |    3.27   4.72       6.04
-symv           128 nowe  |    200.8 /   108.1 |     12.4 /    13.7 |     35.9 /    39.7 |    2.72   7.89       5.59
-symv           256 te    |    306.0 /   142.1 |     29.3 /    29.1 |     20.1 /   157.4 |    0.90   4.88      15.20
-symv           256 nowe  |    315.9 /   143.4 |     13.2 /    14.3 |     24.6 /   448.1 |    0.32  10.06      12.83
-symv           512 te    |    297.4 /   144.7 |     42.0 /    41.9 |     24.2 /   189.0 |    0.77   3.45      12.29
-symv           512 nowe  |    362.1 /   151.0 |     26.1 /    27.5 |     29.9 /   734.3 |    0.21   5.50      12.09
-symv          1024 te    |    402.0 /   171.3 |    126.6 /   126.2 |     38.6 /   304.8 |    0.56   1.36      10.41
-symv          1024 nowe  |    328.6 /    65.6 |    149.2 /   150.6 |    135.2 /  2657.3 |    0.02   0.44       2.43
-symv          2048 te    |    874.7 /   241.7 |    573.7 /   572.7 |    289.9 /  2252.1 |    0.11   0.42       3.02
-symv          2048 nowe  |    944.6 /   141.5 |    477.8 /   479.7 |    387.6 /  8856.3 |    0.02   0.29       2.44
-symv          4096 te    |   2476.7 /   248.1 |   2679.0 /  2678.2 |   1594.8 / 12301.3 |    0.02   0.09       1.55
-symv          8192 te    |   8515.7 /   277.3 |  10055.2 / 10058.4 |   6050.5 / 46889.2 |    0.01   0.03       1.41
-trmv            64 te    |     74.1 /    27.5 |     19.9 /    19.9 |      6.4 /    24.9 |    1.10   1.38      11.54
-trmv            64 nowe  |     84.5 /    38.6 |     12.6 /    14.3 |      8.5 /    74.7 |    0.52   2.70       9.98
-trmv           128 te    |     97.2 /    48.1 |     17.1 /    17.0 |     11.4 /    67.8 |    0.71   2.82       8.54
-trmv           128 nowe  |     92.9 /    41.1 |     12.9 /    14.3 |     15.1 /   198.6 |    0.21   2.88       6.15
-trmv           256 te    |    131.5 /    72.0 |     31.3 /    31.3 |     16.8 /   130.3 |    0.55   2.30       7.82
-trmv           256 nowe  |    100.0 /    44.6 |     15.4 /    16.5 |     32.5 /   535.9 |    0.08   2.71       3.08
-trmv           512 te    |    164.4 /    86.7 |     45.7 /    45.7 |     46.9 /   325.5 |    0.27   1.90       3.50
-trmv           512 nowe  |    149.4 /    59.2 |     30.5 /    31.8 |     26.1 /   676.2 |    0.09   1.86       5.73
-trmv          1024 te    |    372.6 /   138.8 |    117.2 /   117.2 |     52.8 /   403.1 |    0.34   1.18       7.05
-trmv          1024 nowe  |    465.5 /   104.6 |    189.3 /   190.8 |    156.5 /  3272.2 |    0.03   0.55       2.97
-trmv          2048 te    |   1002.7 /   232.9 |    655.6 /   655.6 |    274.7 /  2170.8 |    0.11   0.36       3.65
-trmv          2048 nowe  |   1071.6 /   135.8 |    595.7 /   597.9 |    411.6 /  9720.5 |    0.01   0.23       2.60
-trmv          4096 te    |   3025.1 /   240.2 |   2064.2 /  2056.9 |   1343.8 / 10446.7 |    0.02   0.12       2.25
-trmv          8192 te    |  11050.0 /   288.6 |   9691.2 /  9692.2 |   5450.3 / 41902.3 |    0.01   0.03       2.03
-trsv            64 te    |    183.7 /    89.7 |     21.8 /    21.8 |      8.5 /     8.5 |   10.54   4.11      21.59
-trsv            64 nowe  |    146.3 /    57.2 |     11.4 /    12.9 |      9.6 /    10.8 |    5.29   4.44      15.19
-trsv           128 te    |    332.4 /   150.2 |     28.1 /    28.1 |     42.4 /    42.4 |    3.55   5.34       7.84
-trsv           128 nowe  |    350.4 /   155.0 |     11.8 /    12.9 |     17.1 /    18.7 |    8.28  12.00      20.53
-trsv           256 te    |    492.5 /   171.0 |     38.4 /    38.4 |     38.8 /    38.8 |    4.41   4.45      12.70
-trsv           256 nowe  |    543.6 /   174.6 |     18.3 /    19.3 |     16.4 /    17.6 |    9.93   9.02      33.13
-trsv           512 te    |    797.2 /   212.5 |     66.9 /    66.9 |     64.0 /    64.0 |    3.32   3.18      12.46
-trsv           512 nowe  |    944.1 /   233.4 |     35.0 /    36.3 |     33.2 /    34.5 |    6.76   6.43      28.45
-trsv          1024 te    |   1393.9 /   245.0 |    320.8 /   320.5 |    401.3 /   400.5 |    0.61   0.76       3.47
-trsv          1024 nowe  |   1607.4 /   295.5 |    202.5 /   204.2 |    201.0 /   202.6 |    1.46   1.45       8.00
-trsv          2048 te    |   3006.4 /   340.5 |   3217.2 /  3216.3 |   3466.4 /  3465.6 |    0.10   0.11       0.87
-trsv          2048 nowe  |   2946.5 /   330.7 |    570.2 /   573.1 |    573.7 /   576.4 |    0.57   0.58       5.14
-trsv          4096 te    |   6485.1 /   468.7 |   2545.1 /  2544.9 |   2505.8 /  2506.0 |    0.19   0.18       2.59
-trsv          8192 te    |  15657.0 /   631.4 |   9655.3 /  9656.4 |   9729.0 /  9729.6 |    0.06   0.07       1.61
-syr             64 te    |    138.1 /    85.3 |     20.9 /    20.9 |     20.6 /    20.6 |    4.14   4.07       6.71
-syr             64 nowe  |    138.4 /    90.8 |     11.4 /    13.0 |     11.0 /    12.5 |    7.29   6.96      12.63
-syr            128 te    |    138.0 /    82.9 |     20.1 /    20.1 |     12.0 /    71.7 |    1.16   4.12      11.52
-syr            128 nowe  |    133.1 /    81.1 |     11.3 /    12.7 |     13.8 /   164.2 |    0.49   6.40       9.65
-syr            256 te    |    157.3 /    87.5 |     30.1 /    30.1 |     23.7 /   179.7 |    0.49   2.91       6.63
-syr            256 nowe  |    172.1 /    98.5 |     13.4 /    14.5 |     24.1 /   412.9 |    0.24   6.79       7.13
-syr            512 te    |    260.5 /   115.4 |     46.0 /    46.0 |     22.4 /   171.2 |    0.67   2.51      11.65
-syr            512 nowe  |    394.9 /   155.0 |     29.0 /    30.1 |     45.1 /   875.7 |    0.18   5.15       8.75
-syr           1024 te    |    588.5 /   166.9 |    139.0 /   139.0 |     45.2 /   354.7 |    0.47   1.20      13.02
-syr           1024 nowe  |    706.7 /   156.5 |    207.9 /   209.5 |    145.1 /  3089.1 |    0.05   0.75       4.87
-syr           2048 te    |   1555.4 /   214.4 |    866.3 /   866.4 |    850.0 /  6230.1 |    0.03   0.25       1.83
-syr           2048 nowe  |   1697.7 /   172.3 |    802.0 /   796.8 |    843.0 / 14467.2 |    0.01   0.22       2.01
-syr           4096 te    |   5261.4 /   237.3 |   4330.6 /  4330.8 |   3369.8 / 23088.8 |    0.01   0.05       1.56
-syr           8192 te    |  20843.5 /   280.9 |  17371.1 / 17373.1 |  12202.8 / 92967.4 |    0.00   0.02       1.71
+type s; wall time / process CPU per call [µs], medians of 3 rounds; GPU/cpu8 and GPU/cpu1: CPU ratio (< 1: GPU offloads)
+function         n case |               gpu |              cpu1 |              cpu8 | CPU g/8    g/1 wall   g/8
+axpy          1024 same  |    159.2 /   103.3 |     18.3 /    18.3 |      4.9 /     4.9 |   21.10   5.66      32.23
+axpy          1024 new   |    137.3 /    93.9 |     13.1 /    15.5 |      7.0 /     8.0 |   11.68   6.07      19.72
+axpy          4096 same  |    117.0 /    70.9 |     19.2 /    19.2 |     16.7 /    16.7 |    4.25   3.69       7.01
+axpy          4096 new   |     81.1 /    41.3 |     11.4 /    13.2 |     14.4 /    16.7 |    2.48   3.14       5.62
+axpy         16384 same  |    112.6 /    66.3 |     21.5 /    21.6 |     12.7 /   101.1 |    0.66   3.07       8.86
+axpy         16384 new   |    129.0 /    81.9 |     11.5 /    12.9 |     26.4 /   382.0 |    0.21   6.36       4.89
+axpy         65536 same  |    138.5 /    71.4 |     33.7 /    33.7 |     14.8 /   116.4 |    0.61   2.12       9.39
+axpy         65536 new   |    203.2 /   104.9 |     16.9 /    18.0 |     28.1 /   539.2 |    0.19   5.82       7.22
+axpy        262144 same  |    262.9 /   118.1 |     71.4 /    71.5 |     28.9 /   227.6 |    0.52   1.65       9.11
+axpy        262144 new   |    301.1 /   100.7 |     52.2 /    53.4 |     70.9 /  1447.9 |    0.07   1.89       4.24
+axpy       1048576 same  |    806.3 /   222.5 |    564.9 /   564.8 |    324.8 /  2450.6 |    0.09   0.39       2.48
+axpy       1048576 new   |    817.3 /   134.3 |    533.8 /   534.8 |    530.7 /  8956.8 |    0.01   0.25       1.54
+axpy       4194304 same  |   2552.3 /   246.8 |   3142.2 /  3141.6 |   2622.4 / 19676.3 |    0.01   0.08       0.97
+axpy       4194304 new   |   4023.5 /  1682.1 |   2304.5 /  2304.7 |   2213.5 / 78529.4 |    0.02   0.73       1.82
+axpy      16777216 same  |   9104.6 /   245.8 |  13016.1 / 12985.6 |  10283.5 / 77162.4 |    0.00   0.02       0.89
+dot           1024 same  |     62.2 /    26.3 |     16.5 /    16.4 |      4.7 /     4.7 |    5.57   1.60      13.15
+dot           1024 new   |     58.9 /    28.1 |     10.4 /    12.2 |      6.5 /     7.6 |    3.70   2.30       9.12
+dot           4096 same  |     99.1 /    55.2 |     18.3 /    18.4 |     21.0 /    21.0 |    2.63   3.01       4.72
+dot           4096 new   |     56.4 /    23.8 |     11.3 /    13.2 |     31.1 /    35.9 |    0.66   1.80       1.81
+dot          16384 same  |     71.6 /    26.1 |     22.2 /    22.2 |     22.4 /    22.5 |    1.16   1.18       3.19
+dot          16384 new   |     67.4 /    23.8 |     11.7 /    13.2 |     11.8 /    13.3 |    1.79   1.81       5.71
+dot          65536 same  |    147.5 /    76.1 |     32.4 /    32.2 |     29.9 /    29.9 |    2.54   2.36       4.93
+dot          65536 new   |    143.9 /    66.2 |     15.9 /    17.1 |     15.0 /    16.1 |    4.10   3.88       9.61
+dot         262144 same  |    264.3 /   114.4 |     63.6 /    63.6 |     47.8 /    47.8 |    2.39   1.80       5.53
+dot         262144 new   |    328.2 /   104.2 |     44.6 /    45.8 |     42.1 /    43.2 |    2.41   2.28       7.80
+dot        1048576 same  |    741.3 /   222.3 |    556.4 /   556.4 |    526.1 /   526.1 |    0.42   0.40       1.41
+dot        1048576 new   |    799.9 /   128.6 |    435.8 /   437.8 |    447.8 /   449.8 |    0.29   0.29       1.79
+dot        4194304 same  |   2054.4 /   221.1 |   2672.7 /  2671.7 |   2546.8 /  2546.5 |    0.09   0.08       0.81
+dot        4194304 new   |   3590.0 /  1640.5 |   1965.5 /  1969.7 |   2062.7 /  2068.0 |    0.79   0.83       1.74
+dot       16777216 same  |   6681.8 /   250.4 |  11799.8 / 11773.5 |   9343.1 /  9342.5 |    0.03   0.02       0.72
+nrm2          1024 same  |    135.5 /    82.6 |     11.9 /    11.9 |     12.3 /    12.3 |    6.69   6.96      10.98
+nrm2          1024 new   |     84.4 /    47.6 |     14.7 /    18.0 |     16.4 /    19.9 |    2.39   2.65       5.16
+nrm2          4096 same  |    132.2 /    81.1 |     15.8 /    15.8 |      5.0 /     5.0 |   16.32   5.13      26.62
+nrm2          4096 new   |     85.3 /    44.9 |     12.4 /    14.7 |      5.7 /     6.8 |    6.66   3.06      15.00
+nrm2         16384 same  |    139.9 /    78.4 |     21.8 /    21.8 |     22.1 /    21.9 |    3.57   3.60       6.35
+nrm2         16384 new   |     84.0 /    39.3 |     11.3 /    12.7 |     11.6 /    13.0 |    3.02   3.09       7.22
+nrm2         65536 same  |     79.3 /    22.9 |     37.5 /    37.5 |     37.5 /    37.5 |    0.61   0.61       2.12
+nrm2         65536 new   |     94.7 /    34.5 |     21.8 /    23.0 |     21.1 /    22.1 |    1.56   1.50       4.49
+nrm2        262144 same  |    164.5 /    76.2 |     99.0 /    98.9 |     87.8 /    87.4 |    0.87   0.77       1.87
+nrm2        262144 new   |    213.1 /    86.4 |     73.1 /    74.3 |     73.1 /    74.1 |    1.17   1.16       2.92
+nrm2       1048576 same  |    418.0 /   152.3 |    443.2 /   443.2 |    365.8 /   362.6 |    0.42   0.34       1.14
+nrm2       1048576 new   |    507.8 /   105.7 |    354.5 /   356.1 |    389.9 /   390.9 |    0.27   0.30       1.30
+nrm2       4194304 same  |   1175.7 /   209.0 |   1973.4 /  1969.2 |   1993.1 /  1992.0 |    0.10   0.11       0.59
+nrm2       4194304 new   |   1260.9 /   126.0 |   1402.8 /  1405.2 |   1478.8 /  1481.3 |    0.09   0.09       0.85
+nrm2      16777216 same  |   3478.7 /   206.4 |   8028.3 /  8012.1 |   7831.4 /  7824.5 |    0.03   0.03       0.44
+scal          1024 same  |    132.6 /    83.2 |      9.4 /     9.4 |     12.0 /    12.0 |    6.94   8.88      11.07
+scal          1024 new   |    131.8 /    86.7 |      6.5 /     8.0 |     13.6 /    16.6 |    5.23  10.80       9.68
+scal          4096 same  |    106.5 /    62.0 |     14.1 /    14.0 |     11.6 /    11.6 |    5.35   4.42       9.14
+scal          4096 new   |     65.6 /    33.2 |     13.6 /    16.5 |     11.1 /    13.7 |    2.42   2.01       5.93
+scal         16384 same  |     93.0 /    50.7 |     13.8 /    13.9 |     16.9 /    16.9 |    3.00   3.66       5.50
+scal         16384 new   |     74.4 /    38.9 |     10.0 /    11.9 |     11.4 /    13.4 |    2.89   3.27       6.53
+scal         65536 same  |    142.7 /    80.8 |     26.9 /    26.9 |     25.0 /    25.0 |    3.23   3.00       5.71
+scal         65536 new   |    104.0 /    53.3 |     11.9 /    13.3 |     12.2 /    13.6 |    3.93   4.02       8.52
+scal        262144 same  |    198.1 /    87.4 |     49.2 /    49.1 |     46.8 /    46.7 |    1.87   1.78       4.23
+scal        262144 new   |    194.3 /    56.7 |     32.0 /    33.2 |     31.3 /    32.4 |    1.75   1.71       6.20
+scal       1048576 same  |    448.8 /   154.5 |    129.5 /   129.5 |    223.2 /   223.2 |    0.69   1.19       2.01
+scal       1048576 new   |    539.7 /   101.5 |    304.3 /   305.5 |    305.3 /   305.8 |    0.33   0.33       1.77
+scal       4194304 same  |   1662.1 /   217.5 |   1789.2 /  1786.3 |   1408.1 / 10136.1 |    0.02   0.12       1.18
+scal       4194304 new   |   1669.8 /   165.5 |   1369.9 /  1373.8 |   1750.6 / 21144.9 |    0.01   0.12       0.95
+scal      16777216 same  |   5754.8 /   253.1 |   7502.9 /  7501.7 |   7188.4 / 44366.5 |    0.01   0.03       0.80
+copy          1024 same  |    148.7 /    95.2 |      4.2 /     4.2 |      4.8 /     4.8 |   19.89  22.45      30.96
+copy          1024 new   |    124.8 /    81.3 |      5.5 /     6.4 |      6.2 /     7.3 |   11.21  12.67      20.26
+copy          4096 same  |    106.1 /    62.9 |     17.4 /    17.3 |      5.1 /     5.1 |   12.38   3.64      20.90
+copy          4096 new   |     68.1 /    34.5 |     10.3 /    12.0 |      5.8 /     6.8 |    5.06   2.87      11.67
+copy         16384 same  |    126.6 /    76.2 |     20.8 /    20.8 |      8.0 /     8.0 |    9.49   3.66      15.73
+copy         16384 new   |    120.1 /    70.1 |     10.8 /    12.2 |      8.1 /     9.4 |    7.48   5.72      14.78
+copy         65536 same  |    138.6 /    73.5 |     33.7 /    33.7 |     21.5 /    21.5 |    3.43   2.18       6.46
+copy         65536 new   |    106.2 /    45.0 |     16.9 /    17.9 |     15.7 /    16.9 |    2.66   2.52       6.76
+copy        262144 same  |    189.8 /    73.1 |     68.1 /    67.9 |     71.3 /    71.3 |    1.03   1.08       2.66
+copy        262144 new   |    205.0 /    65.2 |     53.1 /    54.2 |     51.0 /    52.3 |    1.25   1.20       4.02
+copy       1048576 same  |    807.8 /   217.9 |    544.0 /   542.6 |    445.2 /   443.9 |    0.49   0.40       1.81
+copy       1048576 new   |    786.8 /   129.2 |    527.3 /   529.8 |    547.1 /   549.2 |    0.24   0.24       1.44
+copy       4194304 same  |   2378.3 /   238.6 |   2938.3 /  2938.4 |   2363.6 /  2357.7 |    0.10   0.08       1.01
+copy       4194304 new   |   3947.8 /  1722.1 |   2227.2 /  2230.6 |   2199.7 /  2204.6 |    0.78   0.77       1.79
+copy      16777216 same  |   8597.7 /   280.5 |  11884.5 / 11885.7 |  10547.5 / 10528.6 |    0.03   0.02       0.82
+iamax         1024 same  |    129.1 /    81.2 |     12.0 /    11.9 |     11.3 /    11.1 |    7.29   6.80      11.42
+iamax         1024 new   |     91.6 /    56.8 |     16.1 /    19.8 |      8.8 /    11.1 |    5.10   2.88      10.43
+iamax         4096 same  |    117.3 /    69.0 |     14.3 /    14.3 |      3.5 /     3.5 |   19.61   4.81      33.37
+iamax         4096 new   |     90.2 /    47.8 |     11.3 /    13.8 |      7.3 /     8.8 |    5.46   3.46      12.38
+iamax        16384 same  |    144.6 /    80.6 |     18.1 /    18.1 |      7.0 /     7.0 |   11.58   4.46      20.78
+iamax        16384 new   |    131.7 /    72.5 |     11.7 /    13.0 |      7.0 /     7.9 |    9.19   5.55      18.79
+iamax        65536 same  |    148.9 /    79.9 |     33.7 /    33.6 |     34.6 /    34.5 |    2.32   2.37       4.30
+iamax        65536 new   |    162.9 /    89.4 |     17.9 /    19.0 |     18.8 /    19.8 |    4.52   4.72       8.69
+iamax       262144 same  |    177.2 /    83.6 |     64.8 /    64.7 |     46.8 /    46.7 |    1.79   1.29       3.79
+iamax       262144 new   |    185.0 /    64.7 |     46.2 /    47.4 |     46.1 /    46.7 |    1.39   1.36       4.01
+iamax      1048576 same  |    418.7 /   151.2 |    360.1 /   360.2 |    380.4 /   379.3 |    0.40   0.42       1.10
+iamax      1048576 new   |    538.6 /   127.7 |    463.4 /   464.5 |    464.7 /   466.5 |    0.27   0.27       1.16
+iamax      4194304 same  |   1171.2 /   212.1 |   1811.2 /  1807.3 |   1730.3 /  1730.4 |    0.12   0.12       0.68
+iamax      4194304 new   |   1267.4 /   165.6 |   1279.9 /  1282.4 |   1238.1 /  1240.7 |    0.13   0.13       1.02
+iamax     16777216 same  |   3497.7 /   219.1 |   6194.9 /  6193.6 |   6028.5 /  6028.7 |    0.04   0.04       0.58
+gemv N          64 same  |    153.9 /    92.5 |     15.5 /    15.5 |     22.5 /    22.5 |    4.11   5.96       6.84
+gemv N          64 new   |    142.1 /    90.9 |     10.4 /    11.7 |     12.0 /    13.4 |    6.81   7.80      11.88
+gemv N         128 same  |    107.3 /    56.5 |     23.4 /    23.4 |     17.2 /   122.6 |    0.46   2.42       6.24
+gemv N         128 new   |     86.1 /    39.4 |     11.5 /    12.8 |     21.7 /   270.4 |    0.15   3.09       3.97
+gemv N         256 same  |    146.6 /    82.8 |     30.9 /    30.9 |     58.0 /   352.4 |    0.23   2.68       2.53
+gemv N         256 new   |    116.2 /    58.1 |     14.1 /    15.2 |     36.2 /   536.1 |    0.11   3.82       3.21
+gemv N         512 same  |    151.1 /    68.9 |     46.3 /    46.3 |     38.8 /   271.7 |    0.25   1.49       3.90
+gemv N         512 new   |    186.8 /    81.4 |     29.6 /    30.7 |     35.1 /   765.2 |    0.11   2.65       5.32
+gemv N        1024 same  |    592.0 /   200.3 |    182.2 /   182.2 |     46.5 /   323.3 |    0.62   1.10      12.74
+gemv N        1024 new   |    698.7 /   142.9 |    205.5 /   206.8 |    200.8 /  3231.7 |    0.04   0.69       3.48
+gemv N        2048 same  |   1987.7 /   242.8 |    940.6 /   938.5 |    577.1 /  4489.0 |    0.05   0.26       3.44
+gemv N        2048 new   |   2070.9 /   186.7 |    775.8 /   778.2 |    692.1 / 11499.9 |    0.02   0.24       2.99
+gemv N        4096 same  |   6258.5 /   260.6 |   3889.1 /  3889.5 |   2649.7 / 19096.2 |    0.01   0.07       2.36
+gemv N        8192 same  |  23562.8 /   309.2 |  18404.6 / 18405.6 |  11054.1 / 80462.0 |    0.00   0.02       2.13
+gemv T          64 same  |    187.1 /   113.1 |     20.1 /    20.2 |      6.9 /     6.9 |   16.49   5.61      27.20
+gemv T          64 new   |    183.2 /   118.0 |     10.9 /    12.2 |      8.6 /     9.7 |   12.11   9.67      21.25
+gemv T         128 same  |    114.3 /    37.6 |     23.9 /    23.9 |     17.9 /   139.6 |    0.27   1.57       6.37
+gemv T         128 new   |    122.0 /    44.0 |     11.8 /    13.1 |     25.3 /   314.2 |    0.14   3.35       4.82
+gemv T         256 same  |    300.8 /   137.3 |     28.8 /    28.8 |     28.2 /   213.5 |    0.64   4.76      10.65
+gemv T         256 new   |    298.4 /   125.6 |     13.0 /    14.1 |     28.1 /   497.4 |    0.25   8.93      10.64
+gemv T         512 same  |    309.3 /   147.6 |     44.1 /    44.1 |     34.7 /   241.5 |    0.61   3.34       8.90
+gemv T         512 new   |    482.3 /   188.2 |     27.4 /    28.6 |     46.7 /   808.1 |    0.23   6.58      10.33
+gemv T        1024 same  |    502.8 /   197.0 |    173.6 /   173.6 |     77.6 /   555.0 |    0.36   1.14       6.48
+gemv T        1024 new   |    574.3 /   128.6 |    205.1 /   206.5 |    176.0 /  3227.6 |    0.04   0.62       3.26
+gemv T        2048 same  |   1264.9 /   248.6 |    996.5 /   994.4 |   1217.9 /  9376.6 |    0.03   0.25       1.04
+gemv T        2048 new   |   1308.1 /   159.7 |    785.6 /   787.9 |    737.7 / 14343.1 |    0.01   0.20       1.77
+gemv T        4096 same  |   4015.4 /   265.8 |   4389.4 /  4389.9 |   3731.4 / 28819.0 |    0.01   0.06       1.08
+gemv T        8192 same  |  14185.6 /   307.6 |  20192.4 / 20192.8 |  15523.9 /111089.7 |    0.00   0.02       0.91
+ger             64 same  |    156.8 /    99.6 |     21.1 /    21.1 |      8.8 /     8.8 |   11.31   4.72      17.80
+ger             64 new   |    151.8 /    99.7 |     11.3 /    12.7 |     11.1 /    12.4 |    8.01   7.87      13.63
+ger            128 same  |    117.2 /    68.3 |     25.2 /    25.2 |     19.9 /   154.6 |    0.44   2.71       5.90
+ger            128 new   |    142.5 /    91.1 |     12.3 /    13.5 |     28.5 /   403.6 |    0.23   6.77       5.00
+ger            256 same  |    181.0 /    96.9 |     33.6 /    33.6 |     20.0 /   155.0 |    0.62   2.88       9.05
+ger            256 new   |    198.6 /   105.7 |     15.1 /    16.1 |     25.2 /   445.5 |    0.24   6.56       7.87
+ger            512 same  |    356.2 /   135.8 |     52.4 /    52.4 |     43.2 /   319.8 |    0.42   2.59       8.25
+ger            512 new   |    231.8 /    40.7 |     37.2 /    38.5 |     66.1 /  1140.6 |    0.04   1.06       3.51
+ger           1024 same  |    816.0 /   206.9 |    270.6 /   270.6 |     72.6 /   527.8 |    0.39   0.76      11.24
+ger           1024 new   |    893.1 /   158.2 |    312.8 /   314.7 |    285.8 /  4870.3 |    0.03   0.50       3.12
+ger           2048 same  |   2308.0 /   246.8 |   1813.9 /  1814.0 |   1409.1 / 10754.4 |    0.02   0.14       1.64
+ger           2048 new   |   2432.0 /   245.2 |   1361.6 /  1362.6 |   1391.8 / 22307.7 |    0.01   0.18       1.75
+ger           4096 same  |   8050.4 /   263.0 |   7928.6 /  7929.4 |   6410.0 / 47057.3 |    0.01   0.03       1.26
+ger           8192 same  |  30950.6 /   307.9 |  28998.5 / 29000.1 |  24200.3 /182859.5 |    0.00   0.01       1.28
+symv            64 same  |    185.3 /   113.1 |     22.0 /    22.0 |      7.5 /     7.6 |   14.98   5.14      24.54
+symv            64 new   |    165.2 /    99.3 |     11.4 /    12.8 |     10.9 /    12.2 |    8.13   7.74      15.13
+symv           128 same  |    207.8 /   112.6 |     23.9 /    23.9 |     34.4 /    34.4 |    3.27   4.72       6.04
+symv           128 new   |    200.8 /   108.1 |     12.4 /    13.7 |     35.9 /    39.7 |    2.72   7.89       5.59
+symv           256 same  |    306.0 /   142.1 |     29.3 /    29.1 |     20.1 /   157.4 |    0.90   4.88      15.20
+symv           256 new   |    315.9 /   143.4 |     13.2 /    14.3 |     24.6 /   448.1 |    0.32  10.06      12.83
+symv           512 same  |    297.4 /   144.7 |     42.0 /    41.9 |     24.2 /   189.0 |    0.77   3.45      12.29
+symv           512 new   |    362.1 /   151.0 |     26.1 /    27.5 |     29.9 /   734.3 |    0.21   5.50      12.09
+symv          1024 same  |    402.0 /   171.3 |    126.6 /   126.2 |     38.6 /   304.8 |    0.56   1.36      10.41
+symv          1024 new   |    328.6 /    65.6 |    149.2 /   150.6 |    135.2 /  2657.3 |    0.02   0.44       2.43
+symv          2048 same  |    874.7 /   241.7 |    573.7 /   572.7 |    289.9 /  2252.1 |    0.11   0.42       3.02
+symv          2048 new   |    944.6 /   141.5 |    477.8 /   479.7 |    387.6 /  8856.3 |    0.02   0.29       2.44
+symv          4096 same  |   2476.7 /   248.1 |   2679.0 /  2678.2 |   1594.8 / 12301.3 |    0.02   0.09       1.55
+symv          8192 same  |   8515.7 /   277.3 |  10055.2 / 10058.4 |   6050.5 / 46889.2 |    0.01   0.03       1.41
+trmv            64 same  |     74.1 /    27.5 |     19.9 /    19.9 |      6.4 /    24.9 |    1.10   1.38      11.54
+trmv            64 new   |     84.5 /    38.6 |     12.6 /    14.3 |      8.5 /    74.7 |    0.52   2.70       9.98
+trmv           128 same  |     97.2 /    48.1 |     17.1 /    17.0 |     11.4 /    67.8 |    0.71   2.82       8.54
+trmv           128 new   |     92.9 /    41.1 |     12.9 /    14.3 |     15.1 /   198.6 |    0.21   2.88       6.15
+trmv           256 same  |    131.5 /    72.0 |     31.3 /    31.3 |     16.8 /   130.3 |    0.55   2.30       7.82
+trmv           256 new   |    100.0 /    44.6 |     15.4 /    16.5 |     32.5 /   535.9 |    0.08   2.71       3.08
+trmv           512 same  |    164.4 /    86.7 |     45.7 /    45.7 |     46.9 /   325.5 |    0.27   1.90       3.50
+trmv           512 new   |    149.4 /    59.2 |     30.5 /    31.8 |     26.1 /   676.2 |    0.09   1.86       5.73
+trmv          1024 same  |    372.6 /   138.8 |    117.2 /   117.2 |     52.8 /   403.1 |    0.34   1.18       7.05
+trmv          1024 new   |    465.5 /   104.6 |    189.3 /   190.8 |    156.5 /  3272.2 |    0.03   0.55       2.97
+trmv          2048 same  |   1002.7 /   232.9 |    655.6 /   655.6 |    274.7 /  2170.8 |    0.11   0.36       3.65
+trmv          2048 new   |   1071.6 /   135.8 |    595.7 /   597.9 |    411.6 /  9720.5 |    0.01   0.23       2.60
+trmv          4096 same  |   3025.1 /   240.2 |   2064.2 /  2056.9 |   1343.8 / 10446.7 |    0.02   0.12       2.25
+trmv          8192 same  |  11050.0 /   288.6 |   9691.2 /  9692.2 |   5450.3 / 41902.3 |    0.01   0.03       2.03
+trsv            64 same  |    183.7 /    89.7 |     21.8 /    21.8 |      8.5 /     8.5 |   10.54   4.11      21.59
+trsv            64 new   |    146.3 /    57.2 |     11.4 /    12.9 |      9.6 /    10.8 |    5.29   4.44      15.19
+trsv           128 same  |    332.4 /   150.2 |     28.1 /    28.1 |     42.4 /    42.4 |    3.55   5.34       7.84
+trsv           128 new   |    350.4 /   155.0 |     11.8 /    12.9 |     17.1 /    18.7 |    8.28  12.00      20.53
+trsv           256 same  |    492.5 /   171.0 |     38.4 /    38.4 |     38.8 /    38.8 |    4.41   4.45      12.70
+trsv           256 new   |    543.6 /   174.6 |     18.3 /    19.3 |     16.4 /    17.6 |    9.93   9.02      33.13
+trsv           512 same  |    797.2 /   212.5 |     66.9 /    66.9 |     64.0 /    64.0 |    3.32   3.18      12.46
+trsv           512 new   |    944.1 /   233.4 |     35.0 /    36.3 |     33.2 /    34.5 |    6.76   6.43      28.45
+trsv          1024 same  |   1393.9 /   245.0 |    320.8 /   320.5 |    401.3 /   400.5 |    0.61   0.76       3.47
+trsv          1024 new   |   1607.4 /   295.5 |    202.5 /   204.2 |    201.0 /   202.6 |    1.46   1.45       8.00
+trsv          2048 same  |   3006.4 /   340.5 |   3217.2 /  3216.3 |   3466.4 /  3465.6 |    0.10   0.11       0.87
+trsv          2048 new   |   2946.5 /   330.7 |    570.2 /   573.1 |    573.7 /   576.4 |    0.57   0.58       5.14
+trsv          4096 same  |   6485.1 /   468.7 |   2545.1 /  2544.9 |   2505.8 /  2506.0 |    0.19   0.18       2.59
+trsv          8192 same  |  15657.0 /   631.4 |   9655.3 /  9656.4 |   9729.0 /  9729.6 |    0.06   0.07       1.61
+syr             64 same  |    138.1 /    85.3 |     20.9 /    20.9 |     20.6 /    20.6 |    4.14   4.07       6.71
+syr             64 new   |    138.4 /    90.8 |     11.4 /    13.0 |     11.0 /    12.5 |    7.29   6.96      12.63
+syr            128 same  |    138.0 /    82.9 |     20.1 /    20.1 |     12.0 /    71.7 |    1.16   4.12      11.52
+syr            128 new   |    133.1 /    81.1 |     11.3 /    12.7 |     13.8 /   164.2 |    0.49   6.40       9.65
+syr            256 same  |    157.3 /    87.5 |     30.1 /    30.1 |     23.7 /   179.7 |    0.49   2.91       6.63
+syr            256 new   |    172.1 /    98.5 |     13.4 /    14.5 |     24.1 /   412.9 |    0.24   6.79       7.13
+syr            512 same  |    260.5 /   115.4 |     46.0 /    46.0 |     22.4 /   171.2 |    0.67   2.51      11.65
+syr            512 new   |    394.9 /   155.0 |     29.0 /    30.1 |     45.1 /   875.7 |    0.18   5.15       8.75
+syr           1024 same  |    588.5 /   166.9 |    139.0 /   139.0 |     45.2 /   354.7 |    0.47   1.20      13.02
+syr           1024 new   |    706.7 /   156.5 |    207.9 /   209.5 |    145.1 /  3089.1 |    0.05   0.75       4.87
+syr           2048 same  |   1555.4 /   214.4 |    866.3 /   866.4 |    850.0 /  6230.1 |    0.03   0.25       1.83
+syr           2048 new   |   1697.7 /   172.3 |    802.0 /   796.8 |    843.0 / 14467.2 |    0.01   0.22       2.01
+syr           4096 same  |   5261.4 /   237.3 |   4330.6 /  4330.8 |   3369.8 / 23088.8 |    0.01   0.05       1.56
+syr           8192 same  |  20843.5 /   280.9 |  17371.1 / 17373.1 |  12202.8 / 92967.4 |    0.00   0.02       1.71

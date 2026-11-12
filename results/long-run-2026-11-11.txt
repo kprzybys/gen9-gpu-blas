@@ -1,16 +1,16 @@
-# 2026-11-11T09:00:31+01:00 test dlugotrwaly, zasilacz AC=1
-## HGEMM asm N=2048, 4000 przebiegow (WAIT=sleep), slad co 400
-slad   400    757.9 GFLOPS
-slad   800    744.9 GFLOPS
-slad  1200    747.0 GFLOPS
-slad  1600    759.0 GFLOPS
-slad  2000    758.3 GFLOPS
-slad  2400    761.2 GFLOPS
-slad  2800    759.2 GFLOPS
-slad  3200    758.1 GFLOPS
-slad  3600    758.4 GFLOPS
-slad  4000    758.8 GFLOPS
-hgemm_16x32p   N=2048  ld=2048  LY=1  czas=   21.975 ms    781.8 GFLOPS  blad_wzgl: sr=1.28e-04 max=8.49e-04  | z pakowaniem: 24.735 ms, 694.6 GFLOPS
+# 2026-11-11T09:00:31+01:00 long-running test, power AC=1
+## HGEMM asm N=2048, 4000 runs (WAIT=sleep), trace every 400
+trace  400    757.9 GFLOPS
+trace  800    744.9 GFLOPS
+trace 1200    747.0 GFLOPS
+trace 1600    759.0 GFLOPS
+trace 2000    758.3 GFLOPS
+trace 2400    761.2 GFLOPS
+trace 2800    759.2 GFLOPS
+trace 3200    758.1 GFLOPS
+trace 3600    758.4 GFLOPS
+trace 4000    758.8 GFLOPS
+hgemm_16x32p   N=2048  ld=2048  LY=1  time=   21.975 ms    781.8 GFLOPS  rel_err: avg=1.28e-04 max=8.49e-04  | with packing: 24.735 ms, 694.6 GFLOPS
   t=   0 s  GPU   565 MHz  Render  32.0%  GPU   4.6 W  Package  19.6 W
   t=   5 s  GPU  1088 MHz  Render  98.0%  GPU  13.1 W  Package  19.2 W
   t=  10 s  GPU  1100 MHz  Render  99.6%  GPU  13.4 W  Package  18.4 W
@@ -61,15 +61,15 @@ hgemm_16x32p   N=2048  ld=2048  LY=1  czas=   21.975 ms    781.8 GFLOPS  blad_wz
   t= 235 s  GPU  1100 MHz  Render  99.5%  GPU  13.7 W  Package  18.7 W
   t= 240 s  GPU  1099 MHz  Render  99.5%  GPU  13.7 W  Package  19.5 W
 ## OpenBLAS f32 N=2048, 90 s
-slad   10.0 s    133.6 GFLOPS
-slad   20.0 s    132.1 GFLOPS
-slad   30.1 s    129.8 GFLOPS
-slad   40.2 s    137.9 GFLOPS
-slad   50.3 s    120.9 GFLOPS
-slad   60.3 s     94.1 GFLOPS
-slad   70.3 s    133.7 GFLOPS
-slad   80.4 s    132.6 GFLOPS
-openblas f32gemm N=2048  czas=  134.344 ms    127.9 GFLOPS  blad_wzgl: sr=7.16e-09 max=3.90e-08  (tryb ciagly)
+trace  10.0 s    133.6 GFLOPS
+trace  20.0 s    132.1 GFLOPS
+trace  30.1 s    129.8 GFLOPS
+trace  40.2 s    137.9 GFLOPS
+trace  50.3 s    120.9 GFLOPS
+trace  60.3 s     94.1 GFLOPS
+trace  70.3 s    133.7 GFLOPS
+trace  80.4 s    132.6 GFLOPS
+openblas f32gemm N=2048  time=  134.344 ms    127.9 GFLOPS  rel_err: avg=7.16e-09 max=3.90e-08  (continuous mode)
   t=   0 s  GPU   992 MHz  Render  92.0%  GPU   9.5 W  Package  24.9 W
   t=   5 s  GPU   838 MHz  Render  68.9%  GPU   6.5 W  Package  24.1 W
   t=  10 s  GPU   872 MHz  Render  68.7%  GPU   6.5 W  Package  24.2 W

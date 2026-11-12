@@ -1,28 +1,28 @@
-# 2026-11-11T03:53:49+01:00 mikrotesty asm (Gop/s = GFLOPS dla mad FP32; szczyt teoretyczny 422,4)
-bank_rozne_parzystosc  409.20 Gop/s  | src1=r70 (bank 0/1), src2=r73 (bank 1/0): różne banki w obu połówkach
-bank_ten_sam           272.24 Gop/s  | src1=r70, src2=r72: oba parzyste w dolnej połowie -> ten sam bank w obu połówkach
-bank_rozne_polowy      272.23 Gop/s  | src1=r70 (lo), src2=r100 (hi): banki 0/1 vs 2/3, brak konfliktu
-bank_hi_ten_sam        272.29 Gop/s  | src1=r100, src2=r102: oba w górnej połowie, parzyste -> konflikt
-bank_ten_sam_rejestr   405.05 Gop/s  | src1=src2=r70: ten sam rejestr (czy EU pomija drugi odczyt?)
-bcast_konflikt         326.00 Gop/s  | src1=r70 wektor, src2=r72.0 skalar rozgłaszany (ten sam bank) - wzorzec GEMM
-bcast_bez_konfliktu    406.88 Gop/s  | src1=r70 wektor, src2=r73.0 skalar rozgłaszany (inny bank)
-bcast_oba_skalar       328.26 Gop/s  | src1=r70.0, src2=r72.0: oba rozgłaszane (jak w szablonie kompilatora)
-src0_ten_sam_bank      409.18 Gop/s  | src0=r72 (ten sam bank co src2? nie: co src1 r70), src1=r70, src2=r101 - czy src0 ma znaczenie
-parz_71_100            402.98 Gop/s  | src1=r71 (nieparzysty, lo), src2=r100 (parzysty, hi): czy decyduje tylko parzystość
-parz_70_101            408.57 Gop/s  | src1=r70 (parzysty, lo), src2=r101 (nieparzysty, hi)
-parz_71_73             272.39 Gop/s  | src1=r71, src2=r73: oba nieparzyste, lo
-parz_70_78             271.67 Gop/s  | src1=r70, src2=r78: parzyste, odległość 8 rejestrów
-parz_70_75             408.39 Gop/s  | src1=r70, src2=r75: różna parzystość, odległość 5
-dst8                   407.31 Gop/s  | jak bank_rozne_parzystosc, wyniki rotują po 8 parach (domyślnie)
-dst4                   407.47 Gop/s  | wyniki rotują po 4 parach (bliżej WAW)
-dst2                   408.63 Gop/s  | wyniki rotują po 2 parach
-dst16_hi               406.44 Gop/s  | wyniki po 16 parach w r80-r111? nie: r84+, źródła r70/r73 + src0 r120
-m0_m16                 404.69 Gop/s  | pary M0/M16 jak w kodzie kompilatora (SIMD32), różne banki
-s0skal_v_b             407.66 Gop/s  | src0 skalar, src1 wektor r70, src2 skalar r73.0: jak kod kompilatora (1 wektor na instr.)
-s0skal_v_v             408.64 Gop/s  | src0 skalar, src1 wektor r70, src2 wektor r73: 2 wektory na instr.
-gemm_acc16             407.57 Gop/s  | GEMM: acc_i = acc_i + B(r70 wektor)*A(r73.k skalar), 16 akumulatorów (r84-r115), in-place
-gemm_acc8              407.80 Gop/s  | jak wyżej, 8 akumulatorów
-gemm_acc16_konfl       328.46 Gop/s  | GEMM z A w tym samym banku co B (r72.k)
-gemm_acc16_bvar        409.95 Gop/s  | GEMM: B zmienia się co 16 instrukcji (4 rejestry B na zmianę: r56,r60,r64,r68 parzyste), A r73.k
-kompilator_pelne       410.83 Gop/s  | dokładnie pętla kompilatora (8 łańcuchów, a/b skalary), ale bez {Compacted}
-kompilator_kompakt     410.60 Gop/s  | dokładnie pętla kompilatora z {Compacted}
+# 2026-11-11T03:53:49+01:00 asm microbenchmarks (Gop/s = GFLOPS for FP32 mad; theoretical peak 422.4)
+bank_different_parity  409.20 Gop/s  | src1=r70 (bank 0/1), src2=r73 (bank 1/0): different banks in both halves
+bank_same              272.24 Gop/s  | src1=r70, src2=r72: both even in the lower half -> same bank in both halves
+bank_different_halves  272.23 Gop/s  | src1=r70 (lo), src2=r100 (hi): banks 0/1 vs 2/3, no conflict
+bank_hi_same           272.29 Gop/s  | src1=r100, src2=r102: both in the upper half, even -> conflict
+bank_same_register     405.05 Gop/s  | src1=src2=r70: same register (does the EU skip the second read?)
+bcast_conflict         326.00 Gop/s  | src1=r70 vector, src2=r72.0 broadcast scalar (same bank) - GEMM pattern
+bcast_no_conflict      406.88 Gop/s  | src1=r70 vector, src2=r73.0 broadcast scalar (different bank)
+bcast_both_scalar      328.26 Gop/s  | src1=r70.0, src2=r72.0: both broadcast (as in the compiler template)
+src0_same_bank         409.18 Gop/s  | src0=r72 (same bank as src2? no: as src1 r70), src1=r70, src2=r101 - does src0 matter
+parity_71_100          402.98 Gop/s  | src1=r71 (odd, lo), src2=r100 (even, hi): does only parity decide
+parity_70_101          408.57 Gop/s  | src1=r70 (even, lo), src2=r101 (odd, hi)
+parity_71_73           272.39 Gop/s  | src1=r71, src2=r73: both odd, lo
+parity_70_78           271.67 Gop/s  | src1=r70, src2=r78: even, distance of 8 registers
+parity_70_75           408.39 Gop/s  | src1=r70, src2=r75: different parity, distance of 5
+dst8                   407.31 Gop/s  | like bank_different_parity, results rotate over 8 pairs (default)
+dst4                   407.47 Gop/s  | results rotate over 4 pairs (closer to WAW)
+dst2                   408.63 Gop/s  | results rotate over 2 pairs
+dst16_hi               406.44 Gop/s  | results over 16 pairs in r80-r111? no: r84+, sources r70/r73 + src0 r120
+m0_m16                 404.69 Gop/s  | M0/M16 pairs as in compiler code (SIMD32), different banks
+s0scalar_v_b           407.66 Gop/s  | src0 scalar, src1 vector r70, src2 scalar r73.0: like compiler code (1 vector per instr.)
+s0scalar_v_v           408.64 Gop/s  | src0 scalar, src1 vector r70, src2 vector r73: 2 vectors per instr.
+gemm_acc16             407.57 Gop/s  | GEMM: acc_i = acc_i + B(r70 vector)*A(r73.k scalar), 16 accumulators (r84-r115), in-place
+gemm_acc8              407.80 Gop/s  | as above, 8 accumulators
+gemm_acc16_conflict    328.46 Gop/s  | GEMM with A in the same bank as B (r72.k)
+gemm_acc16_bvar        409.95 Gop/s  | GEMM: B changes every 16 instructions (4 B registers alternating: r56,r60,r64,r68 even), A r73.k
+compiler_full          410.83 Gop/s  | exactly the compiler loop (8 chains, a/b scalars), but without {Compacted}
+compiler_compact       410.60 Gop/s  | exactly the compiler loop with {Compacted}

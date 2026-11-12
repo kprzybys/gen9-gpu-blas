@@ -1,4 +1,4 @@
-# 2026-11-11T03:57:26+01:00 przepustowosc odczytow blokowych (Gop/s = GB/s), global 16384, local 64, SIMD8
+# 2026-11-11T03:57:26+01:00 block read bandwidth (Gop/s = GB/s), global 16384, local 64, SIMD8
       64 KB  owb: 117.25 Gop/s   owb2: 156.38 Gop/s   media: 154.45 Gop/s
      128 KB  owb: 117.24 Gop/s   owb2: 158.88 Gop/s   media: 154.04 Gop/s
      256 KB  owb: 117.18 Gop/s   owb2: 158.52 Gop/s   media: 153.25 Gop/s

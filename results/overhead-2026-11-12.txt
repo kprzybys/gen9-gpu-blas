@@ -1,20 +1,20 @@
-Stały koszt wywołania libgen9blas (bez NEO, kcl), 2026-11-12, jądro 7.0.0-43. Mikrotest bench/overhead.c (axpy z C w pętli,
-te same tablice), KCL_PHASES=1: rozkład na fazy kcl (czas ściany i CPU wątku). Kod pomiaru faz zostaje w kcl.c (diagnostyka).
+Fixed call cost of libgen9blas (without NEO, kcl), 2026-11-12, Linux kernel 7.0.0-43. Microbenchmark bench/overhead.c (axpy from C in a loop,
+same arrays), KCL_PHASES=1: breakdown into kcl phases (wall time and thread CPU time). The phase measurement code stays in kcl.c (diagnostics).
 
-1. Zasilanie. Na baterii (AC = 0, EPP balance_power) CPU ~900 MHz: axpy n = 4096 80–96 µs ściany / 43–57 µs CPU;
-   execbuf 21–27 µs, GEM_WAIT 46–52 µs ściany / 11–13 µs CPU, budowa komend 7–9 µs, userptr 1,1–1,3 µs.
-   Goły i915 (experiments/no-neo/pierwszy: 3 obiekty, execbuf + GEM_WAIT): 57 µs / 22–28 µs CPU (2026-11-11: 36 / 7 -- inne warunki).
-   Na zasilaniu sieciowym (CPU 3,7 GHz) axpy n = 4096: 48 µs ściany / 14–17 µs CPU; fazy: execbuf 8 µs, GEM_WAIT 35 µs
-   ściany / 3,9 µs CPU, budowa komend 2,4 µs, userptr 0,7 µs. Nasza część (kcl + gen9blas) ~3–4 µs.
-2. Liczba obiektów w execbuf (hipoteza: koszt i915 na obiekt): stałe wszystkich 9 programów i pamięć prywatna dodawane
-   tylko przez jądra, które ich używają -> 6–7 obiektów zamiast ~15. Koszt execbuf prawie bez zmian (21–25 µs na
-   baterii) -- hipoteza odrzucona; zmiana zostaje (poprawna, mniej pracy i915).
-3. Duże wywołania (zasilanie sieciowe, CPU na wywołanie): n = 2^18 USM 29 µs / zwykła 61 µs; n = 2^20: 123 / 132;
-   n = 2^22: 128 / 144 -- rośnie execbuf (15 -> 57–69 µs) i CPU w GEM_WAIT (8 -> 40–46 µs), także dla USM.
-   Hipoteza: rdzeń w czasie długiego czekania zapada w głębokie C-stany (C6–C10, wyjście 85–890 µs) i wraca z zimną
-   pamięcią podręczną. Sprawdzenie bez roota: pętla nice 19 na bliźniaczym wątku rdzenia (rdzeń nie śpi): n = 2^20
-   execbuf 54 -> 28 µs, GEM_WAIT CPU 36 -> 17 µs, razem 112 -> 55 µs CPU. Potwierdzona w połowie; reszta skalowania
-   z rozmiarem nieznana (i915). Zmiana wymagałaby roota (/dev/cpu_dma_latency) i kosztowałaby energię -- nie robimy.
-   Wniosek: czas CPU zawyża tu koszt energetyczny (rdzeń przez większość czasu śpi głęboko).
-4. Nie do zmiany bez uprawnień: i915 kręci się aktywnie do 8 µs w GEM_WAIT (max_busywait_duration_ns = 8000); na
-   zasilaniu sieciowym cały GEM_WAIT to ~4 µs CPU -- zysk z reguły udev byłby mały, nie proponuję.
+1. Power. On battery (AC = 0, EPP balance_power) CPU ~900 MHz: axpy n = 4096 80–96 µs wall / 43–57 µs CPU;
+   execbuf 21–27 µs, GEM_WAIT 46–52 µs wall / 11–13 µs CPU, command building 7–9 µs, userptr 1.1–1.3 µs.
+   Bare i915 (experiments/no-neo/first: 3 objects, execbuf + GEM_WAIT): 57 µs / 22–28 µs CPU (2026-11-11: 36 / 7 -- different conditions).
+   On mains power (CPU 3.7 GHz) axpy n = 4096: 48 µs wall / 14–17 µs CPU; phases: execbuf 8 µs, GEM_WAIT 35 µs
+   wall / 3.9 µs CPU, command building 2.4 µs, userptr 0.7 µs. Our part (kcl + gen9blas) ~3–4 µs.
+2. Number of objects in execbuf (hypothesis: i915 cost per object): constants of all 9 programs and private memory added
+   only by the kernels that use them -> 6–7 objects instead of ~15. execbuf cost almost unchanged (21–25 µs on
+   battery) -- hypothesis rejected; the change stays (correct, less i915 work).
+3. Large calls (mains power, CPU per call): n = 2^18 USM 29 µs / plain 61 µs; n = 2^20: 123 / 132;
+   n = 2^22: 128 / 144 -- execbuf grows (15 -> 57–69 µs) and CPU in GEM_WAIT (8 -> 40–46 µs), also for USM.
+   Hypothesis: during a long wait the core drops into deep C-states (C6–C10, exit 85–890 µs) and comes back with a cold
+   cache. Check without root: a nice 19 loop on the core's sibling thread (core does not sleep): n = 2^20
+   execbuf 54 -> 28 µs, GEM_WAIT CPU 36 -> 17 µs, total 112 -> 55 µs CPU. Confirmed halfway; the rest of the scaling
+   with size unknown (i915). The change would require root (/dev/cpu_dma_latency) and would cost energy -- we do not do it.
+   Conclusion: CPU time overstates the energy cost here (the core sleeps deeply most of the time).
+4. Cannot be changed without privileges: i915 spins actively for up to 8 µs in GEM_WAIT (max_busywait_duration_ns = 8000); on
+   mains power the whole GEM_WAIT is ~4 µs CPU -- the gain from a udev rule would be small, I do not propose it.
