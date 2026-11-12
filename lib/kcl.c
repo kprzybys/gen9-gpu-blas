@@ -197,6 +197,10 @@ static int up_resolve(void) {
     }
     return 0;
 }
+void kcl_userptr_release(const void *ptr, size_t n) {
+    const uintptr_t p = (uintptr_t)ptr, s = p & ~4095ul, e = (p + n + 4095) & ~4095ul;
+    for (int i = 0; i < nup; i++) if (up[i].s == s && up[i].e == e) { up_remove(i); return; }
+}
 static cl_mem kcl_userptr_(const void *ptr, size_t n, int wr);
 cl_mem kcl_userptr(const void *ptr, size_t n, int wr) { PHASE_BEGIN; cl_mem m = kcl_userptr_(ptr, n, wr); PHASE_END(F_UP); return m; }
 static cl_mem kcl_userptr_(const void *ptr, size_t n, int wr) {

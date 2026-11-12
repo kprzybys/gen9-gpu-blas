@@ -1,0 +1,31 @@
+# Packed B kept on the GPU (gen9blas_pack_b / gemm_pb / packed_free), step 1a of docs/ggml-backend-design.md, 2026-11-13
+# lib/test_packed.py on the UHD 620, IOMMU off (intel_iommu=igfx_off), mains power. Ordinary NumPy memory (userptr).
+# Packing in launches of at most GEN9BLAS_PACK_BAND_MB (default 256 MB), one batch buffer per band (clFlush);
+# epilogue in row bands of the same size; userptr object of the original released after packing (kcl_userptr_release);
+# on a packing failure one retry with a copy through the CPU (force_copy).
+
+Default bands (256 MB):
+OK  S  512x1536x1536 transB                    rel err 1.76e-07 identical to gemm
+OK  S  512x256x1536 transB (K/V)               rel err 1.16e-07 identical to gemm
+OK  S  512x8960x1536 transB (gate/up)          rel err 2.30e-07 identical to gemm
+OK  S  512x1536x8960 transB (down)             rel err 1.73e-07 identical to gemm
+OK  S  33x100x2051 transB (padding)            rel err 7.14e-08 identical to gemm
+OK  S  37x1000x300 plain B (pb / w2)           rel err 1.27e-07 identical to gemm
+OK  S  64x1536x1536 alpha 0.5 beta -2 (epilogue) rel err 1.48e-07 identical to gemm
+OK  H  256x1024x1024 transB                    rel err 1.29e-03 identical to gemm
+OK  HS 256x1024x2048 transB                    rel err 9.51e-05 identical to gemm
+OK  D  64x512x512 transB                       rel err 2.17e-16 identical to gemm
+OK  S  reuse 1 (M=128), B zeroed after packing  rel err 1.50e-07
+OK  S  reuse 2 (M=512), B zeroed after packing  rel err 2.40e-07
+OK  S  reuse 3 (M=128 again), B zeroed after packing rel err 1.50e-07
+OK  S  head 512x151936x1536 (0.93 GB packed)       rel err 1.79e-07  pack 411 ms (2.27 GB/s), gemm_pb 908 ms (263 GFLOPS)
+errors: 0
+GEN9BLAS_PACK_BAND_MB=1 (hundreds of bands): all 14 OK, identical results; head pack 430 ms, gemm_pb 898 ms.
+make -C lib check (all 10 earlier suites + test_packed.py twice): exit 0. journalctl -k: no GPU reset.
+
+Notes:
+- "identical to gemm": gemm_pb uses the same packing and GEMM kernels, so results are bit-identical.
+- Head packing 0.93 GB in ~410 ms = 2.3 GB/s end to end (includes pinning 0.93 GB of userptr and 4 submissions);
+  the per-pass rate inside llama-bench was ~4 GB/s of packed output [MEAS, results/llama-cpp-blas-2026-11-12.txt].
+  Each 256 MB band is therefore ~65-110 ms, at or under the 100 ms launch policy; 128 MB would leave more margin [HYP].
+- gemm_pb of the head (239 GFLOP) took ~900 ms = 263-270 GFLOPS in launch bands (est. 300 GFLOPS -> 8 bands).

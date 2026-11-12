@@ -262,6 +262,7 @@ typedef struct { void *p; size_t n; } work_t;
 static int no_userptr = -1;
 #endif
 static work_t uA, uB, uC;
+static int force_copy;   // per call: copy through the CPU instead of userptr (gen9blas_pack_b retry after a userptr failure)
 static int ensure_work(work_t *u, size_t bytes) {
     if (u->n >= bytes) return 0;
     if (u->p) usm_free(ctx, u->p);
@@ -277,7 +278,7 @@ static int get_obj(const void *ptr, size_t bytes, work_t *u, int copy_in, int wr
 #ifndef GEN9BLAS_NEO
     if (no_userptr < 0) no_userptr = getenv("GEN9BLAS_NO_USERPTR") != NULL;   // comparisons: copy as before
     cl_mem m;
-    if (!no_userptr && (m = kcl_userptr(ptr, bytes, writes))) { *result = BM(m); *zc = 1; return 0; }
+    if (!no_userptr && !force_copy && (m = kcl_userptr(ptr, bytes, writes))) { *result = BM(m); *zc = 1; return 0; }
 #else
     (void)writes;
 #endif
@@ -493,6 +494,107 @@ static int epilogue_host(type_t *r, cl_mem Cp, int ldp, void *C, int M, int N, i
     ARGS(r->epi_tri, 4, alpha); ARGS(r->epi_tri, 5, beta); ARG(r->epi_tri, 6, uplo);
     size_t g[2] = { (size_t)N, (size_t)M };
     CHECK(clEnqueueNDRangeKernel(q, r->epi_tri, 2, NULL, g, NULL, 0, NULL, NULL));
+    return to_host(xC, zC, bC, C);
+}
+
+// ---------------- packed B kept between calls (constant weights; ggml backend, docs/ggml-backend-design.md) ----------------
+
+struct gen9blas_packed { int type, K, N, Np, Kp; cl_mem buf; };
+
+static size_t pack_band_bytes(void) {
+    static size_t v = 0;
+    if (!v) { const char *e = getenv("GEN9BLAS_PACK_BAND_MB"); v = (size_t)(e && atof(e) > 0 ? atof(e) : 256) << 20; }
+    return v;
+}
+
+// Packs op(B) into P->buf in bands of whole 32-column groups (n), each launch at most pack_band_bytes() of output.
+static int pack_b_bands(type_t *r, int tB, const void *B, int ldb, gen9blas_packed *P) {
+    size_t bB = (tB ? (size_t)(P->N - 1) * ldb + P->K : (size_t)(P->K - 1) * ldb + P->N) * r->es;
+    bf_t xB; int z;
+    if (get_obj(B, bB, &uB, 1, 0, &xB, &z)) return -1;
+    size_t g[3], o[3] = { 0, 0, 0 };
+    cl_kernel k = pack_kernel(r, 1, tB, P->Np, P->Kp, 1, g);
+    int d = tB ? 1 : 0, per = (!tB && k == r->pb_w2) ? 2 : 1;   // grid dimension of n; work-items per 2 columns (w2)
+    cl_long zero = 0;
+    ARGB(k, 0, xB); ARG(k, 1, P->buf); ARG(k, 2, P->K); ARG(k, 3, P->N); ARG(k, 4, ldb); ARG(k, 5, P->Kp); ARG(k, 6, zero); ARG(k, 7, P->Np);
+    size_t nb = pack_band_bytes() / ((size_t)P->Kp * r->es) / 32 * 32;
+    if (nb < 32) nb = 32;
+    for (size_t n0 = 0; n0 < (size_t)P->Np; n0 += nb) {
+        size_t n = (size_t)P->Np - n0 < nb ? (size_t)P->Np - n0 : nb;
+        o[d] = n0 / per; g[d] = n / per;
+        CHECK(clEnqueueNDRangeKernel(q, k, 3, o, g, NULL, 0, NULL, NULL));
+        CHECK(clFlush(q));   // one band per submission (kcl: each flush is one batch buffer)
+    }
+    if (wait_gpu()) return -1;
+#ifndef GEN9BLAS_NEO
+    if (z) kcl_userptr_release(B, bB);   // the original is not needed on the GPU any more: unpin it
+#endif
+    return 0;
+}
+
+gen9blas_packed *gen9blas_pack_b(int type, int tB, int K, int N, const void *B, int ldb) {
+    NEW_OPERATION();
+    if (type < 0 || type > 3 || !types[type].ready) { snprintf(errbuf, sizeof errbuf, "type %d unavailable", type); return NULL; }
+    if (K <= 0 || N <= 0) { snprintf(errbuf, sizeof errbuf, "pack_b: K = %d, N = %d", K, N); return NULL; }
+    type_t *r = &types[type];
+    gen9blas_packed *P = calloc(1, sizeof *P);
+    if (!P) return NULL;
+    P->type = type; P->K = K; P->N = N;
+    P->Np = (N + r->tn - 1) / r->tn * r->tn; P->Kp = (K + r->km - 1) / r->km * r->km;
+    cl_int err;
+    P->buf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, (size_t)P->Np * P->Kp * r->es + 4096, NULL, &err);
+    if (err != CL_SUCCESS) { snprintf(errbuf, sizeof errbuf, "pack_b: clCreateBuffer = %d", err); free(P); return NULL; }
+    if (pack_b_bands(r, tB, B, ldb, P)) {   // userptr failures show up late (argument / submission): retry with a copy
+        force_copy = 1; NEW_OPERATION();
+        int rc = pack_b_bands(r, tB, B, ldb, P);
+        force_copy = 0;
+        if (rc) { clReleaseMemObject(P->buf); free(P); return NULL; }
+    }
+    return P;
+}
+
+void gen9blas_packed_free(gen9blas_packed *P) {
+    if (!P) return;
+    wait_gpu();
+    clReleaseMemObject(P->buf); free(P);
+}
+
+int gen9blas_gemm_pb(int type, int tA, int M, double alpha, const void *A, int lda, const gen9blas_packed *P,
+                     double beta, void *C, int ldc) {
+    NEW_OPERATION();
+    if (!P || P->type != type || !types[type].ready) FAIL("gemm_pb: packed B of another type or type %d unavailable", type);
+    if (M <= 0) return 0;
+    type_t *r = &types[type];
+    int es = r->es, N = P->N, K = P->K, Np = P->Np, Kp = P->Kp, Mp = (M + 15) / 16 * 16;
+    size_t bA = (tA ? (size_t)(K - 1) * lda + M : (size_t)(M - 1) * lda + K) * es, bC = ((size_t)(M - 1) * ldc + N) * es;
+    bf_t xA, xC; int zA, zC;
+    if (get_obj(A, bA, &uA, 1, 0, &xA, &zA) || get_obj(C, bC, &uC, beta != 0.0, 1, &xC, &zC)) return -1;
+    last_zc = zA | 2 | zC << 2;
+    if (ensure_buf(&dAp, &sAp, (size_t)Mp * Kp * es + 4096) || ensure_buf(&dCp, &sCp, (size_t)Mp * Np * es)) return -1;
+    size_t ga[3]; cl_long zero = 0;
+    cl_kernel ka = pack_kernel(r, 0, tA, Mp, Kp, 1, ga);
+    ARGB(ka, 0, xA); ARG(ka, 1, dAp); ARG(ka, 2, M); ARG(ka, 3, K); ARG(ka, 4, lda); ARG(ka, 5, Kp); ARG(ka, 6, zero); ARG(ka, 7, Mp);
+    CHECK(clEnqueueNDRangeKernel(q, ka, 3, NULL, ga, NULL, 0, NULL, NULL));
+    int split = est_ms(r, Mp, Np, Kp) > max_launch_ms();
+    int direct = !split && alpha == 1.0 && beta == 0.0 && M == Mp && N == Np;
+    if (!split) {
+        bf_t target = direct ? xC : BM(dCp); int ldt = direct ? ldc : Np;
+        ARG(r->main, 0, dAp); ARG(r->main, 1, P->buf); ARGB(r->main, 2, target); ARG(r->main, 3, Mp); ARG(r->main, 4, Np);
+        ARG(r->main, 5, ldt); ARG(r->main, 6, Kp); ARG(r->main, 7, Kp);
+        size_t gm = (size_t)(Np / r->tn) * (Mp / 16) * 16, lm = 16;
+        CHECK(clEnqueueNDRangeKernel(q, r->main, 1, NULL, &gm, &lm, 0, NULL, NULL));
+    } else if (launch(r, dAp, 0, P->buf, 0, dCp, 0, Mp, Np, Np, Kp, Kp, 0)) return -1;
+    if (!direct) {   // epilogue in row bands of at most pack_band_bytes() of C each
+        cl_long lC = 0;
+        ARG(r->epi, 0, dCp); ARG(r->epi, 1, Np); ARG(r->epi, 2, Mp); ARGB(r->epi, 3, xC); ARG(r->epi, 4, ldc); ARG(r->epi, 5, lC);
+        ARGS(r->epi, 6, alpha); ARGS(r->epi, 7, beta);
+        size_t mb = pack_band_bytes() / ((size_t)N * es * 2);
+        if (mb < 1) mb = 1;
+        for (size_t i0 = 0; i0 < (size_t)M; i0 += mb) {
+            size_t o[3] = { 0, i0, 0 }, ge[3] = { (size_t)N, (size_t)M - i0 < mb ? (size_t)M - i0 : mb, 1 };
+            CHECK(clEnqueueNDRangeKernel(q, r->epi, 3, o, ge, NULL, 0, NULL, NULL));
+        }
+    }
     return to_host(xC, zC, bC, C);
 }
 

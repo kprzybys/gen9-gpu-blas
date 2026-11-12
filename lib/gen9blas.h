@@ -33,6 +33,15 @@ int gen9blas_gemm(int type, int transA, int transB, int M, int N, int K, double 
 int gen9blas_gemm_batched(int type, int transA, int transB, int M, int N, int K, double alpha,
                      const void *A, int lda, long sA, const void *B, int ldb, long sB,
                      double beta, void *C, int ldc, long sC, int count);
+// Packed B kept on the GPU (e.g. constant weights): pack op(B) (K×N; transB: B stored as N×K) once, multiply many times.
+// Packing runs in launches of at most GEN9BLAS_PACK_BAND_MB of packed data (default 256; ~4 GB/s, so ~64 ms each).
+// gemm_pb: C = alpha·op(A)·Bp + beta·C with op(A) M×K. Same types as gen9blas_gemm whose A and B element types are
+// equal (GEN9BLAS_S, GEN9BLAS_H, GEN9BLAS_HS, GEN9BLAS_D). NULL / -1 on error (gen9blas_error()).
+typedef struct gen9blas_packed gen9blas_packed;
+gen9blas_packed *gen9blas_pack_b(int type, int transB, int K, int N, const void *B, int ldb);
+int gen9blas_gemm_pb(int type, int transA, int M, double alpha, const void *A, int lda, const gen9blas_packed *Bp,
+                     double beta, void *C, int ldc);
+void gen9blas_packed_free(gen9blas_packed *Bp);
 // SYMM: C = alpha·A·B + beta·C (left, A: M×M symmetric) or alpha·B·A + beta·C (right, A: N×N). The uplo triangle is used.
 int gen9blas_symm(int type, int side, int uplo, int M, int N, double alpha, const void *A, int lda,
              const void *B, int ldb, double beta, void *C, int ldc);

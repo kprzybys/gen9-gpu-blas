@@ -56,5 +56,8 @@ cl_int kcl_program(const char *file, const char *options, cl_program *out);
 cl_mem kcl_userptr(const void *ptr, size_t n, int wr);
 // Start of an operation (BLAS function): regions of one operation that share pages go through one userptr object.
 void kcl_new_operation(void);
+// Drop the cached userptr object for exactly the page range of [ptr, ptr+n), if there is one: the pages are unpinned.
+// For memory used once (e.g. weights packed into a GPU buffer). Safe while the GPU still uses it (i915 holds a reference).
+void kcl_userptr_release(const void *ptr, size_t n);
 // Submit the current batch buffer and wait for all work to finish (sleeps in the Linux kernel, GEM_WAIT).
 cl_int kcl_wait(void);
