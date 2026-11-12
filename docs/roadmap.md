@@ -108,6 +108,15 @@ to OpenBLAS at n = 1024 and in FP64. GEMM kernel against oneDNN 3.6: +7-14% FP32
 14. Boot parameter `intel_iommu=igfx_off`: page pinning without the IOMMU might lower the userptr cost; its effect on GPU
     memory bandwidth is not measured.
 
+### Preemption in kcl
+
+kcl does not set up mid-thread preemption (system routine / SIP kernel and context save area, as NEO does). Long GEMM launches
+are therefore split into bands below 100 ms ([api.md](api.md), "Long launches"), and only GEMM kernels are covered: any other
+kernel that one day runs for hundreds of ms would need the same treatment. Setting up mid-thread preemption would remove the
+limit and the extra launches; it also needs a check of what NEO 24.35 actually enables on Gen9 (the reason NEO survives the same
+DGEMM is a hypothesis so far). Another open item: running on other Gen9 parts (Skylake, Kaby Lake, Coffee Lake; `ocloc -device
+skl|kbl|cfl` instead of `whl`), not tried yet.
+
 ### Model gaps
 
 The numeric prediction before code, then one variant and a measurement, is the working method ([performance-model.md](performance-model.md)).

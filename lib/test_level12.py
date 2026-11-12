@@ -1,6 +1,6 @@
 """Level 1-2 BLAS test in libgen9blas against NumPy (float64).
 
-Uruchom: python3 lib/test_level12.py
+Run: python3 lib/test_level12.py
 Stage B: SYMV, TRMV, TRSV (relative error of the solution to max|x|: 1e-5 / 2e-3), SYR, SYR2.
 Criteria: error relative to the formula scale (e.g. Σ|a·x| + |y| for axpy, |A|·|x| for gemv): float32 ≤ 1e-6, float16 ≤ 2e-3
 (rounding of the result to FP16, scale at least the smallest normal FP16 number; computed in FP32). Reductions (FP64 on the GPU): ≤ 1e-6 (float32), ≤ 1e-6 relative to

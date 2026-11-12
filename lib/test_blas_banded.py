@@ -1,6 +1,6 @@
 """Differential test of the banded and packed BLAS functions in libgen9blas_blas.so (GPU forced) against OpenBLAS.
 
-Uruchom: python3 lib/test_blas_banded.py
+Run: python3 lib/test_blas_banded.py
 The same data passed through CBLAS (RowMajor, ColMajor) and Fortran to libgen9blas_blas.so and directly to libopenblas.so.0;
 criterion: difference / scale ≤ 1e-5 (TBSV/TPSV solutions: relative ≤ 1e-4). Also checks in the log that the functions went
 to the GPU. The formats follow the OpenBLAS definition (random data in the whole band array / packed vector).

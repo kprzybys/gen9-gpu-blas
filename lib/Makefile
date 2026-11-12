@@ -28,6 +28,8 @@ check: libgen9blas.so libgen9blas_blas.so
 	python3 test_blas.py
 	python3 test_blas_d.py
 	python3 test_blas_banded.py
+	GEN9BLAS_MAX_LAUNCH_MS=0.5 python3 test_level3.py
+	python3 test_long_launch.py
 
 clean:
 	rm -f libgen9blas.so libgen9blas_neo.so libgen9blas_blas.so libgen9blas_blas_neo.so kernels.c

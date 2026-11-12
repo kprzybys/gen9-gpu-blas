@@ -122,9 +122,14 @@ MI_BATCH_BUFFER_END
 **Event 2026-11-11:** ggml `test-backend-ops` (Vulkan, MUL_MAT n = 4096) -- "Resetting rcs0 for preemption time out",
 "context reset due to GPU hang" (`journalctl -k`). This is why `results/compare-ggml-vulkan-2026-11-11.txt` has no n = 4096
 result. Consequence: a single work group (the unit of GPGPU preemption) must last much less than 640 ms [HYP: on Gen9
-i915 preempts GPGPU at group boundaries; not confirmed]. The gen9blas kernels stayed within it on 2026-11-11 (DGEMM 4096: 2.4 s in total),
-but on 2026-11-12 DGEMM n = 3072 and 4096 reset the GPU with exactly this message (n = 2048, 0.3 s, works; not yet diagnosed,
-see `results/numpy-preload-2026-11-12.txt`).
+i915 preempts GPGPU at group boundaries; not confirmed]. On 2026-11-11 a single 2.4 s DGEMM 4096 launch
+through kcl happened to pass; on 2026-11-12 DGEMM n = 3072 and 4096 and SGEMM n = 8192 were reset with exactly this
+message whenever the desktop used the GPU at the same time [MEAS]. Worse, GEM_WAIT still succeeded after the reset, so the
+call returned rows of zeros without an error. NEO computes the same DGEMM in one launch without a reset [MEAS], presumably
+because it enables mid-thread preemption (SIP kernel and context save area), which kcl does not set up [HYP]. Fix in
+gen9blas: long GEMM launches are split into row bands below `GEN9BLAS_MAX_LAUNCH_MS` (100 ms), and kcl compares the context's
+reset statistics (`DRM_IOCTL_I915_GET_RESET_STATS`, batch_active + batch_pending) after every wait and reports a change as
+an error ([api.md](api.md), "Long launches"; `lib/test_long_launch.py`).
 
 ## 6b. Diagnostics
 

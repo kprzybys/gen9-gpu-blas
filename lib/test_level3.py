@@ -1,6 +1,6 @@
 """Level 3 BLAS and batched GEMM test in libgen9blas against NumPy (float64).
 
-Uruchom: python3 lib/test_level3.py
+Run: python3 lib/test_level3.py
 Error e = |result − ref| / scale, scale = |alpha|·(|A|·|B|) (+ |beta·C|) for the given formula. Criteria (mean / max):
   float16 (hgemm, accurate): ≤ 4.9e-4 / ≤ 5e-3;  float32: ≤ 1e-6 / ≤ 1e-5;  float64: ≤ 1e-14 / ≤ 1e-13.
 TRSM: relative error of the solution max|X − X_ref| / max|X_ref| ≤ 1e-4 (float32), 1e-12 (float64); A well conditioned.

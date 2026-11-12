@@ -318,6 +318,10 @@ static cl_kernel pack_kernel(type_t *r, int roleB, int trans, size_t Rp, size_t 
     g[0] = Rp; g[1] = Kp; return r->pb;
 }
 
+static double max_launch_ms(void);
+static double est_ms(type_t *r, double M, double N, double K);
+static int launch(type_t *r, cl_mem Ap, size_t oA, cl_mem Bp, size_t oB, cl_mem Cp, size_t oC,
+                   int M, int N, int ldc, int K, int Kfull, int measure);
 static int gemm_skinny(int type, int tA, int tB, int M, int N, int K, double alpha, const void *A, int lda,
                       const void *B, int ldb, double beta, void *C, int ldc);
 static int skinny_threshold(int type);
@@ -352,26 +356,35 @@ int gen9blas_gemm_batched(int type, int tA, int tB, int M, int N, int K, double 
     ARGB(kb, 0, xB); ARG(kb, 1, dBp); ARG(kb, 2, K); ARG(kb, 3, N); ARG(kb, 4, ldb); ARG(kb, 5, Kp); ARG(kb, 6, lB); ARG(kb, 7, Np);
     CHECK(clEnqueueNDRangeKernel(q, kb, 3, NULL, gb, NULL, 0, NULL, &evp[1]));
     // Direct write (no Cp and no epilogue): alpha = 1, beta = 0, M and N multiples of the tile, batch contiguous in C.
-    int direct = alpha == 1.0 && beta == 0.0 && M == Mp && N == Np && (count == 1 || sC == (long)M * ldc);
+    double t_one = est_ms(r, Mp, Np, Kp);
+    int split = t_one * count > max_launch_ms();   // too long for one launch: bands (launch()) per matrix, epilogue
+    int direct = !split && alpha == 1.0 && beta == 0.0 && M == Mp && N == Np && (count == 1 || sC == (long)M * ldc);
     bf_t target = direct ? xC : BM(dCp); int ldtarget = direct ? ldc : Np;
     ARG(r->main, 0, dAp); ARG(r->main, 1, dBp); ARGB(r->main, 2, target); ARG(r->main, 3, Mp); ARG(r->main, 4, Np);
     ARG(r->main, 5, ldtarget); ARG(r->main, 6, Kp); ARG(r->main, 7, Kp);
     size_t gm = (size_t)count * (Np / r->tn) * (Mp / 16) * 16, lm = 16;
-    cl_event ev;
-    CHECK(clEnqueueNDRangeKernel(q, r->main, 1, NULL, &gm, &lm, 0, NULL, &ev));
+    cl_event ev = NULL;
+    if (!split) CHECK(clEnqueueNDRangeKernel(q, r->main, 1, NULL, &gm, &lm, 0, NULL, &ev));
+    else {
+        nev = 0;
+        for (int b = 0; b < count; b++)
+            if (launch(r, dAp, (size_t)b * Mp * Kp * es, dBp, (size_t)b * Np * Kp * es, dCp, (size_t)b * Mp * Np * es,
+                       Mp, Np, Np, Kp, Kp, 1)) return -1;
+    }
     ARG(r->epi, 0, dCp); ARG(r->epi, 1, Np); ARG(r->epi, 2, Mp); ARGB(r->epi, 3, xC); ARG(r->epi, 4, ldc); ARG(r->epi, 5, lC);
     ARGS(r->epi, 6, alpha); ARGS(r->epi, 7, beta);
     size_t ge[3] = { (size_t)N, (size_t)M, (size_t)count };
     if (direct) CHECK(clEnqueueMarkerWithWaitList(q, 0, NULL, &evp[2]));
     else CHECK(clEnqueueNDRangeKernel(q, r->epi, 3, NULL, ge, NULL, 0, NULL, &evp[2]));
     if (to_host(xC, zC, bC, C)) return -1;
-    if (profile) {
+    if (split) { double tz = event_times(); last_ms = tz >= 0 ? tz : (now_s() - t_start) * 1e3; }
+    else if (profile) {
         cl_ulong t0, t1;
         clGetEventProfilingInfo(ev, CL_PROFILING_COMMAND_START, sizeof t0, &t0, NULL);
         clGetEventProfilingInfo(ev, CL_PROFILING_COMMAND_END, sizeof t1, &t1, NULL);
         last_ms = (t1 - t0) * 1e-6;
     } else last_ms = (now_s() - t_start) * 1e3;
-    clReleaseEvent(ev);
+    if (ev) clReleaseEvent(ev);
     if (getenv("GEN9BLAS_PROFILE")) {
         double tp[3];
         for (int e = 0; e < 3; e++) { cl_ulong a0, a1; clGetEventProfilingInfo(evp[e], CL_PROFILING_COMMAND_START, 8, &a0, NULL);
@@ -426,8 +439,22 @@ static int epilogue_dev(type_t *r, cl_mem Cp, int ldp, cl_mem Cd, int ldc, int M
     return 0;
 }
 
+// Longest planned GEMM kernel launch. kcl does not set up mid-thread preemption, so a launch that runs longer than the
+// engine's preempt_timeout_ms (640 ms by default) while another context (e.g. the desktop) waits for the GPU gets the
+// engine reset and its results lost. Long launches are split into row bands, each estimated below this time from a
+// conservative throughput per type. GEN9BLAS_MAX_LAUNCH_MS overrides it (default 100).
+static double max_launch_ms(void) {
+    static double v = 0;
+    if (v <= 0) { const char *e = getenv("GEN9BLAS_MAX_LAUNCH_MS"); v = e && atof(e) > 0 ? atof(e) : 100; }
+    return v;
+}
+static double est_ms(type_t *r, double M, double N, double K) {   // conservative GFLOPS of the main kernels
+    double gf = r == &types[GEN9BLAS_D] ? 45 : r == &types[GEN9BLAS_S] ? 300 : r == &types[GEN9BLAS_HS] ? 500 : 600;
+    return 2 * M * N * K / (gf * 1e6);
+}
+
 // GEMM kernel on a chunk: sub-buffers with offsets (bytes; aligned to 128 B). measure: event goes to evs[].
-static int launch(type_t *r, cl_mem Ap, size_t oA, cl_mem Bp, size_t oB, cl_mem Cp, size_t oC,
+static int launch1(type_t *r, cl_mem Ap, size_t oA, cl_mem Bp, size_t oB, cl_mem Cp, size_t oC,
                    int M, int N, int ldc, int K, int Kfull, int measure) {
     cl_int err; cl_mem sub[3] = { Ap, Bp, Cp }; size_t off[3] = { oA, oB, oC }; int sub_made[3] = { 0, 0, 0 };
     for (int i = 0; i < 3; i++) if (off[i]) {
@@ -441,6 +468,20 @@ static int launch(type_t *r, cl_mem Ap, size_t oA, cl_mem Bp, size_t oB, cl_mem 
     CHECK(clEnqueueNDRangeKernel(q, r->main, 1, NULL, &gm, &lm, 0, NULL, &ev));
     if (measure && nev < (int)(sizeof evs / sizeof evs[0])) evs[nev++] = ev; else clReleaseEvent(ev);
     for (int i = 0; i < 3; i++) if (sub_made[i]) clReleaseMemObject(sub[i]);
+    return 0;
+}
+// As launch1, split into bands of rows (multiples of 16; packed A: row i0 at i0·Kfull, C: row i0 at i0·ldc) so that each
+// launch stays below max_launch_ms().
+static int launch(type_t *r, cl_mem Ap, size_t oA, cl_mem Bp, size_t oB, cl_mem Cp, size_t oC,
+                   int M, int N, int ldc, int K, int Kfull, int measure) {
+    int parts = (int)(est_ms(r, M, N, K) / max_launch_ms()) + 1;
+    int mb = ((M + parts - 1) / parts + 15) / 16 * 16;
+    if (mb >= M) return launch1(r, Ap, oA, Bp, oB, Cp, oC, M, N, ldc, K, Kfull, measure);
+    for (int i0 = 0; i0 < M; i0 += mb) {
+        int b = M - i0 < mb ? M - i0 : mb;
+        if (launch1(r, Ap, oA + (size_t)i0 * Kfull * r->es, Bp, oB, Cp, oC + (size_t)i0 * ldc * r->es, b, N, ldc, K, Kfull, measure))
+            return -1;
+    }
     return 0;
 }
 

@@ -228,6 +228,15 @@ static slot_t S[KSLOT];
 static int cur = -1;                   // slot of the buffer being built (-1: none)
 static uint64_t S_cur_seq(void) { return S[cur].seq; }
 static uint64_t seq_next = 1, seq_sent = 0, seq_done = 0;
+// GPU resets that hit our context (batch_active + batch_pending from I915_GET_RESET_STATS). After a reset (e.g. a kernel
+// running longer than the engine's preempt_timeout_ms while another context waits) GEM_WAIT still succeeds, but the work
+// was cut off: the results are wrong. The count is compared after every wait and a change is reported as an error.
+static uint32_t resets_seen;
+static uint32_t reset_count(void) {
+    struct drm_i915_reset_stats rs = { .ctx_id = ctx_id };
+    if (ioctl(fd, DRM_IOCTL_I915_GET_RESET_STATS, &rs)) return resets_seen;
+    return rs.batch_active + rs.batch_pending;
+}
 static uint32_t *p, *idl, *lri, o_ind, o_ss, nlaunch; static int slm_in_batch;
 static kbo *bo_list[MAXBO]; static int nbo_list;
 static int l3_always_slm = 0;   // KCL_L3=slm: always L3 with SLM (like NEO on KBL/CFL); measured: no difference, off by default
@@ -246,6 +255,12 @@ static int wait_slot(int s) {
     while (ioctl(fd, DRM_IOCTL_I915_GEM_WAIT, &w)) { if (errno != EINTR) return -1; }
     PHASE_END(F_WAIT);
     if (S[s].seq > seq_done) seq_done = S[s].seq;   // in-order queue: earlier ones are done too
+    uint32_t rc = reset_count();
+    if (rc != resets_seen) {
+        resets_seen = rc;
+        fprintf(stderr, "kcl: GPU reset during our work (results lost; a kernel too long for preemption?)\n");
+        return -1;
+    }
     return 0;
 }
 
@@ -359,6 +374,7 @@ static int init(void) {
     struct drm_i915_gem_context_create cc = { 0 };
     if (ioctl(fd, DRM_IOCTL_I915_GEM_CONTEXT_CREATE, &cc)) return -1;
     ctx_id = cc.ctx_id;
+    resets_seen = reset_count();
     kprofile_kernels = getenv("KCL_PROFILE_KERNELS") != NULL;
     kprofile = getenv("GEN9BLAS_PROFILE") != NULL || kprofile_kernels;
     const char *um = getenv("KCL_USERPTR_MB");

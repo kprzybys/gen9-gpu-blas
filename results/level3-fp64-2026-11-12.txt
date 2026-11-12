@@ -1,4 +1,6 @@
 # Level 3 FP64 at n = 2048, gen9blas vs OpenBLAS DGEMM on the CPU, 2026-11-12
+# Note added later on 2026-11-12: fixed -- long GEMM launches are now split into bands and a GPU reset is reported as an error
+#   (docs/api.md, "Long launches"; lib/test_long_launch.py: DGEMM n = 4096 correct, 53.7 GFLOPS whole call).
 # Command: for round in 1 2: bench/compare/l3 gen9blas <op> d 2048 (gemm symm syrk syr2k trmm trsm), then bench/compare/l3 openblas gemm d 2048    (build: make -C bench/compare l3)
 # Conditions: mains power (AC=1), 7.0.0-43-generic, gt_max_freq 1100 MHz, CPU governor powersave (EPP balance_performance); gpu mode = USM memory, best of 5 calls; OpenBLAS with its default 8 threads. [MEAS]
 # n = 4096 is not measured for FP64: DGEMM 4096 resets the GPU (i915 preemption timeout, see results/numpy-preload-2026-11-12.txt).

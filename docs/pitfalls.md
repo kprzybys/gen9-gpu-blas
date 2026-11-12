@@ -210,8 +210,16 @@ second to seconds, and a context that hangs repeatedly is banned for the rest of
 preemption timeout of 640 ms (`/sys/class/drm/card*/engine/rcs0/preempt_timeout_ms`) applies when another context
 wants the GPU: a single work-group must be far shorter than that [HYP: Gen9 preempts GPGPU at work-group
 boundaries]. Observed: a Vulkan MUL_MAT n = 4096 test of another library triggered "Resetting rcs0 for preemption
-time out". Diagnostics: `journalctl -k`, `/sys/class/drm/card*/error` (decode with `intel_error_decode`; reading
+time out", and so did single gen9blas GEMM launches of 1-3 s through kcl (see the next entry). Diagnostics: `journalctl -k`, `/sys/class/drm/card*/error` (decode with `intel_error_decode`; reading
 the file clears it, so save the output), engine registers read as 0 unless the GPU is awake (RC6).
+
+**A reset GPU job looks successful: silent wrong results.**
+Symptom: a large GEMM through kcl (DGEMM n = 4096, SGEMM n = 8192; one launch of 1-3 s) returns quickly with an impossible
+GFLOPS figure; the first rows of C are right, later rows are zero; `journalctl -k` shows "Resetting rcs0 for preemption time
+out". Cause: kcl has no mid-thread preemption, the desktop wanted the GPU, i915 reset the engine after 640 ms, and
+`DRM_IOCTL_I915_GEM_WAIT` still returned success [MEAS]. What to do: keep every launch well below the preemption timeout
+(gen9blas splits GEMM launches, `GEN9BLAS_MAX_LAUNCH_MS`) and check `DRM_IOCTL_I915_GET_RESET_STATS` after waiting
+(lib/kcl.c does both). A measurement that passed once proves nothing: it depends on what else used the GPU at that moment.
 
 **SLM size encoding in `INTERFACE_DESCRIPTOR_DATA`.**
 On Gen9.5 it is log2(pow2(max(slm, 1 KB))) - 9 (1 KB = 1 ... 64 KB = 7). This differs from Gen8 (Mesa's `gen80.xml`

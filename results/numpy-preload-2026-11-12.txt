@@ -1,4 +1,6 @@
 # NumPy / SciPy on the CPU (OpenBLAS) vs LD_PRELOAD=lib/libgen9blas_blas.so, 2026-11-12
+# Note added later on 2026-11-12: fixed -- long GEMM launches are now split into bands and a GPU reset is reported as an error
+#   (docs/api.md, "Long launches"; lib/test_long_launch.py: DGEMM n = 4096 correct, 53.7 GFLOPS whole call).
 # Command: python3 bench/numpy_preload.py 4096 3     (check of the routing: python3 bench/numpy_preload.py check 4096)
 # Conditions: mains power (AC=1 before and after), 7.0.0-43-generic, UHD 620 gt_max_freq 1100 MHz, CPU governor powersave (intel_pstate active, EPP balance_performance), NumPy 1.26.4, SciPy 1.11.4.
 # Method: one child process per mode and round, modes alternating, 3 rounds; per case best of 5 calls after one warm-up call; CPU % = process CPU time (all threads) / wall time.

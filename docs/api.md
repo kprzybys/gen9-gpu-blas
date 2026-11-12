@@ -158,8 +158,8 @@ Z), `python3 lib/test_blas_d.py` (the same for D) and `python3 lib/test_blas_ban
 against OpenBLAS on three inputs).
 
 NumPy 1.26 / SciPy 1.11 (Ubuntu), ordinary NumPy arrays, best of 5 calls, median of 3 rounds; CPU = % of one core. float32 at
-n = 4096, float64 at n = 2048 (a DGEMM of n = 4096 is one 2.4 s dispatch, which exceeds the i915 preemption timeout of 640 ms
-and resets the GPU on the test machine; the BLAS layer then runs that call on the CPU). OpenBLAS runs with its default 8
+n = 4096, float64 at n = 2048 (measured before long launches were split, when a single 2.4 s DGEMM launch of n = 4096 was reset by
+i915; see "Long launches" below). OpenBLAS runs with its default 8
 threads, the preload column with `OPENBLAS_NUM_THREADS=1`:
 
 | | OpenBLAS | libgen9blas_blas |
@@ -201,7 +201,7 @@ Two runs, the range is given; `results/level3-whole-call-2026-11-12.txt` (OpenBL
 FP64 (arrays float64; main kernel `dgemm_v` in OpenCL C, the rest derived from `sgemm.cl` by `lib/gen_dgemm.py`), n = 2048:
 DGEMM 56, DSYMM 55, DSYRK / DSYR2K / DTRMM / DTRSM 42-44 GFLOPS, CPU < 1%; OpenBLAS DGEMM on the CPU reaches 81 GFLOPS at
 745% CPU (`results/level3-fp64-2026-11-12.txt`). Peak FP64 of the GPU (FMA loop) is 90-94 GFLOPS
-(`results/arith-throughput-latency-2026-11-11.txt`). DGEMM at n = 4096 currently fails with a GPU reset (see above).
+(`results/arith-throughput-latency-2026-11-11.txt`). DGEMM n = 4096 as one call: 53.7 GFLOPS whole call [MEAS, 2026-11-12, `lib/test_long_launch.py` size].
 
 Levels 1-2 (`python3 bench/l12_gen9blas.py float32|float16`; vectors 2^24, matrices 8192²; GB/s and CPU, `gen9blas.empty` arrays):
 
@@ -237,6 +237,21 @@ CPU is the library call through ctypes and ~11 µs / ~10 µs the Python wrapper 
 `results/call-overhead-python-2026-11-12.txt`); from C, our part is ~3-4 µs and the rest is i915 and CPU C-states
 (`results/overhead-2026-11-12.txt`).
 
+## Long launches
+
+`kcl` does not set up mid-thread preemption. When a kernel runs longer than the render engine's preemption timeout
+(`/sys/class/drm/card*/engine/rcs0/preempt_timeout_ms`, 640 ms by default) while another context (on a laptop: the desktop
+compositor) waits for the GPU, i915 resets the engine and the work is lost [MEAS]. The library therefore:
+
+- splits every GEMM kernel launch (also inside SYMM / SYRK / SYR2K / TRMM / TRSM and batched GEMM) into bands of rows so that
+  each launch is estimated below `GEN9BLAS_MAX_LAUNCH_MS` (default 100 ms) from a conservative throughput per type
+  (FP64 45, FP32 300, FP16 accurate 500, FP16 600 GFLOPS); the cost is a few µs per extra launch;
+- checks after every wait whether a reset hit its context (`DRM_IOCTL_I915_GET_RESET_STATS`) and then returns an error
+  (`gen9blas_error()`: "GPU execution error (kcl)"; the BLAS layer then computes the call on the CPU) instead of a wrong result.
+
+The NEO builds are not affected in the same way: NEO computes DGEMM n = 4096 in one launch without a reset [MEAS], presumably
+because it enables mid-thread preemption [HYP]. Test: `lib/test_long_launch.py` (part of `make -C lib check`).
+
 ## Environment variables
 
 All variables are read once per process (on first use). "Value" lists what is accepted; anything else is the default.
@@ -253,6 +268,7 @@ All variables are read once per process (on first use). "Value" lists what is ac
 | `GEN9BLAS_PROFILE` | set (any value) | profiling: stage times on stderr, `gen9blas_last_time_ms()` returns the kernel time. Off by default because queue profiling costs ~20 µs of CPU per event |
 | `GEN9BLAS_SKINNY` | integer; default: threshold 16 for FP16 and FP32, none for FP64 | skinny GEMM is used when min(M, N) <= n; `0` disables it (old packed path) |
 | `GEN9BLAS_SKINNY_R` | `0` | use the older `skinny_k4` / `skinny_k8` kernels instead of `skinny_r4` / `skinny_r8` (comparisons) |
+| `GEN9BLAS_MAX_LAUNCH_MS` | number; default 100 | longest planned GEMM kernel launch; longer ones are split into row bands (see "Long launches") |
 | `GEN9BLAS_BLOCKS` | integer; default 4 for n >= 512, else 1 | number of bands in blocked SYRK / SYR2K / TRMM / TRSM |
 | `GEN9BLAS_GEMV_N` | `old`, `grouped`; default: grouped for N >= 1024 | force a variant of GEMV N (comparisons) |
 | `GEN9BLAS_PACK` | `old` | disable the faster FP16/FP32 packing kernels `*_q` / `*_w2` (comparisons) |
