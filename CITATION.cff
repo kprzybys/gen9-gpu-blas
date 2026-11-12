@@ -10,6 +10,7 @@ abstract: >-
 authors:
   - family-names: Przybyszewski
     given-names: Karol
+    orcid: "https://orcid.org/0009-0001-9311-2022"
 license: MIT
 keywords:
   - BLAS
