@@ -35,6 +35,7 @@ PROGRAMS = [
     ("level12.cl", "-cl-std=CL3.0 -DHALF"), ("level12.cl", "-cl-std=CL3.0"), ("level12.cl", "-cl-std=CL3.0 -DDBL"),
     ("gen_h.bin", None), ("gen_hd.bin", None), ("gen_s.bin", None),
 ]
+GEN8_DEFINES = {"sgemm.cl": "-DGEN8_PLAIN_PACK"}   # pkf_a/pkf_b in the layout sgemm_v reads (bench/sgemm.cl)
 VALUES = ("arg_byvalue",)
 SPECIAL = {"local_size": "ls", "enqueued_local_size": "els", "global_id_offset": "gid", "global_size": "gs",
              "num_work_groups": "ng"}
@@ -335,8 +336,10 @@ for pi, (file, options) in enumerate(PROGRAMS):
         binary = os.path.join(WORK, base + ".bin")
         cmd = ["ocloc", "compile", "-file", os.path.join(BENCH, file), "-device", DEVICE, "-output_no_suffix",
                "-output", base, "-out_dir", WORK]
-        if options:
-            cmd += ["-options", options]
+        # Gen8: extra defines for the compile only (the program keeps its recorded options, which gen9blas asks for)
+        build_options = (options + " " + GEN8_DEFINES.get(file, "")).strip() if TARGET == "bdw" else options
+        if build_options:
+            cmd += ["-options", build_options]
         if TARGET == "whl-pt":
             cmd += ["-internal_options", "-cl-intel-disable-zebin"]
         r = subprocess.run(cmd, capture_output=True, text=True, env=env)

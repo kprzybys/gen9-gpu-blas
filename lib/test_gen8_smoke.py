@@ -2,7 +2,8 @@
   init   kcl/gen9blas initialisation only (no GPU work): generation and available types
   copy   FP32 copy (kernel copy16_f: no DW x DW multiply, only width-1 64-bit regions)
   axpy   FP32 axpy (axpy_f: adds vector DW x DW multiplies in index code)
-  gemm   small SGEMM and DGEMM (packing and epilogue kernels: DW x DW multiplies; dgemm_v: FP64)
+  sgemm  SGEMM n = 16, 64, 100, 256 and batched (2 matrices): packing pkf_a/pkf_b, sgemm_v, epilogue
+  dgemm  small DGEMM (pkd_a hung on the first run, docs/gen8.md 6a -- run only on purpose)
 Run one step: KCL_PROFILE_KERNELS=1 python3 test_gen8_smoke.py <step>   (prints which kernels ran)
 """
 import sys
@@ -33,8 +34,24 @@ elif step == "axpy":
         err = float(np.max(np.abs(y - ref)))
         ok &= err < 1e-5
         print(f"axpy n={n}: max abs err {err:.2e} {'OK' if err < 1e-5 else 'WRONG'}")
-elif step == "gemm":
-    for dt, tol in ((np.float32, 1e-4), (np.float64, 1e-12)):
+elif step == "sgemm":
+    for n in (16, 64, 100, 256):
+        A = rng.standard_normal((n, n)).astype(np.float32)
+        B = rng.standard_normal((n, n)).astype(np.float32)
+        C = g.gemm(A, B)
+        ref = A.astype(np.float64) @ B.astype(np.float64)
+        err = float(np.max(np.abs(C - ref)) / np.max(np.abs(ref)))
+        ok &= err < 1e-4
+        print(f"sgemm n={n}: max rel err {err:.1e} {'OK' if err < 1e-4 else 'WRONG'}")
+    A = rng.standard_normal((2, 64, 64)).astype(np.float32)
+    B = rng.standard_normal((2, 64, 64)).astype(np.float32)
+    C = g.gemm_batched(A, B)
+    ref = np.matmul(A.astype(np.float64), B.astype(np.float64))
+    err = float(np.max(np.abs(C - ref)) / np.max(np.abs(ref)))
+    ok &= err < 1e-4
+    print(f"sgemm batched 2 x 64: max rel err {err:.1e} {'OK' if err < 1e-4 else 'WRONG'}")
+elif step == "dgemm":
+    for dt, tol in ((np.float64, 1e-12),):
         for n in (16, 64, 256):
             A = rng.standard_normal((n, n)).astype(dt)
             B = rng.standard_normal((n, n)).astype(dt)

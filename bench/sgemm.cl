@@ -128,9 +128,15 @@ __kernel void sgemm_16x16p_b(__global const uint *Ap, __global const uint *Bp, _
     for (int r = 0; r < 16; r++)
         intel_sub_group_block_write((__global uint *)(C + (size_t)(pm * 16 + r) * ldc + pn * 16), as_uint(acc[r]));
 }
+#ifdef GEN8_PLAIN_PACK   // Gen8 build (lib/gen_kernels.py bdw, docs/gen8.md): the main kernel is sgemm_v below, which reads
+                         // the plain layout of pack_af / pack_bf, not the layout of the Gen9 assembler kernel (gen_s.bin)
+#define PKF_IDX_A(m, k, Kp) (((((size_t)((m) / 16) * ((Kp) / 16) + (k) / 16) * 16 + (m) % 16) * 16) + (k) % 16)
+#define PKF_IDX_B(n, k, Kp) (((size_t)((n) / 16) * (Kp) + (k)) * 16 + (n) % 16)
+#else
 #define PKF_IDX_A(m, k, Kp) ((((size_t)((m) / 16) * ((Kp) / 16) + (k) / 16) * 256 + ((k) % 16 / 4) * 64 + \
     (2 * ((m) % 16 / 4) + (((k) % 4) % 2 == 0)) * 8 + ((m) % 4) * 2 + ((k) % 4) / 2))
 #define PKF_IDX_B(n, k, Kp) ((((size_t)((n) / 16) * (Kp) + ((k) - (k) % 4) + ((k) % 4 % 2) * 2 + ((k) % 4) / 2)) * 16 + (n) % 16)
+#endif
 __kernel void pkf_a(__global const float *A, __global float *Ap, int M, int K, int lda, int Kp, long sA, int Mp) {
     const int k = get_global_id(0), m = get_global_id(1), b = get_global_id(2);
     Ap[(size_t)b * Mp * Kp + PKF_IDX_A(m, k, Kp)] = (m < M && k < K) ? A[b * sA + (size_t)m * lda + k] : 0.0f; }
