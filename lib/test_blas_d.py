@@ -1,6 +1,6 @@
 """Test of the D (FP64) functions of the BLAS/CBLAS layer (libgen9blas_blas.so) against NumPy -- the test_blas.py version for float64.
 
-Uruchom: python3 lib/test_blas.py
+Run: python3 lib/test_blas_d.py
 Forces the GPU (GEN9BLAS_BLAS=gpu) and checks in the log (GEN9BLAS_BLAS_INFO) that every S function went to the GPU. Tests: CBLAS
 in row-major and column-major layout, the Fortran interface (column-major), all trans/uplo/side/diag combinations,
 lda larger than the minimum, vector strides (also negative), level 1 on USM memory (gen9blas.empty from the same library),
