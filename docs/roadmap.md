@@ -135,6 +135,39 @@ memory-bound routines (levels 1-2, skinny GEMM) reach 0.78-0.93 of the UHD 620, 
 37.5 GB/s limit (theoretical ratio 0.91); DGEMM 50.6 GFLOPS (0.90-0.94); batched GEMM 0.70-0.89, lowest for the smallest
 matrices; ten minutes of HGEMM n = 2048 at a constant 607-609 GFLOPS and 1000 MHz, no throttling [MEAS].
 
+### Older generations: Gen8 and Gen7.5 (not started)
+
+Two older parts are available for porting tests (state 2026-11-12, nothing run on their GPUs yet). Device IDs, clock
+range, CPU and kernel are read from the machines [SYS]; EU counts are Intel's published figures for each part, not yet
+checked against a source in `docs/references.md` [HYP]. Peak = EU x 16 FLOP/clock (FP32 FMA, 2 x SIMD4 per EU) x max clock.
+
+| | UHD 620 | HD 530 | HD 4600 | HD Graphics 400 (Braswell) |
+|---|---|---|---|---|
+| Generation | Gen9.5 (Whiskey Lake GT2) | Gen9 (Skylake GT2) | Gen7.5 (Haswell GT2) | Gen8 LP (Braswell / Cherryview) |
+| CPU | Core i5-8265U (15 W) | Core i5-6500 (65 W) | Core i7-4790 (84 W) | Celeron N3010 (4 W) |
+| PCI ID | 0x3ea0 | 0x1912 | 0x0412 | 0x22b1 |
+| EU | 24 | 24 | 20 | 12 |
+| GPU clock (RPn-RP0) | 300-1100 MHz | 350-1050 MHz | 200-1200 MHz | 200-600 MHz |
+| FP32 peak | 422 GFLOPS | 403 | 384 | 115 |
+| FP16 peak | 845 (2x FP32) | 806 (2x) | 384 [HYP: no 2x FP16 rate on Gen7.5] | 230 [HYP: 2x rate as in Gen8] |
+| Measured | FP16 ~700, FP32 ~340 | 0.89-0.94 of UHD 620, same kernels | — | — |
+| Kernel / driver | 7.0.0-43, i915 | 7.0.0-34, i915 | 6.8.0-149, i915 | 7.0.0-43, i915 |
+
+What porting needs, as hypotheses to check in the PRM of each generation before any GPU run [HYP]:
+
+- **Gen8 (Braswell).** The Gen8 instruction encoding is the one Gen9 extends, so the assembly templates may need only
+  small changes; `kcl` needs the Gen8 state (MEDIA_VFE_STATE sizes for 12 EU, pipeline select, cache control, surface
+  formats) and the GEMM tiling re-tuned for half the EU count and a lower clock. Expected effort: moderate.
+- **Gen7.5 (Haswell).** Gen8 changed the native instruction encoding, so the assembler path (IGA / `ocloc` targets) and
+  the templates change more; `kcl` state differs more (Gen7 media pipeline). On Gen7.x the i915 command parser checks
+  batch buffers from unprivileged clients, so the first test is whether a `kcl` batch is accepted at all. FP16 has no
+  speed advantage if the 2x rate is absent, so FP32 (384 GFLOPS peak, close to the UHD 620) is the interesting target.
+  Expected effort: largest.
+- Order: Gen8 first (closest to working code), Gen7.5 second; on each part, start with a fill / copy kernel before GEMM.
+- Memory bandwidth of both machines is not known yet (channel configuration needs `dmidecode`); memory-bound routines
+  cannot be predicted until it is.
+- Same safety rules as on Gen9: a hang can reset the engine or need a reboot ([pitfalls.md](pitfalls.md)).
+
 ### Model gaps
 
 The numeric prediction before code, then one variant and a measurement, is the working method ([performance-model.md](performance-model.md)).
