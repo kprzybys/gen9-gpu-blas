@@ -1,17 +1,17 @@
-"""Test ViennaCL 1.7.1 dense_blas (profil OpenBenchmarking pts/viennacl) powtórzony na libgen9blas: te same operacje, rozmiary,
-miary i metoda pomiaru. Dane odniesienia: results/zewnetrzne/openbenchmarking-2103278-IB-KABYLAKET61/.
+"""ViennaCL 1.7.1 dense_blas test (OpenBenchmarking profile pts/viennacl) repeated on libgen9blas: same operations, sizes,
+metrics and measurement method. Reference data: results/external/openbenchmarking-2103278-IB-KABYLAKET61/.
 
-Uruchom: python3 bench/compare/viennacl_gen9blas.py [serie]   (domyślnie 3 serie, jak PTS)
-Metoda jak examples/benchmarks/dense_blas.cpp: operacja raz na rozgrzewkę, potem powtarzana, aż łączny czas ≥ 1 s;
-wynik = średni czas jednego wywołania (z czekaniem na koniec). Rozmiary: BLAS1 N = 10⁷, GEMV 3840 × 3840,
-GEMM 1976³. Miary: COPY 2N·e, AXPY 3N·e, DOT 2N·e bajtów; GEMV (M + N + M·N)·e bajtów; GEMM 2·M·N·K flop.
-Dane w pamięci USM (gen9blas.empty) -- odpowiednik buforów OpenCL w ViennaCL (dane już na GPU).
-ViennaCL: macierze kolumnowe (column_major). Kolumnowa X (m×n) = wierszowa Xᵀ w tej samej pamięci, więc:
-  GEMV-N  y = A·x       -> gen9blas.gemv(a, x, trans=True)   (a = zapis wierszowy, czyli Aᵀ)
+Run: python3 bench/compare/viennacl_gen9blas.py [series]   (default 3 series, as in PTS)
+Method as in examples/benchmarks/dense_blas.cpp: the operation once as warm-up, then repeated until the total time is ≥ 1 s;
+result = mean time of one call (waiting for completion). Sizes: BLAS1 N = 10⁷, GEMV 3840 × 3840,
+GEMM 1976³. Metrics: COPY 2N·e, AXPY 3N·e, DOT 2N·e bytes; GEMV (M + N + M·N)·e bytes; GEMM 2·M·N·K flop.
+Data in USM memory (gen9blas.empty) -- the equivalent of ViennaCL OpenCL buffers (data already on the GPU).
+ViennaCL: column-major matrices. A column-major X (m×n) = a row-major Xᵀ in the same memory, so:
+  GEMV-N  y = A·x       -> gen9blas.gemv(a, x, trans=True)   (a = row-major storage, i.e. Aᵀ)
   GEMV-T  x = Aᵀ·y      -> gen9blas.gemv(a, y)
-  GEMM    C = op1(A)·op2(B) kolumnowo  ->  Cᵀ = op2(B)ᵀ·op1(A)ᵀ wierszowo; NN: gemm(b, a), NT: gemm(btᵀ, a),
-          TN: gemm(b, atᵀ), TT: gemm(btᵀ, atᵀ)   (b, a, bt, at -- zapisy wierszowe; ᵀ = widok .T, bez kopii)
-AXPY w ViennaCL: x = y + α·x (ten sam ruch pamięci co axpy BLAS); tu gen9blas.axpy(α, y, x) = x + α·y, ruch 3N·e jak tam.
+  GEMM    C = op1(A)·op2(B) column-major  ->  Cᵀ = op2(B)ᵀ·op1(A)ᵀ row-major; NN: gemm(b, a), NT: gemm(btᵀ, a),
+          TN: gemm(b, atᵀ), TT: gemm(btᵀ, atᵀ)   (b, a, bt, at -- row-major storage; ᵀ = the .T view, zero-copy)
+AXPY in ViennaCL: x = y + α·x (the same memory traffic as BLAS axpy); here gen9blas.axpy(α, y, x) = x + α·y, traffic 3N·e as there.
 """
 import os
 import sys
@@ -27,9 +27,9 @@ N1, M2, N2, M3 = 10_000_000, 3840, 3840, 1976
 rng = np.random.default_rng(0)
 
 
-def los(shape, typ):
-    X = gen9blas.empty(shape, typ)
-    X[...] = rng.random(shape).astype(typ)
+def rnd(shape, dtype):
+    X = gen9blas.empty(shape, dtype)
+    X[...] = rng.random(shape).astype(dtype)
     return X
 
 
@@ -41,32 +41,32 @@ def bench(f):
     return t / n
 
 
-def seria(typ, pref):
-    e = np.dtype(typ).itemsize
+def run_series(dtype, pref):
+    e = np.dtype(dtype).itemsize
     w = {}
-    x, y = los(N1, typ), los(N1, typ)
+    x, y = rnd(N1, dtype), rnd(N1, dtype)
     w["COPY"] = 2 * N1 * e / bench(lambda: gen9blas.copy(y, x)) * 1e-9
     w["AXPY"] = 3 * N1 * e / bench(lambda: gen9blas.axpy(2.4, y, x)) * 1e-9
     w["DOT"] = 2 * N1 * e / bench(lambda: gen9blas.dot(x, y)) * 1e-9
     del x, y
-    a, xv, yv = los((N2, M2), typ), los(N2, typ), los(M2, typ)   # a = zapis A (M2 × N2 kolumnowo)
+    a, xv, yv = rnd((N2, M2), dtype), rnd(N2, dtype), rnd(M2, dtype)   # a = storage of A (M2 × N2 column-major)
     b2 = (M2 + N2 + M2 * N2) * e
     w["GEMV-N"] = b2 / bench(lambda: gen9blas.gemv(a, xv, y=yv, trans=True)) * 1e-9
     w["GEMV-T"] = b2 / bench(lambda: gen9blas.gemv(a, yv, y=xv)) * 1e-9
     del a
     fl = 2.0 * M3 ** 3
-    A, B, AT, BT = (los((M3, M3), typ) for _ in range(4))
-    C = gen9blas.empty((M3, M3), typ)
-    fn = gen9blas.hgemm if typ == np.float16 else gen9blas.gemm
-    for nazwa, (p, q) in {"NN": (B, A), "NT": (BT.T, A), "TN": (B, AT.T), "TT": (BT.T, AT.T)}.items():
-        w["GEMM-" + nazwa] = fl / bench(lambda: fn(p, q, C=C)) * 1e-9
+    A, B, AT, BT = (rnd((M3, M3), dtype) for _ in range(4))
+    C = gen9blas.empty((M3, M3), dtype)
+    fn = gen9blas.hgemm if dtype == np.float16 else gen9blas.gemm
+    for name, (p, q) in {"NN": (B, A), "NT": (BT.T, A), "TN": (B, AT.T), "TT": (BT.T, AT.T)}.items():
+        w["GEMM-" + name] = fl / bench(lambda: fn(p, q, C=C)) * 1e-9
     for k, v in w.items():
         print(f"{pref}{k} : {v:.3g} {'GFLOPs/s' if 'GEMM' in k else 'GB/s'}", flush=True)
 
 
-serie = int(sys.argv[1]) if len(sys.argv) > 1 else 3
-for s in range(serie):
-    print(f"# seria {s + 1}", flush=True)
-    seria(np.float32, "s")
-    seria(np.float64, "d")
-    seria(np.float16, "h")   # poza testem ViennaCL (brak FP16) -- dla porównania z naszą najmocniejszą stroną
+series = int(sys.argv[1]) if len(sys.argv) > 1 else 3
+for s in range(series):
+    print(f"# series {s + 1}", flush=True)
+    run_series(np.float32, "s")
+    run_series(np.float64, "d")
+    run_series(np.float16, "h")   # outside the ViennaCL test (no FP16 there) -- for comparison with our strongest side

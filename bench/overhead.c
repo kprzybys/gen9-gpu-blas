@@ -1,13 +1,13 @@
-// Stały koszt wywołania libgen9blas (krok 2, 2026-11-12): małe axpy w pętli z C, czas ściany i CPU procesu na wywołanie.
-// Budowa: gcc -O2 -o bench/overhead bench/overhead.c -Llib -lgen9blas -Wl,-rpath,$PWD/lib
-// Uruchom: bench/narzut [n] [R] [usm|zwykla]   (KCL_PHASES=1: rozkład na fazy kcl na stderr)
+// Fixed per-call cost of libgen9blas (step 2, 2026-11-12): small axpy in a C loop, wall time and process CPU per call.
+// Build: gcc -O2 -o bench/overhead bench/overhead.c -Llib -lgen9blas -Wl,-rpath,$PWD/lib
+// Run: bench/overhead [n] [R] [usm|plain]   (KCL_PHASES=1: breakdown into kcl phases on stderr)
 #include "../lib/gen9blas.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
-static double teraz(clockid_t c) { struct timespec t; clock_gettime(c, &t); return t.tv_sec * 1e6 + t.tv_nsec / 1e3; }
+static double now(clockid_t c) { struct timespec t; clock_gettime(c, &t); return t.tv_sec * 1e6 + t.tv_nsec / 1e3; }
 
 int main(int argc, char **argv) {
     int n = argc > 1 ? atoi(argv[1]) : 4096, R = argc > 2 ? atoi(argv[2]) : 5000;
@@ -17,9 +17,9 @@ int main(int argc, char **argv) {
     float *y = usm ? gen9blas_alloc(n * 4) : aligned_alloc(64, (n * 4 + 63) / 64 * 64);
     for (int i = 0; i < n; i++) { x[i] = 1; y[i] = 0; }
     for (int i = 0; i < 50; i++) gen9blas_axpy(GEN9BLAS_S, n, 1e-3, x, 1, y, 1);
-    double s = teraz(CLOCK_MONOTONIC), c = teraz(CLOCK_PROCESS_CPUTIME_ID);
+    double s = now(CLOCK_MONOTONIC), c = now(CLOCK_PROCESS_CPUTIME_ID);
     for (int i = 0; i < R; i++) if (gen9blas_axpy(GEN9BLAS_S, n, 1e-3, x, 1, y, 1)) { fprintf(stderr, "%s\n", gen9blas_error()); return 1; }
-    s = (teraz(CLOCK_MONOTONIC) - s) / R; c = (teraz(CLOCK_PROCESS_CPUTIME_ID) - c) / R;
-    printf("axpy n=%d %s: %.1f µs ściany, %.1f µs CPU na wywołanie\n", n, usm ? "usm" : "zwykla", s, c);
+    s = (now(CLOCK_MONOTONIC) - s) / R; c = (now(CLOCK_PROCESS_CPUTIME_ID) - c) / R;
+    printf("axpy n=%d %s: %.1f µs wall, %.1f µs CPU per call\n", n, usm ? "usm" : "plain", s, c);
     return 0;
 }

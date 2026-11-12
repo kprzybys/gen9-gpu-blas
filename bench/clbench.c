@@ -1,7 +1,7 @@
-// clbench: minimalny program do mikrobenchmarków OpenCL na UHD 620.
-// Każdy kernel ma sygnaturę: kernel(__global void *out, int n).
-// Użycie: clbench <plik.cl> <kernel> <global> <local> <n> <ops_na_item_na_iter> [opcje kompilatora]
-// Wypisuje: najlepszy czas, szybkość (Gop/s) i średnie taktowanie GPU w czasie najlepszego przebiegu.
+// clbench: minimal program for OpenCL microbenchmarks on the UHD 620.
+// Every kernel has the signature: kernel(__global void *out, int n).
+// Usage: clbench <file.cl> <kernel> <global> <local> <n> <ops_per_item_per_iter> [compiler options]
+// Prints: best time, rate (Gop/s) and the mean GPU clock during the best run.
 #define CL_TARGET_OPENCL_VERSION 300
 #include <CL/cl.h>
 #include <stdio.h>
@@ -25,7 +25,7 @@ static int read_freq(void) {
 }
 
 int main(int argc, char **argv) {
-    if (argc < 7) { fprintf(stderr, "uzycie: %s plik.cl kernel global local n ops [opcje]\n", argv[0]); return 2; }
+    if (argc < 7) { fprintf(stderr, "usage: %s file.cl kernel global local n ops [options]\n", argv[0]); return 2; }
     const char *file = argv[1], *kname = argv[2];
     size_t global = strtoull(argv[3], 0, 0), local = strtoull(argv[4], 0, 0);
     int n = atoi(argv[5]); double ops = atof(argv[6]);
@@ -40,7 +40,7 @@ int main(int argc, char **argv) {
     cl_queue_properties qp[] = { CL_QUEUE_PROPERTIES, CL_QUEUE_PROFILING_ENABLE, 0 };
     cl_command_queue q = clCreateCommandQueueWithProperties(ctx, dev, qp, &err); CHECK(err);
 
-    // Plik .bin = gotowa binarka GPU (np. z ocloc asm), inaczej źródło OpenCL C.
+    // A .bin file = ready GPU binary (e.g. from ocloc asm), otherwise OpenCL C source.
     cl_program prog;
     size_t flen = strlen(file);
     if (flen > 4 && !strcmp(file + flen - 4, ".bin")) {
@@ -55,7 +55,7 @@ int main(int argc, char **argv) {
     }
     if (clBuildProgram(prog, 1, &dev, opts, NULL, NULL) != CL_SUCCESS) {
         char log[65536]; clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, sizeof log, log, NULL);
-        fprintf(stderr, "blad kompilacji:\n%s\n", log); return 1;
+        fprintf(stderr, "build error:\n%s\n", log); return 1;
     }
     cl_kernel k = clCreateKernel(prog, kname, &err); CHECK(err);
 
@@ -66,8 +66,8 @@ int main(int argc, char **argv) {
     { cl_uchar z = 0; CHECK(clEnqueueFillBuffer(q, out, &z, 1, 0, outbytes, 0, NULL, NULL)); }
     CHECK(clSetKernelArg(k, 0, sizeof out, &out));
     CHECK(clSetKernelArg(k, 1, sizeof n, &n));
-    // Opcjonalne wejścia: BUF=<bajty> -> argument 2 (bufor wyzerowany), IMG=<szer>x<wys> -> kolejny argument
-    // (obraz 2D, CL_R / CL_UNSIGNED_INT32, szerokość w pikselach po 4 B).
+    // Optional inputs: BUF=<bytes> -> argument 2 (zeroed buffer), IMG=<width>x<height> -> next argument
+    // (2D image, CL_R / CL_UNSIGNED_INT32, width in pixels of 4 B).
     int argi = 2;
     if (getenv("BUF")) {
         size_t bb = strtoull(getenv("BUF"), 0, 0);
@@ -87,12 +87,12 @@ int main(int argc, char **argv) {
     CHECK(clFinish(q));
 
     double best = 1e30; int best_freq = -1;
-    for (int r = 0; r < reps + 1; r++) {   // przebieg 0 to rozgrzewka
+    for (int r = 0; r < reps + 1; r++) {   // run 0 is the warm-up
         cl_event ev;
         CHECK(clEnqueueNDRangeKernel(q, k, 1, NULL, &global, local ? &local : NULL, 0, NULL, &ev));
         CHECK(clFlush(q));
         long fsum = 0; int fcnt = 0; cl_int st;
-        do {   // próbkowanie taktowania w trakcie pracy kernela
+        do {   // sampling the clock while the kernel runs
             CHECK(clGetEventInfo(ev, CL_EVENT_COMMAND_EXECUTION_STATUS, sizeof st, &st, NULL));
             if (st <= CL_SUBMITTED) { int fr = read_freq(); if (fr > 0) { fsum += fr; fcnt++; } }
             struct timespec ts = {0, 200000}; nanosleep(&ts, NULL);
@@ -105,7 +105,7 @@ int main(int argc, char **argv) {
         clReleaseEvent(ev);
     }
     double gops = ops * (double)global * n / (best * 1e-3) / 1e9;
-    printf("%-14s global=%-8zu local=%-4zu sg=%-2zu n=%-6d czas=%9.3f ms  %8.2f Gop/s  GPU~%d MHz\n",
+    printf("%-14s global=%-8zu local=%-4zu sg=%-2zu n=%-6d time=%9.3f ms  %8.2f Gop/s  GPU~%d MHz\n",
            kname, global, local, sg, n, best, gops, best_freq);
     return 0;
 }

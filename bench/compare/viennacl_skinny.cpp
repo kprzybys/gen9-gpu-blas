@@ -1,7 +1,7 @@
-// Chudy GEMM w ViennaCL 1.7.1 (OpenCL przez NEO): C (M×N) = A (M×K) · Wᵀ, W (N×K) wierszowo -- te same kształty co
-// bench/skinny_gemm.py (libgen9blas). Tylko FP32 (ViennaCL nie ma FP16). Dla M = 1 także GEMV y = W·x.
-// Metoda: rozgrzewka 3×, potem powtarzanie do ≥ 0,5 s, mediana czasów pojedynczych wywołań (z viennacl::backend::finish()).
-// Budowa: g++ -O2 -DVIENNACL_WITH_OPENCL -I ~/src/viennacl-1.7.1-github/viennacl-dev-release-1.7.1 viennacl_skinny.cpp -lOpenCL
+// Skinny GEMM in ViennaCL 1.7.1 (OpenCL through NEO): C (M×N) = A (M×K) · Wᵀ, W (N×K) row-major -- the same shapes as
+// bench/skinny_gemm.py (libgen9blas). FP32 only (ViennaCL has no FP16). For M = 1 also GEMV y = W·x.
+// Method: warm-up 3×, then repeat up to ≥ 0.5 s, median of single-call times (with viennacl::backend::finish()).
+// Build: g++ -O2 -DVIENNACL_WITH_OPENCL -I ~/src/viennacl-1.7.1-github/viennacl-dev-release-1.7.1 viennacl_skinny.cpp -lOpenCL
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -11,15 +11,15 @@
 #include "viennacl/vector.hpp"
 #include "viennacl/linalg/prod.hpp"
 
-template <class F> static double mierz(F f) {
+template <class F> static double measure(F f) {
     for (int i = 0; i < 3; i++) f();
     viennacl::backend::finish();
-    std::vector<double> t; double suma = 0;
-    while (suma < 0.5 || t.size() < 5) {
+    std::vector<double> t; double sum = 0;
+    while (sum < 0.5 || t.size() < 5) {
         auto a = std::chrono::steady_clock::now();
         f(); viennacl::backend::finish();
         double d = std::chrono::duration<double>(std::chrono::steady_clock::now() - a).count();
-        t.push_back(d); suma += d;
+        t.push_back(d); sum += d;
     }
     std::sort(t.begin(), t.end());
     return t[t.size() / 2] * 1e3;
@@ -35,14 +35,14 @@ int main() {
         {
             std::vector<float> hx(K); for (auto &x : hx) x = u(g);
             viennacl::vector<float> x(K), y(N); viennacl::copy(hx, x);
-            double t = mierz([&] { y = viennacl::linalg::prod(W, x); });
+            double t = measure([&] { y = viennacl::linalg::prod(W, x); });
             std::printf("gemv %d %d 1 %.3f\n", N, K, t);
         }
         for (int M : { 1, 2, 4, 8, 16 }) {
             std::vector<float> ha((size_t)M * K); for (auto &x : ha) x = u(g);
             viennacl::matrix<float, viennacl::row_major> A(M, K), C(M, N);
             viennacl::fast_copy(ha.data(), ha.data() + ha.size(), A);
-            double t = mierz([&] { C = viennacl::linalg::prod(A, viennacl::trans(W)); });
+            double t = measure([&] { C = viennacl::linalg::prod(A, viennacl::trans(W)); });
             std::printf("gemm %d %d %d %.3f\n", N, K, M, t);
             std::fflush(stdout);
         }

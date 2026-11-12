@@ -1,7 +1,7 @@
-"""Krok 0: punkt odniesienia GEMM na CPU (NumPy -> OpenBLAS).
+"""Step 0: GEMM reference point on the CPU (NumPy -> OpenBLAS).
 
-Użycie: python3 gemm_cpu.py <f32|f64> <N> [sekundy]
-Format wyniku taki sam jak gemm_clblast. Dokładność liczona na 256 elementach względem float64.
+Usage: python3 gemm_cpu.py <f32|f64> <N> [seconds]
+Output format is the same as gemm_clblast. Accuracy is computed on 256 elements against float64.
 """
 import sys
 import time
@@ -15,19 +15,19 @@ dt = {"f32": np.float32, "f64": np.float64}[prec]
 rng = np.random.default_rng(1234)
 a = rng.uniform(-1, 1, (n, n)).astype(dt)
 b = rng.uniform(-1, 1, (n, n)).astype(dt)
-a @ b  # rozgrzewka
+a @ b  # warm-up
 
 if secs > 0:
     runs, start = 0, time.perf_counter()
-    okno, t_okna, r_okna = 10.0, time.perf_counter(), 0
+    window, t_win, r_win = 10.0, time.perf_counter(), 0
     while time.perf_counter() - start < secs:
         c = a @ b
         runs += 1
-        r_okna += 1
-        if time.perf_counter() - t_okna >= okno:   # ślad co ~10 s (test długotrwały)
-            dt = time.perf_counter() - t_okna
-            print(f"slad {time.perf_counter() - start:6.1f} s  {2 * n**3 * r_okna / dt / 1e9:7.1f} GFLOPS", file=sys.stderr)
-            t_okna, r_okna = time.perf_counter(), 0
+        r_win += 1
+        if time.perf_counter() - t_win >= window:   # trace every ~10 s (long run)
+            dt = time.perf_counter() - t_win
+            print(f"trace {time.perf_counter() - start:6.1f} s  {2 * n**3 * r_win / dt / 1e9:7.1f} GFLOPS", file=sys.stderr)
+            t_win, r_win = time.perf_counter(), 0
     best = (time.perf_counter() - start) / runs
 else:
     best = 1e30
@@ -42,5 +42,5 @@ errs = []
 for i, j in idx:
     prod = a64[i, :] * b64[:, j]
     errs.append(abs(float(c[i, j]) - prod.sum()) / np.abs(prod).sum())
-print(f"openblas {prec}gemm N={n:<5} czas={best*1e3:9.3f} ms  {2*n**3/best/1e9:7.1f} GFLOPS  "
-      f"blad_wzgl: sr={np.mean(errs):.2e} max={np.max(errs):.2e}{'  (tryb ciagly)' if secs else ''}")
+print(f"openblas {prec}gemm N={n:<5} time={best*1e3:9.3f} ms  {2*n**3/best/1e9:7.1f} GFLOPS  "
+      f"rel_err: avg={np.mean(errs):.2e} max={np.max(errs):.2e}{'  (continuous mode)' if secs else ''}")
