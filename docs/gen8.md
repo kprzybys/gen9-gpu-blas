@@ -218,6 +218,25 @@ No reset, machine and services unaffected. With this, FP32 and FP64 run on the C
 GEMM/TRSM path and the level-1 kernels tried so far. Not yet run: the full test suites (`make check` assumes FP16), the
 remaining level-2 kernels, performance measurements.
 
+## 6c. Test suites on the Cherryview (2026-11-13) [MEAS]
+
+FP16 cases are skipped (`gen9blas.available`); the three `test_blas*` suites (drop-in BLAS layer, which forwards to and
+compares with OpenBLAS on the CPU) were not run: OpenBLAS is not installed on the target and is not needed by the GPU
+library. `test_level12` skips ROTG/ROTMG/ROTM when SciPy is missing (their reference).
+
+| Suite | Result |
+|---|---|
+| `test_basic` (SGEMM, all transposes, copy / zero-copy) | all OK |
+| `test_level3` (GEMM, SYMM, SYRK, SYR2K, TRMM, TRSM, batched, views; FP32, FP64) | all OK |
+| `test_level12` (levels 1 and 2, FP32 and FP64) | all OK |
+| `test_userptr` | all OK |
+| `test_skinny` | **wrong results** exactly in the cases that use `skinny_r4_f` / `skinny_r8_f` (K a multiple of 16, M = 2, 4, 8, B transposed); the cases on `skinny_k*` pass |
+
+`skinny_r*` differ from the passing SLM/barrier kernels (`skinny_k4_f`, `trsv_block_f`, same 16 threads per group) by
+SIMD8 and the A64 aligned OWord block read x4 (`intel_sub_group_block_read2`); which of the two (if either) is the cause
+is not known [HYP]. They are only the faster variant, so on Gen8 `gen9blas.c` uses `skinny_k*` instead (as with
+`GEN9BLAS_SKINNY_R=0`).
+
 ## 7. Open questions
 
 - Does Cherryview accept the width-1 `<2;1,0>` 64-bit regions, and how does it behave on DW x DW `mul` with non-scalar

@@ -1300,6 +1300,7 @@ static int gemm_skinny(int type, int tA, int tB, int M, int N, int K, double alp
     int iK = K, iM = Mc, iN = Nc;
     static int no_r = -1;   // GEN9BLAS_SKINNY_R=0: old skinny_k4/k8 (comparisons)
     if (no_r < 0) { const char *e = getenv("GEN9BLAS_SKINNY_R"); no_r = e && !atoi(e); }
+    if (gen8) no_r = 1;   // skinny_r4/r8 give wrong results on the Cherryview (cause not found, docs/gen8.md 6c); skinny_k* pass
     const int KL = es == 2 ? 4 : 2;   // k elements per lane (8 B), as in skinny_r in level12.cl
     const uintptr_t align_or = (uintptr_t)(M <= N ? A : B) | (uintptr_t)(M <= N ? B : A) | (uintptr_t)(sam * es) | (uintptr_t)(swn * es);
     // the GPU address has the same offset within a page as on the host (USM, kcl userptr; work buffer aligned)
