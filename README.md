@@ -187,6 +187,7 @@ Reproducing the measurements: [docs/benchmarks.md](docs/benchmarks.md).
 | [docs/benchmarks.md](docs/benchmarks.md) | Measurement method and how to reproduce each result file |
 | [docs/references.md](docs/references.md) | External documents and source code used, versions, checksums |
 | [docs/roadmap.md](docs/roadmap.md) | Open problems and possible next steps |
+| [docs/related-work.md](docs/related-work.md) | Similar projects and papers (web survey, 2026-11-12) |
 
 Evidence tags used in the documents and in `results/`: [SPEC] Intel documentation; [MEAS] our measurement of a hardware
 constant; [SW] software behaviour, fixed for a given driver/compiler version; [EST] estimate from third-party code

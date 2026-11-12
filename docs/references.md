@@ -145,4 +145,4 @@ mapping through the IOMMU, invalidation by mmu notifier) and execbuffer rules, w
 
 [api.md](api.md), [hardware.md](hardware.md), [performance-model.md](performance-model.md), [no-neo.md](no-neo.md),
 [skinny-gemm.md](skinny-gemm.md), [pitfalls.md](pitfalls.md), [history.md](history.md), [benchmarks.md](benchmarks.md),
-[roadmap.md](roadmap.md).
+[roadmap.md](roadmap.md), [related-work.md](related-work.md).
