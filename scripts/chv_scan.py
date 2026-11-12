@@ -13,7 +13,8 @@ operand (DF/Q/UQ) or an integer DWord x DWord mul (PRM CHV vol07, printed p.823-
 3-source instructions are skipped, as in Mesa (Align16 on Gen8). Also counts kernels that use scratch (kcl has none).
 
 Usage: python3 scripts/chv_scan.py OUT_DIR       (extra IGC flags via the environment, e.g. IGC_VISAOptions=-noFP64bRegion)
-Builds the programs of lib/gen_kernels.py (except the prebuilt Gen9 .bin files) for bdw into OUT_DIR, then scans them.
+Builds the programs of lib/gen_kernels.py (except the prebuilt Gen9 .bin files) for bdw into OUT_DIR with the Gen8
+defines (GEN8_DEFINES), then scans them. Also counts A64 QWord scattered messages, which hang the Cherryview (docs/gen8.md 6a).
 """
 import ast, collections, glob, os, re, subprocess, sys
 
@@ -25,12 +26,17 @@ OPND = re.compile(r"^(-|~|\(abs\)|-\(abs\))?(r\[[^\]]*\]|[a-z]+\d*)(?:\.(\d+))?(
 IMM = re.compile(r"^-?(0x[0-9a-fA-F]+|[\d.e+-]+|inf|s?q?nan)(\(.*\))?:\w+$")
 
 
-def programs():
+def gen_kernels_value(name):
     tree = ast.parse(open(os.path.join(ROOT, "lib", "gen_kernels.py")).read())
     for node in tree.body:
-        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == "PROGRAMS":
-            return [p for p in ast.literal_eval(node.value) if p[1] is not None]
-    sys.exit("chv_scan: PROGRAMS not found in lib/gen_kernels.py")
+        if isinstance(node, ast.Assign) and getattr(node.targets[0], "id", "") == name:
+            return ast.literal_eval(node.value)
+    sys.exit(f"chv_scan: {name} not found in lib/gen_kernels.py")
+
+
+def programs():   # the bdw build of lib/gen_kernels.py: .cl programs with the Gen8 defines (GEN8_DEFINES)
+    defines = gen_kernels_value("GEN8_DEFINES")
+    return [(f, (o + " " + defines.get(f, "")).strip()) for f, o in gen_kernels_value("PROGRAMS") if o is not None]
 
 
 def build(out):
@@ -115,6 +121,8 @@ def scan(out):
         hits_k, scratch = collections.Counter(), False
         for line in open(f):
             scratch |= "scratch" in line   # in the disassembler's send comment
+            if "qword gathering read" in line or "qword scattering write" in line:
+                hits_k["msg:QWORD"] += 1; total["msg:QWORD"] += 1; example.setdefault("msg:QWORD", f"{kernel}: {line.strip()}")
             line = line.split("//")[0].strip()
             hits = check(line)
             if hits is None:

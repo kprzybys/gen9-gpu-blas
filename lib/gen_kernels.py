@@ -36,7 +36,9 @@ PROGRAMS = [
     ("gen_h.bin", None), ("gen_hd.bin", None), ("gen_s.bin", None),
 ]
 GEN8_PROGRAMS = [("gen8_probe.cl", "-cl-intel-greater-than-4GB-buffer-required")]   # bring-up probes, Gen8 table only
-GEN8_DEFINES = {"sgemm.cl": "-DGEN8_PLAIN_PACK"}   # pkf_a/pkf_b in the layout sgemm_v reads (bench/sgemm.cl)
+# GEN8_PLAIN_PACK: pkf_a/pkf_b in the layout sgemm_v reads; GEN8_CHV: no A64 QWord messages, no indirect DF moves, no
+# math.invm/madm (docs/gen8.md 6a)
+GEN8_DEFINES = {"sgemm.cl": "-DGEN8_PLAIN_PACK -DGEN8_CHV", "dgemm.cl": "-DGEN8_CHV", "level12.cl": "-DGEN8_CHV"}
 VALUES = ("arg_byvalue",)
 SPECIAL = {"local_size": "ls", "enqueued_local_size": "els", "global_id_offset": "gid", "global_size": "gs",
              "num_work_groups": "ng"}

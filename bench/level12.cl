@@ -33,9 +33,19 @@ typedef double4 TV4;
 #define CONV_R4(v) convert_double4(v)
 #define GW 2
 typedef double2 RG;
+#ifdef GEN8_CHV   // Gen8 Cherryview (lib/gen_kernels.py bdw): A64 QWord scattered reads hang the GPU (docs/gen8.md 6a) -> doubles as uint pairs
+#undef V4
+#undef VS4
+#define V4(p) as_double4(vload8(0, (const __global uint *)(p)))
+#define VS4(v, p) vstore8(as_uint8(v), 0, (__global uint *)(p))
+#define VG(p) as_double2(vload4(0, (const __global uint *)(p)))
+#define VLR(p) vload2(0, p)   // private array (not a global message)
+#define COPYG(p, q) vstore4(vload4(0, (const __global uint *)(p)), 0, (__global uint *)(q))
+#else
 #define VG(p) vload2(0, p)
 #define VLR(p) vload2(0, p)
 #define COPYG(p, q) vstore2(vload2(0, p), 0, q)
+#endif
 #define DOTG(a, b) dot(a, b)
 #else
 typedef float T;
@@ -53,8 +63,41 @@ typedef float4 RG;
 #define COPYG(p, q) vstore4(vload4(0, p), 0, q)
 #define DOTG(a, b) dot(a, b)
 #endif
-#define LD(p, i) ((R)(p)[i])
-#define ST(p, i, v) ((p)[i] = (T)(v))
+// Element read/write of a T buffer: plain indexing, except FP64 on Gen8 (no QWord messages, see above).
+#if defined(DBL) && defined(GEN8_CHV)
+#define RD(p, i) as_double(vload2((i), (const __global uint *)(p)))
+#define WR(p, i, v) vstore2(as_uint2((double)(v)), (i), (__global uint *)(p))
+#else
+#define RD(p, i) ((p)[i])
+#define WR(p, i, v) ((p)[i] = (v))
+#endif
+#define LD(p, i) ((R)RD(p, i))
+#define ST(p, i, v) WR(p, i, (T)(v))
+// FP64 on Gen8 Cherryview also avoids two instruction forms that break its 64-bit rules (docs/gen8.md section 3): a
+// sub_group_broadcast with a variable lane is an indirect DF move (R2; Mesa splits it into two dwords), and division
+// compiles to math.invm/madm with accumulators (R3; Mesa emulates FP64 division on Gen8). Division: reciprocal from FP32,
+// three Newton steps and one correction of the quotient (DF mul/fma only); the divisor must be in the FP32 range.
+#if defined(DBL) && defined(GEN8_CHV)
+#define BCASTR(v, k) as_double((uint2)(sub_group_broadcast(as_uint2(v).s0, k), sub_group_broadcast(as_uint2(v).s1, k)))
+inline double div_chv(double a, double b) {
+    double r = (double)native_recip((float)b);
+    r = fma(r, fma(-b, r, 1.0), r); r = fma(r, fma(-b, r, 1.0), r); r = fma(r, fma(-b, r, 1.0), r);
+    const double q = a * r;
+    return fma(r, fma(-b, q, a), q);
+}
+#define DIVR(a, b) div_chv(a, b)
+#else
+#define BCASTR(v, k) sub_group_broadcast(v, k)
+#define DIVR(a, b) ((a) / (b))
+#endif
+// 4 elements of a T (or, for FP64, R) buffer without conversion.
+#if defined(DBL) && defined(GEN8_CHV)
+#define LV4T(p) as_double4(vload8(0, (const __global uint *)(p)))
+#define SV4T(v, p) vstore8(as_uint8(v), 0, (__global uint *)(p))
+#else
+#define LV4T(p) vload4(0, p)
+#define SV4T(v, p) vstore4(v, 0, p)
+#endif
 typedef long L;
 
 // ---- level 1: work-item = 4 consecutive elements; with stride 1 vector read/write (vload4/vstore4) ----
@@ -74,8 +117,8 @@ __kernel void F(scal)(int n, R a, __global T *x, L ox, L ix) {
 }
 __kernel void F(copy)(int n, __global const T *x, L ox, L ix, __global T *y, L oy, L iy) {
     FOUR(n, ix == 1 && iy == 1);
-    if (full) { vstore4(vload4(0, x + ox + i0), 0, y + oy + i0); return; }
-    for (int i = i0; i < min(n, i0 + 4); i++) y[oy + i * iy] = x[ox + i * ix];
+    if (full) { SV4T(LV4T(x + ox + i0), y + oy + i0); return; }
+    for (int i = i0; i < min(n, i0 + 4); i++) WR(y, oy + i * iy, RD(x, ox + i * ix));
 }
 // COPY contiguous (stride 1): 16 B per lane in every type (GW elements). The 4-element version: FP64 32 B per lane -- each
 // of the subgroup's two writes covered half of a 64 B line (target not read -> line fill), 17 GB/s; FP16 8 B, 13 GB/s.
@@ -83,20 +126,20 @@ __kernel void F(copy16)(int n, __global const T *x, L ox, __global T *y, L oy) {
     const int i0 = (int)get_global_id(0) * GW;
     if (i0 >= n) return;
     if (i0 + GW <= n) { COPYG(x + ox + i0, y + oy + i0); return; }
-    for (int i = i0; i < n; i++) y[oy + i] = x[ox + i];
+    for (int i = i0; i < n; i++) WR(y, oy + i, RD(x, ox + i));
 }
 // rot: x' = c·x + s·y, y' = c·y − s·x; swap = 1: swap.
 __kernel void F(rot)(int n, __global T *x, L ox, L ix, __global T *y, L oy, L iy, R c, R s, int swap) {
     FOUR(n, ix == 1 && iy == 1);
     if (full) {
         __global T *px = x + ox + i0, *py = y + oy + i0;
-        if (swap) { const TV4 t = vload4(0, px); vstore4(vload4(0, py), 0, px); vstore4(t, 0, py); return; }
+        if (swap) { const TV4 t = LV4T(px); SV4T(LV4T(py), px); SV4T(t, py); return; }
         const R4 a = V4(px), b = V4(py);
         VS4(fma((R4)c, a, (R4)s * b), px); VS4(fma((R4)c, b, -(R4)s * a), py); return;
     }
     for (int i = i0; i < min(n, i0 + 4); i++) {
         const L jx = ox + i * ix, jy = oy + i * iy;
-        if (swap) { const T t = x[jx]; x[jx] = y[jy]; y[jy] = t; continue; }
+        if (swap) { const T t = RD(x, jx); WR(x, jx, RD(y, jy)); WR(y, jy, t); continue; }
         const R a = LD(x, jx), b = LD(y, jy);
         ST(x, jx, fma(c, a, s * b)); ST(y, jy, fma(c, b, -s * a));
     }
@@ -306,7 +349,7 @@ __kernel void F(gemv_t1)(int M, int N, int rpp, __global const T *A, L oa, int l
     if (unit) for (int t = 0; t < 4; t++)   // diagonal (i = c + t) in this part of the rows
         if (c + t >= r * rpp && c + t < min(M, r * rpp + rpp)) ((__private R *)&s)[t] += LD(x, ox + (L)(c + t) * ix);
     __global R *p = P + (L)r * N + c;
-    p[0] = s.x; if (c + 1 < N) p[1] = s.y; if (c + 2 < N) p[2] = s.z; if (c + 3 < N) p[3] = s.w;
+    WR(p, 0, s.x); if (c + 1 < N) WR(p, 1, s.y); if (c + 2 < N) WR(p, 2, s.z); if (c + 3 < N) WR(p, 3, s.w);
 }
 // GEMV T for FP16 and a full matrix (mode 0, no unit diagonal): block read -- a subgroup reads 64 consecutive columns of a row
 // (128 B) in one message, a lane gets columns c0 + l + 16·t (the compiler splits vload4 half into byte-wise reads).
@@ -348,7 +391,7 @@ __kernel void F(gemv_t1b)(int M, int N, int rpp, __global const T *A, L oa, int 
 __kernel void F(gemv_t2)(int N, int nparts, __global const R *P, R alpha, R beta, __global T *y, L oy, L iy) {
     const int j = get_global_id(0); if (j >= N) return;
     R t = 0.0f;
-    for (int r = 0; r < nparts; r++) t += P[(L)r * N + j];
+    for (int r = 0; r < nparts; r++) t += RD(P, (L)r * N + j);
     const L k = oy + (L)j * iy; ST(y, k, beta == 0.0f ? alpha * t : fma(alpha, t, beta * LD(y, k)));
 }
 // SYMV in one pass over the stored triangle (upper = 0: j <= i, 1: j >= i). Element A[i][j], read once, contributes
@@ -376,20 +419,20 @@ __kernel void F(symv1)(int n, int rpp, int upper, __global const T *A, L oa, int
         const R4 vk = vw * CONV_R4(-(j != i));                  // without the diagonal
         s = fma(vk, (R4)LD(x, ox + (L)i * ix), s);
         const R w = sub_group_reduce_add(dot(vw, xc));
-        if (l == 0) Q[(L)g * n + i] = w;
+        if (l == 0) WR(Q, (L)g * n + i, w);
     }
     if (c < n) {
         __global R *p = P + (L)r * n + c;
-        p[0] = s.x; if (c + 1 < n) p[1] = s.y; if (c + 2 < n) p[2] = s.z; if (c + 3 < n) p[3] = s.w;
+        WR(p, 0, s.x); if (c + 1 < n) WR(p, 1, s.y); if (c + 2 < n) WR(p, 2, s.z); if (c + 3 < n) WR(p, 3, s.w);
     }
 }
 __kernel void F(symv2)(int n, int nparts, int upper, __global const R *P, __global const R *Q, R alpha, R beta,
                        __global T *y, L oy, L iy) {
     const int i = get_global_id(0); if (i >= n) return;
     R t = 0.0f;
-    for (int r = 0; r < nparts; r++) t += P[(L)r * n + i];
+    for (int r = 0; r < nparts; r++) t += RD(P, (L)r * n + i);
     const int g0 = upper ? i / 64 : 0, g1 = upper ? (n + 63) / 64 : i / 64 + 1;   // column groups with an entry for row i
-    for (int g = g0; g < g1; g++) t += Q[(L)g * n + i];
+    for (int g = g0; g < g1; g++) t += RD(Q, (L)g * n + i);
     const L k = oy + (L)i * iy; ST(y, k, beta == 0.0f ? alpha * t : fma(alpha, t, beta * LD(y, k)));
 }
 // SYR / SYR2 on a triangle (mode 1 lower, 2 upper): A += alpha·x·yᵀ (rank2 = 0; SYR: y = x) or alpha·(x·yᵀ + y·xᵀ).
@@ -406,10 +449,10 @@ __kernel void F(syr2)(int n, R alpha, __global const T *x, L ox, L ix, __global 
 // Blocked TRSV, work vector xf in FP32. op(A)[r][c] = tr ? A[c][r] : A[r][c].
 // Conversions: xf = x (to_f) and x = xf (from_f).
 __kernel void F(to_f)(int n, __global const T *x, L ox, L ix, __global R *xf) {
-    const int i = get_global_id(0); if (i < n) xf[i] = LD(x, ox + (L)i * ix);
+    const int i = get_global_id(0); if (i < n) WR(xf, i, LD(x, ox + (L)i * ix));
 }
 __kernel void F(from_f)(int n, __global const R *xf, __global T *x, L ox, L ix) {
-    const int i = get_global_id(0); if (i < n) ST(x, ox + (L)i * ix, xf[i]);
+    const int i = get_global_id(0); if (i < n) ST(x, ox + (L)i * ix, RD(xf, i));
 }
 // Blocked TRSV (blocks of 64): the diagonal block in one work-group (local memory), then update of the rest of the
 // vector. Work vector xf in FP32. op(A)[r][c] = tr ? A[c][r] : A[r][c]. A single-launch version (block ready
@@ -425,7 +468,7 @@ void F(trsv_block)(int p, int b, __global const T *A, L oa, int lda, int tr, int
     __local R Lb[64][65];
     __local R xl[NBT];
     const int t = get_local_id(0), ns = (b + 63) / 64;
-    for (int i = t; i < b; i += 256) xl[i] = xf[p + i];
+    for (int i = t; i < b; i += 256) xl[i] = RD(xf, p + i);
     for (int q = 0; q < ns; q++) {
         const int s0 = (lower ? q : ns - 1 - q) * 64, bs = min(64, b - s0);
 #pragma unroll
@@ -443,8 +486,8 @@ void F(trsv_block)(int p, int b, __global const T *A, L oa, int lda, int tr, int
                 R v = t < gs ? xl[s0 + g0 + t] : 0.0f;
                 for (int i = 0; i < gs; i++) {
                     const int k = lower ? i : gs - 1 - i;
-                    R vk = sub_group_broadcast(v, k);
-                    if (!diag) vk /= Lb[g0 + k][g0 + k];
+                    R vk = BCASTR(v, k);
+                    if (!diag) vk = DIVR(vk, Lb[g0 + k][g0 + k]);
                     if (t == k) v = vk;
                     else if (t < gs && (lower ? t > k : t < k)) v = fma(-Lb[g0 + t][g0 + k], vk, v);
                 }
@@ -471,7 +514,7 @@ void F(trsv_block)(int p, int b, __global const T *A, L oa, int lda, int tr, int
         }
         barrier(CLK_LOCAL_MEM_FENCE);
     }
-    for (int i = t; i < b; i += 256) xf[p + i] = xl[i];
+    for (int i = t; i < b; i += 256) WR(xf, p + i, xl[i]);
 }
 // Update of the rest after block [p, p+b): xf[r] -= Σ_{c in block} op(A)[r][c]·xf[c] for r in [r0, r1).
 // Without transpose: row r contiguous in memory -- one subgroup per row, a lane takes 4 consecutive elements in chunks of 64.
@@ -482,10 +525,10 @@ __kernel void F(trsv_upd_n)(int p, int b, int r0, int r1, __global const T *A, L
     R s = 0.0f;
 #pragma unroll
     for (int c0 = 0; c0 < NBT; c0 += 64)
-        if (c0 + 4 * l + 3 < b) s += dot(V4(A + oa + (L)r * lda + p + c0 + 4 * l), vload4(0, xf + p + c0 + 4 * l));
-        else for (int t = 0; t < 4; t++) { const int c = c0 + 4 * l + t; if (c < b) s = fma(LD(A, oa + (L)r * lda + p + c), xf[p + c], s); }
+        if (c0 + 4 * l + 3 < b) s += dot(V4(A + oa + (L)r * lda + p + c0 + 4 * l), LV4T(xf + p + c0 + 4 * l));
+        else for (int t = 0; t < 4; t++) { const int c = c0 + 4 * l + t; if (c < b) s = fma(LD(A, oa + (L)r * lda + p + c), RD(xf, p + c), s); }
     s = sub_group_reduce_add(s);
-    if (l == 0) xf[r] -= s;
+    if (l == 0) WR(xf, r, RD(xf, r) - s);
 }
 // With transpose: op(A)[r][c] = A[c][r] -- one work-item per r (column of A), loop over the block rows (contiguous read within the group).
 __kernel void F(trsv_upd_t)(int p, int b, int r0, int r1, __global const T *A, L oa, int lda, __global R *xf) {
@@ -493,8 +536,8 @@ __kernel void F(trsv_upd_t)(int p, int b, int r0, int r1, __global const T *A, L
     if (r >= r1) return;
     R s = 0.0f;
 #pragma unroll 16
-    for (int c = 0; c < b; c++) s = fma(LD(A, oa + (L)(p + c) * lda + r), xf[p + c], s);
-    xf[r] -= s;
+    for (int c = 0; c < b; c++) s = fma(LD(A, oa + (L)(p + c) * lda + r), RD(xf, p + c), s);
+    WR(xf, r, RD(xf, r) - s);
 }
 // GER: A += alpha·x·yᵀ, A: M×N; work-item = element.
 __kernel void F(ger)(int M, int N, R alpha, __global const T *x, L ox, L ix, __global const T *y, L oy, L iy,
@@ -542,9 +585,9 @@ void F(psv)(int n, int fmt, int KL, int KU, __global const T *A, L oa, int lda, 
         const int i = lower ? q : n - 1 - q;
         const int j0 = lower ? max(0, i - K) : i + 1, j1 = lower ? i : min(n, i + K + 1);
         R s = 0.0f;
-        for (int j = j0 + t; j < j1; j += 256) s = fma(elop(fmt, A, oa, lda, KL, KU, n, i, j, tr, 0, 0, 0), xf[j], s);
+        for (int j = j0 + t; j < j1; j += 256) s = fma(elop(fmt, A, oa, lda, KL, KU, n, i, j, tr, 0, 0, 0), RD(xf, j), s);
         s = work_group_reduce_add(s);
-        if (t == 0) { R v = xf[i] - s; if (!unit) v /= elop(fmt, A, oa, lda, KL, KU, n, i, i, tr, 0, 0, 0); xf[i] = v; }
+        if (t == 0) { R v = RD(xf, i) - s; if (!unit) v = DIVR(v, elop(fmt, A, oa, lda, KL, KU, n, i, i, tr, 0, 0, 0)); WR(xf, i, v); }
         barrier(CLK_GLOBAL_MEM_FENCE);
     }
 }

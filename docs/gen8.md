@@ -195,8 +195,15 @@ Analysis (offline, 2026-11-12):
   the message (vol07 p.193) but has no "A64 Qword Scattered Read" MSD page (vol02a lists Dword read/write and only the
   Qword *write*); Mesa never emits 64-bit memory messages on Gen8 (`elk_fs_nir.cpp`: 64-bit global loads are split into
   32-bit ones). Not tested on its own: the A64 QWord scattered write (the probe's compiler used dword scatter for it).
-- Fix: in the Gen8 build, FP64 data must be read with dword messages (e.g. `as_double(vload2(..., (global uint *)p))`);
-  this concerns 40 of the 41 FP64 kernels and the FP32 `trsm_inv*_f` kernels [SCAN].
+- Fix (`GEN8_CHV`, defined only in the bdw build, `lib/gen_kernels.py` `GEN8_DEFINES`): element access through macros
+  (`RD`/`WR`, `LV4T`/`SV4T`, `V4`/`VG`/`COPYG` in `bench/level12.cl`; `RD`/`WR`/`RDD`/`WRD` in `bench/sgemm.cl` and
+  `bench/dgemm_core.cl`, which `lib/gen_dgemm.py` combines into `dgemm.cl`). On Gen9 they expand to the former plain
+  indexing (Gen9 `kernels.c` unchanged, md5 02e260eb); on Gen8 FP64 data moves as uint pairs (dword messages). The same
+  build also avoids the other two FP64 forms CHV forbids: a `sub_group_broadcast` of a double with a variable lane (an
+  indirect DF move, R2; now two dword broadcasts) and FP64 division (`math.invm`/`madm` with accumulators, R3; now an FP32
+  reciprocal refined by three Newton steps plus a quotient correction, DF mul/fma only; divisor in the FP32 range). Scan
+  of the Gen8 build [SCAN]: no QWord messages and no R2/R3/R4 hits in any FP32 or FP64 kernel; only the FP16
+  `trsm_inv*_h` kernels keep them (FP16 is not used on Gen8).
 
 ## 7. Open questions
 
