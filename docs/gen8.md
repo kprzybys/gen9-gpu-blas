@@ -1,6 +1,6 @@
 # Gen8 (Cherryview/Braswell) port: facts before code
 
-Status (2026-11-12): **research only, nothing has run on Gen8 hardware yet.** This file collects what has to change in
+Status (2026-11-12): **implemented on the `gen8` branch (section 6), nothing has run on Gen8 hardware yet.** This file collects what has to change in
 kcl and in the kernels for a Gen8 Cherryview GPU, following the method of [performance-model.md](performance-model.md):
 facts with sources first, then one change at a time and a test. Work happens on the `gen8` branch; `main` stays Gen9-only
 until the Gen9 tests pass unchanged on both Gen9 machines.
@@ -138,16 +138,18 @@ changes the argument ABI), `mul24` in the source (still DW x DW), `IGC_ForceNoFP
 | timestamps | 12.5 MHz: `lib/kcl.c:350, 591` hardcode 12 MHz; take I915_PARAM_CS_TIMESTAMP_FREQUENCY | section 1 |
 | unchanged | GPGPU_WALKER, MEDIA_STATE_FLUSH, MEDIA_INTERFACE_DESCRIPTOR_LOAD, MI_LOAD_REGISTER_IMM, MI_BATCH_BUFFER_END, RENDER_SURFACE_STATE (differs only in Gen9 fields kcl does not use) | [SPEC] genxml diff |
 
-## 6. kcl changes (none made yet)
+## 6. Implementation (branch `gen8`; written, not yet run on Gen8 hardware)
 
-1. Coherency on non-LLC parts: Fix A (SET_CACHING) for data objects, Fix A or B for batch, ISA and state (section 4).
-2. Address allocator below the GTT size (from CONTEXT_PARAM_GTT_SIZE) with reuse of freed ranges; useful on Gen9 too.
-3. A small per-generation table chosen from the chipset: pack prefix, PIPELINE_SELECT, STATE_BASE_ADDRESS, PIPE_CONTROL
-   flush bit, MOCS (0x78 on gen8), SLM encoding and barrier rule, VFE thread count (from EU_TOTAL), group limit (42),
-   no 0xE404 on gen8; private memory sized from EU_TOTAL (`lib/kcl.c:451` assumes 24 EU, harmless oversize).
-4. Timestamp frequency from getparam (on Gen9 it returns the current 12 MHz, so nothing changes there).
-5. Kernel build for bdw (patch-token reader, `-noFP64bRegion`), and the kernel questions of section 3; scratch-using
-   kernels stay unsupported like on Gen9.
+| Step | What | Where |
+|---|---|---|
+| D1 | patch-token reader, `kernels_gen8.c` (`-noFP64bRegion`), check against zebin | `lib/gen_kernels.py`, `lib/check_patchtokens.py` |
+| D2 | device parameters at init: chipset (CHV = 0x22b0-0x22b3), EU and subslice count, timestamp frequency, LLC, GTT size | `lib/kcl.c` `init()` |
+| D3 | Gen8 command stream: PIPELINE_SELECT and STATE_BASE_ADDRESS from `gen8_pack.h` (own file `kcl_gen8.c`: the Mesa headers define the same enumerators), dummy MEDIA_VFE_STATE after PIPELINE_SELECT, no 0xE404, DC flush with the CS stall, MOCS 0x78, L3CNTLREG 0x60000121 always (bit 9 clear, SLM layout; Beignet uses the same value), SLM in 4 KB steps with a barrier, at most 42 threads per group, VFE threads and private memory from EU_TOTAL | `lib/kcl.c`, `lib/kcl_gen8.c` |
+| D4 | without LLC: CPU-read objects snooped (SET_CACHING CACHED), CPU-written objects mapped WC + sfence before execbuffer; 4 GB PPGTT: addresses from 1 MB, freed ranges reused after the GPU is done with them | `lib/kcl.c` `kbo_new`, `kbo_addr` |
+| D5 | gen9blas on Gen8: FP32 and FP64 only, `sgemm_v` from `sgemm.cl`, grouped GEMV for every N (no `gemv_n_f`), band splitting assumes 50 / 8 GFLOPS | `lib/gen9blas.c` |
+
+The Gen9 command stream is unchanged; after D3 and after D5, `make -C lib check` passed on the HD 530 and the GEMM speeds
+matched `results/skylake-hd530-2026-11-12.txt` within 0.6 % (n >= 2048).
 
 ## 7. Open questions
 
