@@ -555,6 +555,27 @@ def sched(pro, loop, epi, P, NS):
                       f"        mov (8|M0)  r{Po[(r, k)]}.0<1>:f  r{Pe[(r, k)]}.0<8;8,1>:f"]
         return o
 
+    def mask():
+        """CAUSAL (template option): lim is the per-subgroup visible key count nv (attn.cl), cnt the first key of the
+        current block. A block with rem = nv - cnt < 8*NK keys left is the last, partial one: its score lanes of keys
+        >= nv are set to -1e30 (exp -> 0). Full blocks cost 3 scalar instructions (add, cmp, jmpi). Uses T1 (lane
+        ids, :w) and T2.2 (rem, :d; read as T2.4:w), both free here (the softmax rewrites them; Mx sits in T2.4:f+ as
+        dwords 4..7, not dword 2); flag f1.0 (the softmax sets it again before each use)."""
+        o = [f"{W}add (1|M0)  r{T2}.2<1>:d  {lim}<0;1,0>:d  -{cnt}<0;1,0>:d",
+             f"{W}cmp (1|M0)  (lt)f1.0  null<1>:d  r{T2}.2<0;1,0>:d  {8 * NK}:w",
+             "(W&~f1.0) jmpi  LATT_NOMASK",
+             f"{W}mov (8|M0)  r{T1}.0<1>:w  0x76543210:v"]
+        for k in range(NK):
+            if k:
+                o.append(f"{W}add (1|M0)  r{T2}.2<1>:d  r{T2}.2<0;1,0>:d  -8:w")
+            o.append(f"{W}cmp (8|M0)  (ge)f1.0  null<1>:w  r{T1}.0<8;8,1>:w  r{T2}.4<0;1,0>:w")
+            o += [f"(W&f1.0) mov (8|M0)  r{S[(r, k)]}.0<1>:f  -1e+30:f" for r in range(RQ)]
+        o.append("LATT_NOMASK:")
+        return o
+
+    causal = P.get("CAUSAL", 0) == 1
+    if causal:
+        assert Mx != T2 or MO > 2, "rem (T2.2) would overlap the row maxima"
     for s in range(NS):
         out += load(s)
     out.append("LATT_LOOP:")
@@ -563,7 +584,7 @@ def sched(pro, loop, epi, P, NS):
         out += kmads(s) if s < nks else vmads(s - nks)
         out += load(s + NS)
         if s == nks - 1:
-            out += softmax()
+            out += (mask() if causal else []) + softmax()
     out += [f"{W}add (1|M0)  {cnt}<1>:d  {cnt}<0;1,0>:d  {8 * NK}:w",
             f"{W}cmp (8|M0)  (lt)f0.0  null<1>:d  {cnt}<0;1,0>:d  {lim}<0;1,0>:d",
             "(W&f0.0) jmpi  LATT_LOOP"]

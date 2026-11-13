@@ -127,6 +127,18 @@ double gen9blas_last_time_ms(void);     // GEN9BLAS_PROFILE=1: GEMM kernel time 
 int gen9blas_last_zero_copy(void);      // GEMM: bits 1 = A, 2 = B, 4 = C zero-copy (memory from gen9blas_alloc)
 const char *gen9blas_error(void);
 
+// ---- Flash attention for the ggml backend (lib/gen9blas_attn.c, docs/attention-gpu.md section 11; kcl build only) ----
+// llama.cpp layouts: Q and O F32 [token][H][D]; K and V F16 rows of HKV*D values (row j, head h at h*D), the first nk
+// rows used (nk a multiple of 16); k_bytes / v_bytes: bytes from K / V to the end of the whole KV tensor (pinned once).
+// Token t attends to keys 0 .. min(nk, vis0 + dvis*t) - 1 (dvis 1: causal, 0: the same count for all), scores scaled
+// by scale, FP32 accumulation. Shapes with a built-in binary: (D, H/HKV, HKV) = (128, 6, 2) and (64, 4, 8).
+// Returns 0 (done), 1 (not handled: unsupported shape or memory not mappable; nothing was written), -1 (GPU error:
+// O is undefined, recompute it). *launches (may be NULL): number of k_attn launches (split at ~2e10 FLOP).
+int gen9blas_attn_supported(int D, int H, int HKV);
+int gen9blas_attn_f16kv(int D, int H, int HKV, int nq, int nk, const float *Q, const uint16_t *K, size_t k_bytes,
+                        const uint16_t *V, size_t v_bytes, float *O, float scale, int vis0, int dvis, int *launches);
+const char *gen9blas_attn_error(void);
+
 #ifdef __cplusplus
 }
 #endif

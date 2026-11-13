@@ -4,13 +4,15 @@
 GEN = third_party/mesa
 CFL = -O2 -Wall -shared -fPIC
 CL_SOURCES = ../bench/hgemm.cl ../bench/sgemm.cl ../bench/dgemm.cl ../bench/level12.cl ../bench/gen_h.bin ../bench/gen_hd.bin ../bench/gen_s.bin
+# attention (gen9blas_attn.c): the *_tokc binaries of `make -C ../asm attn` (whl), embedded when present
+CL_SOURCES += $(wildcard ../bench/attn_qwen_tokc.bin ../bench/attn_llama_tokc.bin)
 all: libgen9blas.so libgen9blas_blas.so libgen9blas_neo.so libgen9blas_blas_neo.so
 
 kernels.c: gen_kernels.py $(CL_SOURCES)
 	python3 gen_kernels.py ../bench .kernels > $@
 
-libgen9blas.so: gen9blas.c gen9blas.h kcl.c kcl.h kcl_desc.h kernels.c $(GEN)/gen9_pack.h
-	gcc $(CFL) -I$(GEN) -o $@ gen9blas.c kcl.c kernels.c -lm
+libgen9blas.so: gen9blas.c gen9blas.h kcl.c kcl.h kcl_desc.h kernels.c $(GEN)/gen9_pack.h gen9blas_attn.c
+	gcc $(CFL) -I$(GEN) -o $@ gen9blas.c kcl.c kernels.c gen9blas_attn.c -lm
 
 libgen9blas_neo.so: gen9blas.c gen9blas.h
 	gcc $(CFL) -DGEN9BLAS_NEO -o $@ gen9blas.c -lOpenCL -lm

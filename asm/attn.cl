@@ -74,9 +74,17 @@ __kernel void k_kt(__global const ushort *K, __global ushort *Kt, int nk) {
 #endif
 #define PVLOOP(k) _Pragma("unroll") for (int j = 0; j < 8; j++) { READV vp += HKV * D; ROWS(PV##k) }
 
+// CAUSAL (stage 3, docs/attention-gpu.md section 11): index-based masking. Query token t sees the first
+// nv = min(nk, vis0 + dvis * t) keys (dvis 1: causal, 0: the same count for every token); the loop runs over the
+// ceil(nv / (8*NK)) key blocks only (fully masked blocks are skipped), and attn_gen.py masks the keys >= nv of the
+// one partial block in its generated loop (lim = nv). All RQ rows of a subgroup belong to one token (G % RQ == 0).
 __attribute__((intel_reqd_sub_group_size(8)))
 __kernel void k_attn(__global const float *Q, __global const ushort *Kt, __global const ushort *V, __global float *O,
-                     int nq, int nk, float qscale) {
+                     int nq, int nk, float qscale
+#ifdef CAUSAL
+                     , int vis0, int dvis
+#endif
+                     ) {
     int sg = get_group_id(0) * get_num_sub_groups() + get_sub_group_id(), lane = get_sub_group_local_id();
     int per_head = nq * G / RQ;
 #ifdef HKV_INNER   // grid order experiment (docs/attention-gpu.md section 10): KV heads alternate between subgroups
@@ -88,7 +96,12 @@ __kernel void k_attn(__global const float *Q, __global const ushort *Kt, __globa
     ROWS(LOADQ)
     const __global ushort *kp = Kt + (size_t)hkv * nk * D;
     const __global ushort *vp = V + hkv * D;
-    for (int kb = 0; kb < nk; kb += 8 * NK) {
+#ifdef CAUSAL
+    const int nv = sub_group_broadcast(min(nk, vis0 + dvis * (row0 / G)), 0);   // uniform for IGC: scalar loop limit
+#else
+    const int nv = nk;
+#endif
+    for (int kb = 0; kb < nv; kb += 8 * NK) {
         ROWS(ZS)
         _Pragma("unroll")
         for (int c = 0; c < D / 8; c++) {

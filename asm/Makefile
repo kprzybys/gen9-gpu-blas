@@ -51,7 +51,7 @@ $(BIN_DIR)/sgemm_asm.bin: sgemm.d sgemm_map.txt sgemm_asm.py
 # attn_gen.py refuses to run with another ocloc than the pinned one (OCLOC_VERSION there, 24.35.30872.36).
 DEVICE ?= whl
 ATTN_OPTS = -cl-fast-relaxed-math -cl-mad-enable
-ATTN_BINS = attn_qwen attn_llama attn_qwen_tok attn_llama_tok
+ATTN_BINS = attn_qwen attn_llama attn_qwen_tok attn_llama_tok attn_qwen_tokc attn_llama_tokc
 # *_tok: Q in llama.cpp's layout Q[t][h][d] (-DQTOK, docs/attention-gpu.md section 10), for bench/attn_kcl and
 # bench/attn with QTOK=1; the loop is generated the same way (only IGC's prologue differs).
 attn: $(addprefix $(BIN_DIR)/,$(addsuffix .bin,$(ATTN_BINS)))
@@ -67,6 +67,12 @@ $(BIN_DIR)/attn_qwen_tok.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-device
 	DEVICE=$(DEVICE) python3 -I attn_gen.py sched4 attn.cl "$(ATTN_OPTS) -DD=128 -DG=6 -DHKV=2 -DRQ=2 -DNK=2 -DQTOK" $@
 $(BIN_DIR)/attn_llama_tok.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-device
 	DEVICE=$(DEVICE) python3 -I attn_gen.py sched2 attn.cl "$(ATTN_OPTS) -DD=64 -DG=4 -DHKV=8 -DRQ=4 -DNK=2 -DQTOK" $@
+# *_tokc: *_tok plus index-based causal masking (-DCAUSAL=1: per-subgroup key count, the partial block masked in the
+# generated loop; docs/attention-gpu.md section 11), the binaries the library (lib/gen9blas_attn.c) runs.
+$(BIN_DIR)/attn_qwen_tokc.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-device
+	DEVICE=$(DEVICE) python3 -I attn_gen.py sched4 attn.cl "$(ATTN_OPTS) -DD=128 -DG=6 -DHKV=2 -DRQ=2 -DNK=2 -DQTOK -DCAUSAL=1" $@
+$(BIN_DIR)/attn_llama_tokc.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-device
+	DEVICE=$(DEVICE) python3 -I attn_gen.py sched2 attn.cl "$(ATTN_OPTS) -DD=64 -DG=4 -DHKV=8 -DRQ=4 -DNK=2 -DQTOK -DCAUSAL=1" $@
 FORCE:
 
 attn-check:

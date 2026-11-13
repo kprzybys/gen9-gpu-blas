@@ -37,3 +37,4 @@ bench/.attn-device
 bench/attn_kcl
 bench/attn_kernels.c
 bench/.attn_kernels/
+ggml-backend/test_attn

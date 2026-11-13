@@ -19,6 +19,8 @@
 //   STEP      reference sampling as in bench/attn (default 7; 1 = whole output; 0 = no check); CHECK_LAYERS
 //             comma-separated layers to check (default first and last)
 //   QSIGMA    score scale as in bench/attn (default 5)
+//   VIS0      causal binaries (*_tokc, docs/attention-gpu.md section 11): token t sees min(n_k, VIS0 + DVIS*t) keys
+//             (DVIS default 1); default binary attn_*_tokc.bin; FLOP and the FP64 reference count visible keys only
 // Output: pass 0 (first use: userptr pinning of every layer's pages) separately from the steady state; kernel time
 // from GPU timestamps (PIPE_CONTROL, 12 MHz), wall time per layer incl. submission and wait, CPU time, GPU clock
 // sampled every 2 ms by a helper thread, error vs FP64.
@@ -91,7 +93,9 @@ int main(int argc, char **argv) {
     if (argc < 8) { fprintf(stderr, "usage: %s H HKV D n_q n_k RQ NK\n", argv[0]); return 2; }
     int H = atoi(argv[1]), HKV = atoi(argv[2]), D = atoi(argv[3]), nq = atoi(argv[4]), nk = atoi(argv[5]);
     int RQ = atoi(argv[6]), NK = atoi(argv[7]), G = H / HKV;
-    const char *bin = getenv("BIN") ? getenv("BIN") : D == 128 ? "attn_qwen_tok.bin" : "attn_llama_tok.bin";
+    int vis0 = getenv("VIS0") ? atoi(getenv("VIS0")) : 0, dvis = getenv("DVIS") ? atoi(getenv("DVIS")) : 1;
+    const char *bin = getenv("BIN") ? getenv("BIN") : D == 128 ? (vis0 ? "attn_qwen_tokc.bin" : "attn_qwen_tok.bin")
+                                                              : (vis0 ? "attn_llama_tokc.bin" : "attn_llama_tok.bin");
     int kv_size = getenv("KV_SIZE") ? atoi(getenv("KV_SIZE")) : nk;
     int L = getenv("LAYERS") ? atoi(getenv("LAYERS")) : 28, passes = getenv("PASSES") ? atoi(getenv("PASSES")) : 5;
     int reg_view = getenv("REG") && !strcmp(getenv("REG"), "view");
@@ -103,6 +107,7 @@ int main(int argc, char **argv) {
     }
     size_t global = (size_t)HKV * (nq * G / RQ) * 8;
     size_t local = getenv("LOCAL") ? strtoull(getenv("LOCAL"), 0, 0) : 64;   // section 10: 64 > 128 by 4 % (Qwen)
+    if (!getenv("LOCAL")) while (local > 8 && global % local) local /= 2;     // as lib/gen9blas_attn.c
     if (local == 0 || local % 8 || global % local) {
         fprintf(stderr, "LOCAL=%zu: must be a multiple of 8 (full subgroups) dividing the global size %zu\n", local, global);
         return 2;
@@ -139,12 +144,13 @@ int main(int argc, char **argv) {
     float qscale = (float)(1.0 / sqrt((double)D) * 1.4426950408889634);
 
     printf("# %s H=%d HKV=%d D=%d nq=%d nk=%d RQ=%d NK=%d | KV_SIZE=%d LAYERS=%d REG=%s local=%zu kt_local=%zu | KV buffer %.1f MB"
-           " at page offset %lu, Q/O page offset %lu\n", bin, H, HKV, D, nq, nk, RQ, NK, kv_size, L,
+           " at page offset %lu, Q/O page offset %lu | VIS0=%d DVIS=%d\n", bin, H, HKV, D, nq, nk, RQ, NK, kv_size, L,
            reg_view ? "view" : "tensor", local, lkt, 2.0 * L * S / 1e6, (unsigned long)((uintptr_t)kv & 4095),
-           (unsigned long)((uintptr_t)QO & 4095));
+           (unsigned long)((uintptr_t)QO & 4095), vis0, dvis);
 
     pthread_t th; pthread_create(&th, NULL, sampler, NULL);
-    const double flop = 4.0 * nq * nk * H * D;
+    double flop = 4.0 * nq * nk * H * D;
+    if (vis0) { flop = 0; for (int t = 0; t < nq; t++) { long v = vis0 + (long)dvis * t; flop += 4.0 * H * D * (v < nk ? v : nk); } }
     const int P = passes + 1;
     double *t_kt = calloc((size_t)P * L, sizeof(double)), *t_a = calloc((size_t)P * L, sizeof(double));
     double *t_w = calloc((size_t)P * L, sizeof(double)), *p_wall = calloc(P, sizeof(double)), *p_cpu = calloc(P, sizeof(double));
@@ -162,6 +168,7 @@ int main(int argc, char **argv) {
         CHECK(clSetKernelArg(ka, 2, sizeof mV, &mV)); CHECK(clSetKernelArg(ka, 3, sizeof mO, &mO)); \
         CHECK(clSetKernelArg(ka, 4, sizeof nq, &nq)); CHECK(clSetKernelArg(ka, 5, sizeof nk, &nk)); \
         CHECK(clSetKernelArg(ka, 6, sizeof qscale, &qscale)); \
+        if (vis0) { CHECK(clSetKernelArg(ka, 7, sizeof vis0, &vis0)); CHECK(clSetKernelArg(ka, 8, sizeof dvis, &dvis)); } \
         CHECK(clEnqueueNDRangeKernel(q, kkt, 1, NULL, &gkt, &lkt, 0, NULL, ev1)); \
         CHECK(clEnqueueNDRangeKernel(q, ka, 1, NULL, &global, &local, 0, NULL, ev2)); \
         CHECK(kcl_wait()); \
@@ -238,13 +245,14 @@ int main(int argc, char **argv) {
             for (int t = 0; t < nq; t = (t + step < nq || t == nq - 1) ? t + step : nq - 1) {
                 for (int h = 0; h < H; h++) {
                     const float *qr = Q + ((size_t)t * H + h) * D; int hkv = h / G; double mx = -1e300, lsum = 0;
-                    for (int j = 0; j < nk; j++) {
+                    long nvl = vis0 ? vis0 + (long)dvis * t : nk; const int nv = nvl < nk ? (int)nvl : nk;
+                    for (int j = 0; j < nv; j++) {
                         const double *kr = Kd + ((size_t)j * HKV + hkv) * D; double a = 0;
                         for (int d = 0; d < D; d++) a += (double)qr[d] * kr[d];
                         s[j] = a / sqrt((double)D); if (s[j] > mx) mx = s[j];
                     }
                     for (int d = 0; d < D; d++) o[d] = 0;
-                    for (int j = 0; j < nk; j++) {
+                    for (int j = 0; j < nv; j++) {
                         double pj = exp(s[j] - mx); lsum += pj; const double *vr = Vd + ((size_t)j * HKV + hkv) * D;
                         for (int d = 0; d < D; d++) o[d] += pj * vr[d];
                     }
