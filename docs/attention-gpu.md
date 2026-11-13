@@ -5,7 +5,7 @@ Status: model (sections 1-7), stage 2 result (section 8: criterion not met in Op
 check (section 10: the same kernel through kcl on userptr memory in llama.cpp's layout, 301 GFLOPS incl. pre-pass
 and submission, work-group size 64) and stage 3 (section 11: integrated into the ggml backend, on by default (GEN9_ATTN=0 turns it off),
 causal masking by index; pp512 at depth 3584 -36 % (Qwen2.5-1.5B) / -43 % (Llama-3.2-1B) time, perplexity within
-noise). Evidence tags as in [performance-model.md](performance-model.md)
+noise); Qwen2.5-7B (G 7) added in section 13 (pp512 d3584 -37 %). Evidence tags as in [performance-model.md](performance-model.md)
 ([SPEC], [MEAS], [SW], [EST], [HYP]). Stage 2 (a standalone kernel in `bench/`) starts only from this prediction,
 and its result is judged against the stop criterion in section 6.
 
@@ -337,7 +337,7 @@ raw outputs, predictions with timestamps and tables in `results/attn-integration
   launch); one submission, `kcl_wait` (a GPU reset is reported, the node is then recomputed on the CPU).
   `KCL_USERPTR_MB` (1 GB) is not raised: the 1.5B/1B caches are 117-268 MB; if a region cannot be mapped the library
   returns "not handled" and the backend computes the node with ggml-cpu. Qwen2.5-7B at 32k (1.8 GB of K/V) would be
-  re-pinned through kcl's LRU per layer (~15 ms per layer [EST]); it has no binary yet anyway (G = 7).
+  re-pinned through kcl's LRU per layer (~15 ms per layer [EST]); its binary exists since section 13.
 - Backend (`ggml-backend/ggml-gen9.cpp`, on by default, `GEN9_ATTN=0` turns it off): supports_op accepts F16 K/V, F32 Q/O, no ALiBi /
   soft-capping / sinks, (D, G, H_kv) with a binary ((128, 6, 2) Qwen2.5-1.5B, (64, 4, 8) Llama-3.2-1B, (64, 1, 20) whisper encoder), llama.cpp's
   layouts (Q the permuted view of Qcur, K/V rows of H_kv*D, dst contiguous), n_q >= 32, n_kv a multiple of 16 (or,
@@ -352,7 +352,7 @@ raw outputs, predictions with timestamps and tables in `results/attn-integration
 
 **Accepted / declined.** On the GPU: Qwen2.5-1.5B and Llama-3.2-1B prompt batches (n_q >= 32) with the standard
 single-sequence causal mask, with or without kv_rows. Declined to ggml-cpu: token generation (n_q 1), quantized or F32
-K/V, ALiBi, soft-capping (Gemma 2), sinks, shapes without a binary (Qwen2.5-7B G 7, Gemma D 256, ...), other
+K/V, ALiBi, soft-capping (Gemma 2), sinks, shapes without a binary (Gemma D 256, ...; Qwen2.5-7B added in section 13), other
 layouts. test-backend-ops (`-o FLASH_ATTN_EXT -b GEN9`, GEN9_ATTN=1): 0 failures, all 5721 cases declined (its masks
 are random values and its K/V are not in the KV-cache layout), so the GPU path is tested by `ggml-backend/test_attn`
 (FLASH_ATTN_EXT node on GEN9 vs ggml-cpu in llama.cpp's layouts, test-backend-ops' NMSE metric): NMSE 4e-14..4e-12
@@ -401,7 +401,7 @@ pipes 90 % of active time, IPC 1.90): the attention kernel runs as near the FPU 
 of the recording rose 50 -> 58 % (diluted by model load and depth fill; predicted 70-75 % was wrong).
 
 **Default.** On since 2026-11-13 after the laptop measurement (`results/attn-integration-uhd620-2026-11-13.txt`: pp512
-at d 3584 -53 % Qwen / -57 % Llama, perplexity unchanged); `GEN9_ATTN=0` turns it off. **Open:** binaries for more shapes (Qwen2.5-7B G 7, Gemma-2 D 256 with soft-capping); token
+at d 3584 -53 % Qwen / -57 % Llama, perplexity unchanged); `GEN9_ATTN=0` turns it off. **Open:** binaries for more shapes (Gemma-2 D 256 with soft-capping; Qwen2.5-7B done in section 13); token
 generation (n_q 1) stays on the CPU; test-backend-ops cannot reach the GPU path (a case in the KV-cache layout with a
 prefix mask would be needed upstream); the CPU idles while the GPU computes attention (overlap with the next layer's
 CPU work is not possible inside one ggml split).
@@ -473,3 +473,36 @@ immediate offset); s - m, exp, l += p and the odd p copy are the arithmetic itse
 because each V block read covers four consecutive GRFs). Qwen stays ~37 GFLOPS short of the port bound: further
 progress needs a different data path (fewer sends: e.g. FP16 Q and more rows per thread, or a message with an address
 offset), not fewer bookkeeping instructions.
+
+## 13. Qwen2.5-7B (G = 7)
+
+Qwen2.5-7B has 28 query heads over 4 KV heads, G = 7, so the RQ rows of a subgroup (RQ = 2) can straddle two tokens
+with different causal visibility. Two designs were modelled before building (`results/attn-7b-2026-11-13.txt` sections
+1-2): (a) pad G to 8 (a dummy head per group, 8/7 of the work), (b) per-row visibility: template option `ROWVIS=1`
+computes `nv` per row instead of per subgroup and masks each row against its own limit. Predicted: (b) ~= the 1.5B
+kernel's rate, (a) +14 % time.
+
+**Kernel** [MEAS, HD 530, kcl + userptr, causal d3584, 28 layers x 5 passes, 3 alternating rounds]: (b) 90.5 ms per
+layer = 311.5 GFLOPS; (a)-proxy (H 32) 103.7 ms (+14.6 %, 272 useful GFLOPS); Qwen 1.5B control 307 GFLOPS. (b) is the
+binary `attn_qwen7b_tokc.bin` ({128,7,4,2,2}); loopcheck, 0 bank conflicts, no scratch. Correctness: FP64 STEP=1
+max error <= 3.8e-6, RAMP +-1 3.6e-5 / 7.9e-5 (old binaries 2.8-8.5e-5), poison 0.8-0.9, test_attn (llama.cpp layout,
+depths 0..3584, 8k and 16k = 7 launches per node, n_q 75, kv_rows, holes, KCL_USERPTR_MB=1 fallback) NMSE <= 1.2e-12.
+The 14 older binaries stay byte-identical (`asm/attn_sha256.txt`).
+
+**End to end** [MEAS, laptop UHD 620, `results/attn-7b-2026-11-13.txt` section 6, -r 3, GEN9_CACHE_MB 3500, each run in
+a 9 GB memory scope without swap]:
+
+| pp512 t/s | GEN9_ATTN=0 | default (GPU) | prompt time | predicted |
+|---|---|---|---|---|
+| d0 | 39.9 | 44.6 | -11 % | -3.5 % |
+| d2048 | 26.1 | 39.6 | -34 % | -24 % |
+| d3584 | 23.4 | 37.4 | -37 % | -33 % |
+
+Perplexity (-c 2048, 4 chunks) 6.4116 vs 6.4115. The attention launches run at 274-310 GFLOPS including pinning and
+submission, and no node fell back to the CPU.
+
+**Memory.** At n_ctx 4096 the K/V cache of 7B takes 235 MB, well under the 1 GB userptr limit, which holds ~18.7k
+tokens. The model plus the packed-weight cache is the real limit on a 16 GB machine: an unprotected 7B run with five
+other sessions open ended in an OOM kill. Measure 7B in a memory-capped scope (`systemd-run --user --scope -p
+MemoryMax=9G -p MemorySwapMax=0`) with GEN9_CACHE_MB set explicitly.
+
