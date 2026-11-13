@@ -52,7 +52,8 @@ With n_q = 512 queries at depth d, causal inside the ubatch, each query sees on 
 | FP16 multiply-add (FP16 accumulator) | 803 GFLOPS | 0.42 s | [MEAS] |
 | K/V reads, 1.9 GB, per-layer cache (4.2 MB) inside LLC (6 MB) | 60-65 GB/s | 0.03 s | [MEAS] block reads 8-16 MB |
 | same from RAM (worst case) | 20 GB/s | 0.10 s | [MEAS] |
-| Softmax exp | unknown (math box) | 0.01-0.05 s if 15-60 Gop/s | gap, section 7 |
+| Softmax exp | 13.3 Gop/s `exp`, 44.0 `native_exp` (HD 530, 1.0 GHz) | 0.050 s / 0.015 s | [MEAS] `results/attn-micro-hd530-2026-11-13.txt` |
+| SLM reads (K/V tiles) | 177 GB/s consecutive or broadcast, 96 GB/s stride 2 (HD 530, 1.0 GHz) | 2-byte element must serve >= 2 multiply-adds from registers at 300 GFLOPS | [MEAS] same file |
 | Softmax other FP32 ops | 200 Gop/s | 0.013 s | [MEAS] FP32 mul/add |
 
 Attention here is compute-bound: the K/V traffic is a few percent of the multiply-add time even from RAM, as long
@@ -112,7 +113,7 @@ tries the FP16-partial-sum variant before deciding.
 
 | Quantity | Why | Microbenchmark |
 |---|---|---|
-| `exp` throughput (FP32, native and `-cl-fast-relaxed-math`) | softmax; if below about 10 Gop/s it reaches 10 % of the multiply-add time | FMA-loop style kernel (`bench/arith_throughput_latency.sh`) |
-| SLM read bandwidth and bank conflicts | K/V tiles shared by the subgroups of a work-group | block and scattered SLM reads, 1-8 subgroups |
-| Mixed-mode `mad` (hf sources, f accumulator) throughput in SIMD8 | the FP32-accumulation ceiling assumes the full 410 GFLOPS | same FMA loop with half inputs |
+| ~~`exp` throughput~~ | measured: softmax costs 1 % with `native_exp` (3-5 % with precise `exp`) | done, `bench/attn_micro.sh` |
+| ~~SLM read bandwidth~~ | measured: 177 GB/s, broadcast as fast as consecutive, stride 2 halves it | done, `bench/attn_micro.sh` |
+| ~~Mixed-mode `mad` rate~~ | not needed: each K/V element is reused by B_q x g queries (Qwen 4 x 6), so it is converted to FP32 once and the products run as plain FP32 `mad` (410 GFLOPS, measured) | dropped |
 | CPU attention rate on the laptop (UHD 620, PL1) | the baseline there; expected below the desktop's 106 GFLOPS | the depth sweep of `results/attention-depth-hd530-2026-11-13.txt` on the laptop |

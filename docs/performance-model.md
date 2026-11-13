@@ -57,6 +57,7 @@ Conventions:
 | Page pinning for userptr (first execbuf) | about 0.45 us CPU per 4 KB page (about 10 GB/s copy-equivalent; DMA mapping through the IOMMU, `DMA-FQ`) | `results/userptr-2026-11-12.txt` |
 | GPU read from a userptr object | same as from a GEM buffer for sequential reads (64 MB: 9.1 vs 8.8 ms) | `results/userptr-2026-11-12.txt` |
 | userptr with many pages touched at once | a kernel touching hundreds of 4 KB pages at once (gemv N: 4 rows per subgroup) loses 2x on userptr (10.5 vs 22.5 GB/s on USM); 1 page per row per group: 18.9 GB/s. [HYP]: larger PPGTT pages for GEM objects aligned to 64 KB, 4 KB only for userptr | `results/gemv-n-2026-11-12.txt` |
+| `exp` FP32 / SLM reads (HD 530, Gen9 GT2, 1.0 GHz; same EU and subslice design) | `exp` 13.3 Gop/s, `native_exp` 44.0; SLM float4 reads 177 GB/s consecutive or broadcast, 96 GB/s stride 2 | `results/attn-micro-hd530-2026-11-13.txt` |
 | Writes to one 64 B line through two GPU addresses (two objects over the same pages) in one kernel | one write is lost | `results/userptr-2026-11-12.txt`, `lib/test_userptr.py`, [no-neo.md](no-neo.md) |
 
 ## 3. Software behaviour [SW] (NEO 24.35.30872.36, IGC 1.0.17537.24 from `ocloc` 24.35)
@@ -120,7 +121,6 @@ untyped surface 200-600, atomics 14 000. These are the compiler authors' assumpt
 | Scattered read bandwidth (2/4 B per line) vs block | as above | not measured |
 | GPU gap between dependent kernels in a queue | calls with several kernels (pack A, pack B, GEMM, epilogue) | not measured; whole HGEMM call at n = 1024: about 0.4 ms outside kernel times |
 | Thread dispatch cost vs grid size | small kernels | not measured |
-| `exp` throughput (FP32), SLM bandwidth and bank conflicts, mixed-mode `mad` (hf -> f) rate in SIMD8 | attention on the GPU ([attention-gpu.md](attention-gpu.md)) | not measured |
 
 ## 6. Formulas
 

@@ -20,6 +20,7 @@ static char *read_file(const char *p) {
 
 static int read_freq(void) {
     FILE *f = fopen(FREQ_FILE, "r"); int v = -1;
+    if (!f) f = fopen("/sys/class/drm/card0/gt_act_freq_mhz", "r");   // single-GPU machines number the iGPU card0
     if (f) { if (fscanf(f, "%d", &v) != 1) v = -1; fclose(f); }
     return v;
 }

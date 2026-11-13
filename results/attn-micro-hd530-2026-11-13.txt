@@ -1,0 +1,19 @@
+# Attention microbenchmarks (bench/attn_micro.sh), desktop HD 530 (Gen9 GT2, 24 EU), NEO 24.35.30872.36, 2026-11-13
+# clbench, best of 5; the compiler chose SIMD32 (sg=32) for both kernels
+# exp, FP32, 8 independent chains (Gop/s; one op = exp + the multiply feeding it)
+exp              k_exp          global=131072   local=256  sg=32 n=200    time=  126.643 ms     13.25 Gop/s  GPU~1000 MHz
+native_exp       k_exp          global=131072   local=256  sg=32 n=200    time=   38.109 ms     44.02 Gop/s  GPU~1000 MHz
+exp fast-relaxed k_exp          global=131072   local=256  sg=32 n=200    time=   38.103 ms     44.03 Gop/s  GPU~1000 MHz
+# SLM reads, float4 per lane, work-group 256, 32 KB (GB/s); PAT 0 consecutive, 1 broadcast, 2 stride 2
+PAT=0            k_slm          global=24576    local=256  sg=32 n=2000   time=   35.600 ms    176.72 Gop/s  GPU~1000 MHz
+PAT=1            k_slm          global=24576    local=256  sg=32 n=2000   time=   35.490 ms    177.27 Gop/s  GPU~1000 MHz
+PAT=2            k_slm          global=24576    local=256  sg=32 n=2000   time=   65.792 ms     95.63 Gop/s  GPU~1000 MHz
+
+## Reading (docs/attention-gpu.md, sections 4 and 7)
+- exp: 13.3 Gop/s precise, 44.0 Gop/s native_exp (= exp with -cl-fast-relaxed-math). Softmax of Qwen2.5-1.5B at
+  d = 3584 (6.6e8 exp) costs 50 ms precise / 15 ms native, i.e. 3-5 % / 1 % of the predicted 1.05-1.58 s:
+  not a bottleneck; use native_exp (or native_exp2 with log2(e) folded into the scale).
+- SLM: 177 GB/s for consecutive float4 and for broadcast (all lanes one address), about 92 % of 64 B/clock per
+  subslice x 3 subslices at 1.0 GHz (192 GB/s). Stride 2 float4: 96 GB/s (half of each 64 B access wasted).
+  At 300 GFLOPS (150 G multiply-adds/s) SLM supplies about 1.2 B per multiply-add, so a 2-byte K/V element read from
+  SLM must serve at least 2 multiply-adds from registers; broadcast reads cost the same as consecutive ones.
