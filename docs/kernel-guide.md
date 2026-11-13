@@ -47,7 +47,9 @@ Rules confirmed in this project (NEO 24.35, IGC from `ocloc` 24.35). Each links 
   `half` becomes byte-gathering reads and is slower (11-16 GB/s) [SW] ([pitfalls.md](pitfalls.md) §1).
 - 16 B per lane in SIMD16 (one 64 B line per message); 32 B per lane splits lines and a write without a prior read
   loses about 1.4x [SW].
-- Keep at least two block reads in flight per thread: L3 155 GB/s vs 117 with one at a time [MEAS]; issue reads
+- Keep at least two block reads in flight per thread: L3 155 GB/s vs 117 with one at a time [MEAS]; the ceiling
+  with >= 2 in flight is 7.1-7.6 B/clock/EU (HD 530 170-176 GB/s, UHD 620 200 GB/s; up to ~12 SIMD8 FP32 mads per
+  128 B block hide under the reads, `results/l3port-2026-11-13.txt`) [MEAS]; issue reads
   hundreds of clocks before use (L3 about 147 clocks, RAM about 440) [MEAS] ([pitfalls.md](pitfalls.md) §2).
 - Page locality first: with 4 KB pages a tile reading many distant rows collapses 15-20x at large N; pack into
   contiguous panels; never let neighbouring work-items write 16 panels or read 16 rows per k [MEAS]

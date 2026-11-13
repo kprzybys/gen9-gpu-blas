@@ -141,7 +141,29 @@
     "page_note": "tiles touching many distant rows collapse 15-20x (TLB) [MEAS, docs/pitfalls.md section 2]",
     "slm_kb_per_subslice": 64,
     "slm_gbs_float4": 177,
-    "slm_tag": "SPEC/MEAS"
+    "slm_tag": "SPEC/MEAS",
+    "l3_port_ceiling": {
+      "gbs": {
+        "hd530_1000mhz": [
+          170,
+          176
+        ],
+        "uhd620_1100mhz": [
+          199,
+          200
+        ]
+      },
+      "bytes_per_clk_per_eu": {
+        "hd530": [
+          7.1,
+          7.3
+        ],
+        "uhd620": 7.6
+      },
+      "tag": "MEAS",
+      "source": "results/l3port-2026-11-13.txt (bench/l3port.cl)",
+      "note": "OWord block reads, >= 2 in flight per thread; same for work-group 64/128 and a 1 MB region; up to 12 SIMD8 FP32 mads per 128 B hide under the reads. Qwen attention (16 mads per block) is issue-bound at ~88 % of this ceiling, not port-bound. OA L3ShaderThroughput matches true bytes once scaled by the OA clock (97-100 %)."
+    }
   },
   "send": {
     "block_read_used": {
@@ -173,6 +195,6 @@
     "alu_other_clk": 2,
     "tag": "MODEL",
     "source": "results/mt-model-2026-11-13.txt (fitted on 3 Qwen points, checked on 2 Llama points within 3 %)",
-    "note": "effective values of the multithreaded model, not hardware constants"
+    "note": "effective values of the multithreaded model, not hardware constants; port_bytes_per_clk_per_eu 6 is below the measured port ceiling (7.1-7.6, memory.l3_port_ceiling): in the model it stands for issue overhead and latency effects, not the data port alone"
   }
 }

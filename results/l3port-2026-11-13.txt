@@ -1,0 +1,100 @@
+# L3 / data-port ceiling and the Qwen attention loop (2026-11-13). Kernel bench/l3port.cl, scripts bench/l3port.sh,
+# bench/l3port_oa.sh. Question (docs/attention-gpu.md section 8, "What limits it now"): is Qwen attention (8 B of
+# block reads per SIMD8 FP32 mad, ~305 GFLOPS = ~152 GB/s on HD 530 at 1.0 GHz) bound by the data port / L3?
+#
+# Setup: 2048 SIMD8 subgroups, each streams n = 4096 OWord block reads of 128 B (L3-resident 64 KB region unless
+# noted), MADS FP32 mads per block on the block's data (operands from adjacent registers: no bank conflict), PF
+# blocks in flight per thread (refill right after use), addresses advanced by adds only (~3 non-mad instructions per
+# block, as in the attention loop). Gop/s = GB/s of block reads; GFLOPS = GB/s x MADS / 8. Best of 5 launches.
+# MADS 16 = the Qwen ratio (16 mads per 128 B block).
+#
+# History: two earlier versions were discarded as artifacts of the kernel, not the hardware: (1) IGC rotated the
+# prefetched blocks with ~25 movs per 2 blocks and the mads hit src1/src2 bank conflicts; (2) the address took an
+# integer multiply per block. Both made the mixed points issue-bound at ~240 GFLOPS (OA: FPU 93-96 % of active,
+# stall 3-5 %). Raw output of all three versions: in this session's scratchpad, not kept.
+
+## HD 530 (tc, i5-6500, NEO legacy, nice 19 / ionice idle), GPU ~1.0 GHz
+# 2026-11-13T19:09:38+01:00 tc HD 530, k_port, global 16384 (2048 subgroups), n 4096 blocks/subgroup, Gop/s = GB/s of block reads
+local 64  PF 2 MADS 0  time=    6.290 ms    170.70 Gop/s  GPU~1000 MHz
+local 64  PF 2 MADS 8  time=    6.318 ms    169.94 Gop/s  GPU~1000 MHz
+local 64  PF 2 MADS 12 time=    6.166 ms    174.15 Gop/s  GPU~1000 MHz
+local 64  PF 2 MADS 16 time=    7.333 ms    146.42 Gop/s  GPU~1000 MHz
+local 64  PF 2 MADS 24 time=   10.223 ms    105.03 Gop/s  GPU~978 MHz
+local 64  PF 2 MADS 32 time=   13.205 ms     81.31 Gop/s  GPU~983 MHz
+local 64  PF 4 MADS 0  time=    6.269 ms    171.26 Gop/s  GPU~1000 MHz
+local 64  PF 4 MADS 8  time=    5.903 ms    181.90 Gop/s  GPU~1000 MHz
+local 64  PF 4 MADS 12 time=    6.432 ms    166.95 Gop/s  GPU~1000 MHz
+local 64  PF 4 MADS 16 time=    7.313 ms    146.83 Gop/s  GPU~1000 MHz
+local 64  PF 4 MADS 24 time=    9.802 ms    109.54 Gop/s  GPU~1000 MHz
+local 64  PF 4 MADS 32 time=   12.456 ms     86.20 Gop/s  GPU~1000 MHz
+local 128 PF 2 MADS 0  time=    6.162 ms    174.25 Gop/s  GPU~1000 MHz
+local 128 PF 2 MADS 8  time=    5.961 ms    180.13 Gop/s  GPU~1000 MHz
+local 128 PF 2 MADS 12 time=    6.179 ms    173.76 Gop/s  GPU~1000 MHz
+local 128 PF 2 MADS 16 time=    7.284 ms    147.41 Gop/s  GPU~1000 MHz
+local 128 PF 2 MADS 24 time=    9.976 ms    107.64 Gop/s  GPU~1000 MHz
+local 128 PF 2 MADS 32 time=   13.051 ms     82.27 Gop/s  GPU~1000 MHz
+local 128 PF 4 MADS 0  time=    6.091 ms    176.27 Gop/s  GPU~1000 MHz
+local 128 PF 4 MADS 8  time=    6.093 ms    176.21 Gop/s  GPU~1000 MHz
+local 128 PF 4 MADS 12 time=    6.229 ms    172.39 Gop/s  GPU~1000 MHz
+local 128 PF 4 MADS 16 time=    7.010 ms    153.18 Gop/s  GPU~1000 MHz
+local 128 PF 4 MADS 24 time=    9.783 ms    109.76 Gop/s  GPU~977 MHz
+local 128 PF 4 MADS 32 time=   12.691 ms     84.60 Gop/s  GPU~982 MHz
+# region 1 MB (beyond L3, from LLC) and SHARE 8, local 64, PF 2
+MASK 1M  MADS 0  time=    6.172 ms    173.97 Gop/s  GPU~1000 MHz
+MASK 1M  MADS 16 time=    7.399 ms    145.11 Gop/s  GPU~1000 MHz
+SHARE 8  MADS 0  time=    6.322 ms    169.84 Gop/s  GPU~1000 MHz
+SHARE 8  MADS 16 time=    7.536 ms    142.48 Gop/s  GPU~1000 MHz
+## local 64 -DMADS=0 -DPF=4 (bytes per launch 1073741824)
+OA ComputeBasic: 9 busy reports of 31, GPU time 38.8 ms, clock 933 MHz
+EU active 62.0 %  stall 34.0 %  idle 3.9 %  occupancy 95.0 %
+FPU both 12.5 % (20 % of active)  FPU0 37.9 %  FPU1 34.2 %  send 5.6 %  IPC 1.21
+L3ShaderThroughput 159.06 GB/s  GtiReadThroughput 0.02 GB/s  GtiWriteThroughput 0.02 GB/s  SlmBytesRead 0.00 GB/s  SlmBytesWritten 0.00 GB/s
+## local 64 -DMADS=16 -DPF=2 (bytes per launch 1073741824)
+OA ComputeBasic: 9 busy reports of 31, GPU time 54.5 ms, clock 939 MHz
+EU active 90.9 %  stall 5.8 %  idle 3.3 %  occupancy 93.8 %
+FPU both 86.5 % (95 % of active)  FPU0 89.4 %  FPU1 88.0 %  send 4.7 %  IPC 1.95
+L3ShaderThroughput 134.70 GB/s  GtiReadThroughput 0.02 GB/s  GtiWriteThroughput 0.02 GB/s  SlmBytesRead 0.00 GB/s  SlmBytesWritten 0.00 GB/s
+## local 64 -DMADS=16 -DPF=4 (bytes per launch 1073741824)
+OA ComputeBasic: 9 busy reports of 31, GPU time 53.3 ms, clock 937 MHz
+EU active 88.2 %  stall 4.9 %  idle 6.9 %  occupancy 91.7 %
+FPU both 84.1 % (95 % of active)  FPU0 86.8 %  FPU1 85.6 %  send 4.7 %  IPC 1.95
+L3ShaderThroughput 134.16 GB/s  GtiReadThroughput 0.02 GB/s  GtiWriteThroughput 0.02 GB/s  SlmBytesRead 0.00 GB/s  SlmBytesWritten 0.00 GB/s
+## local 128 -DMADS=16 -DPF=4 (bytes per launch 1073741824)
+OA ComputeBasic: 9 busy reports of 31, GPU time 45.3 ms, clock 943 MHz
+EU active 90.9 %  stall 4.5 %  idle 4.6 %  occupancy 90.8 %
+FPU both 86.0 % (95 % of active)  FPU0 89.0 %  FPU1 87.9 %  send 4.8 %  IPC 1.95
+L3ShaderThroughput 138.47 GB/s  GtiReadThroughput 0.02 GB/s  GtiWriteThroughput 0.02 GB/s  SlmBytesRead 0.00 GB/s  SlmBytesWritten 0.00 GB/s
+
+## UHD 620 (gp-laptop, 1 DIMM DDR4-2400), GPU 1.1 GHz, PF 4 (a CPU benchmark of separate work ran meanwhile)
+local 64 MADS 0  time=    5.362 ms    200.23 Gop/s  GPU~1100 MHz
+local 64 MADS 8  time=    5.374 ms    199.81 Gop/s  GPU~1100 MHz
+local 64 MADS 12 time=    5.566 ms    192.91 Gop/s  GPU~1100 MHz
+local 64 MADS 16 time=    6.287 ms    170.78 Gop/s  GPU~1100 MHz
+local 64 MADS 24 time=    8.824 ms    121.69 Gop/s  GPU~1100 MHz
+local 64 MADS 32 time=   11.364 ms     94.49 Gop/s  GPU~1100 MHz
+local 128 MADS 0  time=    5.374 ms    199.82 Gop/s  GPU~1100 MHz
+local 128 MADS 8  time=    5.398 ms    198.92 Gop/s  GPU~1100 MHz
+local 128 MADS 12 time=    5.490 ms    195.56 Gop/s  GPU~1100 MHz
+local 128 MADS 16 time=    6.243 ms    172.00 Gop/s  GPU~1100 MHz
+local 128 MADS 24 time=    8.896 ms    120.71 Gop/s  GPU~1100 MHz
+local 128 MADS 32 time=   11.536 ms     93.08 Gop/s  GPU~1100 MHz
+
+## Reading
+Port ceiling [MEAS]: HD 530 170-176 GB/s at 1.0 GHz = 7.1-7.3 B/clock/EU; UHD 620 199-200 GB/s at 1.1 GHz =
+7.6 B/clock/EU. Same with work-group 64 or 128, PF 2 or 4, a 1 MB region (beyond L3) or 8 subgroups sharing a
+sequence. Reached up to MADS 12 (the mads hide under the reads). The older 156 GB/s (results/memory-bandwidth-
+2026-11-11.txt, k_owb2 on kp-laptop) is not the ceiling.
+Qwen ratio (MADS 16): HD 530 146-153 GB/s = 293-306 GFLOPS, the same as the real loop (296-305), with OA showing
+EU active 88-91 %, stall 4.5-6 %, both FPU pipes busy 95 % of active time: issue-bound, not port-bound. A
+two-bound check agrees: time(MADS 16) 7.0-7.3 ms = the issue line through MADS 24/32 (12.46 ms - 16 x 0.333 =
+7.1 ms), while the port alone would allow 6.2 ms.
+So Qwen attention is NOT limited by the data port: the port runs at ~86-88 % of its ceiling. Removing non-mad
+instructions helps until the port binds at ~172 GB/s = ~344 GFLOPS (90 % of peak) on HD 530 for 8 B per mad.
+OA L3ShaderThroughput is accurate once scaled by clock: OA averages over its reports at 933-943 MHz; 171 GB/s at
+1.0 GHz x 0.933 = 159.5 vs the counter's 159.1 (MADS 0); MADS 16: 137.6 expected vs 134-138 (97-100 %).
+Open: the real Qwen loop shows 112-118 GB/s on this counter while its arithmetic gives 148 GB/s at 296 GFLOPS;
+with the counter now calibrated, either the OA run had a lower clock / rate than the timed run or the loop reads
+fewer bytes than counted. To check by the attention session (same OA run with the clock and GFLOPS printed).
+The multithreaded model (results/mt-model-2026-11-13.txt) fitted an effective 6 B/clock/EU "port" limit: the fit
+holds, but the measured port is 7.1+ B/clock/EU, so what the model calls the port stands for issue overhead and
+latency effects together, not for the data port alone.

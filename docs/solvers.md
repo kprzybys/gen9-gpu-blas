@@ -109,6 +109,11 @@ EU count) and lets a corrected GPU fact (e.g. the bank model) re-run every model
   (L about 300 clk, about 6 B/clk/EU) and checked on 2 Llama points within 3 %. It says Qwen is bandwidth-bound and
   Llama is not, so prefetch depth is not the lever for either. Fit few parameters, then predict points the fit has
   not seen before trusting the model.
+- And test the model's *explanation* separately from its fit. A microbenchmark (`bench/l3port.cl`,
+  `results/l3port-2026-11-13.txt`) measured the port at 7.1-7.3 B/clk/EU on HD 530 (7.6 on UHD 620), and in the Qwen
+  ratio (8 B per mad) it reproduces the real loop's 295-305 GFLOPS with OA showing issue-bound (FPU 95 % of active,
+  stall 5 %) at ~87 % of the port. The fit still holds, but its "6 B/clk/EU port" lumps issue overhead and latency
+  together: Qwen is issue-bound, not bandwidth-bound. A fitted parameter is not a hardware constant until measured.
 - Compute was not the limit: 320 allocation solves took 1.7 s. A many-core machine (the 32-thread desktop, 32 threads) matters only
   for large scheduling models or wide sweeps; run there with `nice` and a fixed `num_workers`.
 
