@@ -3,7 +3,7 @@
 Status: model (sections 1-7), stage 2 result (section 8: criterion not met in OpenCL C), stage 2b result
 (section 9: criterion met by a hand-scheduled assembly kernel, 296 GFLOPS = 2.8x the CPU) and the pre-integration
 check (section 10: the same kernel through kcl on userptr memory in llama.cpp's layout, 301 GFLOPS incl. pre-pass
-and submission, work-group size 64) and stage 3 (section 11: integrated into the ggml backend, opt-in GEN9_ATTN=1,
+and submission, work-group size 64) and stage 3 (section 11: integrated into the ggml backend, on by default (GEN9_ATTN=0 turns it off),
 causal masking by index; pp512 at depth 3584 -36 % (Qwen2.5-1.5B) / -43 % (Llama-3.2-1B) time, perplexity within
 noise). Evidence tags as in [performance-model.md](performance-model.md)
 ([SPEC], [MEAS], [SW], [EST], [HYP]). Stage 2 (a standalone kernel in `bench/`) starts only from this prediction,
@@ -333,7 +333,7 @@ raw outputs, predictions with timestamps and tables in `results/attn-integration
   `KCL_USERPTR_MB` (1 GB) is not raised: the 1.5B/1B caches are 117-268 MB; if a region cannot be mapped the library
   returns "not handled" and the backend computes the node with ggml-cpu. Qwen2.5-7B at 32k (1.8 GB of K/V) would be
   re-pinned through kcl's LRU per layer (~15 ms per layer [EST]); it has no binary yet anyway (G = 7).
-- Backend (`ggml-backend/ggml-gen9.cpp`, opt-in `GEN9_ATTN=1`): supports_op accepts F16 K/V, F32 Q/O, no ALiBi /
+- Backend (`ggml-backend/ggml-gen9.cpp`, on by default, `GEN9_ATTN=0` turns it off): supports_op accepts F16 K/V, F32 Q/O, no ALiBi /
   soft-capping / sinks, (D, G, H_kv) with a binary ((128, 6, 2) Qwen2.5-1.5B, (64, 4, 8) Llama-3.2-1B, (64, 1, 20) whisper encoder), llama.cpp's
   layouts (Q the permuted view of Qcur, K/V rows of H_kv*D, dst contiguous), n_q >= 32, n_kv a multiple of 16 (or,
   without a mask, rounded up when the rows exist behind the views; see the whisper paragraph below), mask
@@ -395,8 +395,8 @@ attention runs at 290-304 GFLOPS including pinning, submission, wait and the mas
 pipes 90 % of active time, IPC 1.90): the attention kernel runs as near the FPU limit as the GEMMs. The GPU's share
 of the recording rose 50 -> 58 % (diluted by model load and depth fill; predicted 70-75 % was wrong).
 
-**Open.** Default stays off until measured on the laptop (UHD 620, shared power: section 5 expects a larger gain
-there) and decided by the user; binaries for more shapes (Qwen2.5-7B G 7, Gemma-2 D 256 with soft-capping); token
+**Default.** On since 2026-11-13 after the laptop measurement (`results/attn-integration-uhd620-2026-11-13.txt`: pp512
+at d 3584 -53 % Qwen / -57 % Llama, perplexity unchanged); `GEN9_ATTN=0` turns it off. **Open:** binaries for more shapes (Qwen2.5-7B G 7, Gemma-2 D 256 with soft-capping); token
 generation (n_q 1) stays on the CPU; test-backend-ops cannot reach the GPU path (a case in the KV-cache layout with a
 prefix mask would be needed upstream); the CPU idles while the GPU computes attention (overlap with the next layer's
 CPU work is not possible inside one ggml split).
