@@ -39,3 +39,12 @@ __kernel void mem_write(__global float4 *p, long n4) {
 __kernel void mem_copy(__global const float4 *p, __global float4 *q, long n4) {
     for (long i = get_global_id(0); i < n4; i += get_global_size(0)) q[i] = p[i];
 }
+// Work-group / subgroup ids as a SIMD8 kernel sees them (lib/bench_gen8.c ids).
+__attribute__((intel_reqd_sub_group_size(8)))
+__kernel void dbg_ids8(__global int *out) {
+    const int t = get_global_id(0) / 8;
+    if (get_sub_group_local_id() == 0) {
+        out[4 * t] = get_group_id(0); out[4 * t + 1] = get_num_sub_groups(); out[4 * t + 2] = get_sub_group_id();
+        out[4 * t + 3] = get_local_size(0);
+    }
+}

@@ -21,7 +21,8 @@ static double best_time(cl_kernel k, size_t g, size_t l) {
     return best;
 }
 int main(int argc, char **argv) {
-    const long mb = argc > 1 ? atol(argv[1]) : 128;
+    const long mb = argc > 1 && argv[1][0] != 'i' ? atol(argv[1]) : 128;
+    const int ids = argc > 1 && argv[1][0] == 'i';   // "ids": print the ids dbg_ids8 sees for g = 32, l = 8 and 16
     cl_platform_id plat; cl_device_id dev; cl_int err; cl_program pr;
     CHECK(clGetPlatformIDs(1, &plat, NULL)); CHECK(clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, 1, &dev, NULL));
     ctx = clCreateContext(NULL, 1, &dev, NULL, NULL, &err); CHECK(err);
@@ -30,6 +31,18 @@ int main(int argc, char **argv) {
     alloc = (clHostMemAllocINTEL_fn)clGetExtensionFunctionAddressForPlatform(plat, "clHostMemAllocINTEL");
     arg_ptr = (clSetKernelArgMemPointerINTEL_fn)clGetExtensionFunctionAddressForPlatform(plat, "clSetKernelArgMemPointerINTEL");
     CHECK(kcl_program("gen8_probe.cl", "-cl-intel-greater-than-4GB-buffer-required", &pr));
+    if (ids) {
+        int *o = alloc(ctx, NULL, 4096, 64, &err); CHECK(err);
+        cl_kernel k = clCreateKernel(pr, "dbg_ids8", &err); CHECK(err); CHECK(arg_ptr(k, 0, o));
+        for (size_t l = 8; l <= 16; l += 8) {
+            const size_t g = 32; for (int i = 0; i < 64; i++) o[i] = -1;
+            CHECK(clEnqueueNDRangeKernel(q, k, 1, NULL, &g, &l, 0, NULL, NULL)); CHECK(clFinish(q));
+            printf("g=32 l=%zu:", l);
+            for (int t = 0; t < 4; t++) printf("  [grp %d nsg %d sg %d ls %d]", o[4 * t], o[4 * t + 1], o[4 * t + 2], o[4 * t + 3]);
+            printf("\n");
+        }
+        return 0;
+    }
     const size_t G = 12 * 7 * 16 * 8;   // 8 thread groups' worth per hardware thread slot (12 EU x 7 threads, SIMD16)
     float *out = alloc(ctx, NULL, G * 8, 64, &err); CHECK(err);
     { cl_kernel k = clCreateKernel(pr, "peak_f32", &err); CHECK(err);
