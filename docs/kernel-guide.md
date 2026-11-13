@@ -105,21 +105,27 @@ as the best vendor generators (MaxAs, AMD Tensile, oneDNN's nGEN): parameters pl
    allocation itself (`bank_conflict_allocation`) [EXT]. Status (2026-11-13): `attn_gen.py` prints the conflict
    count, `gemm_gen.py` does not count it, `lib/gen_kernels.py` rejects spill/scratch for the kcl table; a variant
    with 8 conflicts built without an error. **Open:** a shared check in `asm/isa.py` used by all generators.
-2. **Pin the tool chain and hash the output** (already done: `ocloc` version check, `make -C asm check`). Hashes
+2. **Check equivalence symbolically before assembling** (`asm/loopcheck.py`, run by `gemm_gen.py`): the generated
+   loop and IGC's loop are executed in a symbolic interpreter (memory reads as symbols, counter concrete) and the
+   accumulators must hold identical expressions (same products, same order = bit-identical), or, when the template
+   assumes another packed layout (h, s), identical expressions up to a consistent bijection of memory elements.
+   Self-tests: a swapped register, a wrong load offset and a swapped accumulation order are all rejected.
+   Attention (other order than IGC by design) still needs a multiset mode.
+3. **Pin the tool chain and hash the output** (already done: `ocloc` version check, `make -C asm check`). Hashes
    catch regressions; they do not prove a new variant correct.
-3. **Correctness gate per variant:** FP64 reference over the whole output (`STEP=1` in `bench/attn`), error bound
+4. **Correctness gate per variant:** FP64 reference over the whole output (`STEP=1` in `bench/attn`), error bound
    fixed before the run; the poison binary is a negative control (the driver really runs our ISA)
    ([isa-notes.md](isa-notes.md) §5).
-4. **Prefetch distance is one explicit parameter from the start** (attention `NS`; Triton calls the same thing
+5. **Prefetch distance is one explicit parameter from the start** (attention `NS`; Triton calls the same thing
    `num_stages` [EXT]). IGC issues each read just before its use, so this is the parameter the compiler will not
    tune for you.
-5. **Constraints before compiling and measuring.** Encode every structural condition as an assertion with a reason
+6. **Constraints before compiling and measuring.** Encode every structural condition as an assertion with a reason
    (attention: `NS <= D/8`, `nsteps % NS == 0`, a contiguous 8-register block for the ring). Like IREE's constraint
    pruning [EXT], this removes most of the space before anything runs.
-6. **Bank-aware allocation in the allocator** (attention: `Alloc` with register parity), not as a fix-up pass after
+7. **Bank-aware allocation in the allocator** (attention: `Alloc` with register parity), not as a fix-up pass after
    the fact; register fragmentation, not the count, can block a variant (Llama NS 4: 21 registers free, no
    contiguous even block of 8) [SW: offline generator run, 2026-11-13, not in `results/`].
-7. **Select variants by shape, not by device:** key = (head dim, rows per thread, kind); `skl` and `whl` give the
+8. **Select variants by shape, not by device:** key = (head dim, rows per thread, kind); `skl` and `whl` give the
    same code.
 
 ## 4. Sweeping variants

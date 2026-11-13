@@ -350,6 +350,14 @@ if __name__ == "__main__":
             FREE_MODE = "livein"
             body = generate()
         isa.check_generated(body, kind_dir(kind), KINDS[kind]["kernel"], f"gemm_gen {kind}")
+        import loopcheck   # noqa: E402  (imports this module; symbolic equivalence with IGC's loop, docs/solvers.md)
+        try:
+            ok, msg = loopcheck.verify(kind, loop_k, h, f, body)
+        except loopcheck.Unsupported as e:
+            ok, msg = False, f"cannot check: {e}"
+        if not ok:
+            raise SystemExit(f"gemm_gen {kind}: generated loop rejected by loopcheck: {msg}")
+        print(f"loopcheck: {msg}")
         build(kind, prologue, body, epilogue, result)
         print(body[0])
         print(f"instructions: {len(body)}, mad: {sum('mad (' in l for l in body)}, register set: {FREE_MODE}")

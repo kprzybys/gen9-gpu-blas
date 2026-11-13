@@ -124,6 +124,8 @@ python3 sched_model.py calib                 # schedule-model calibration (rejec
 
 ## 7. Open
 
+- Done 2026-11-13: equivalence checker `asm/loopcheck.py` (recommendation 4) for gemm_gen h/hd/s; attention needs a
+  product-multiset mode (its order differs from IGC's on purpose).
 - Measure the model's predictions (Qwen bandwidth bound, Llama NS3 +1.2 %) and extend it to GEMM; a solver on top of it only if it shows a lever.
 - The GPU description as a file (`experiments/solver/gen9.json`) read by every model, instead of constants in code.
 - The Llama NK=1 fix: verify that Q is not read after the loop, implement in the generator (attention work), measure.
