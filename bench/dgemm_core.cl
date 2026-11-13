@@ -92,3 +92,53 @@ void dgemm_v(__global const double *Ap, __global const double *Bp, __global doub
 #pragma unroll
     for (int r = 0; r < 8; r++) { WR(c, (size_t)r * ldc, acc0[r]); WR(c, (size_t)r * ldc + 8, acc1[r]); }
 }
+
+#ifdef GEN8_CHV
+// dgemm8_v832 (Gen8 Cherryview, docs/gen8.md 6e): tile 8 rows x 32 columns per SIMD8 subgroup (dgemm_v: 16 x 16 by two
+// subgroups). Gen8 3-source instructions are Align16-only, so each broadcast of an A value is a separate DF move, and FP64
+// has one pipe: 4 columns per lane (lane l: l, l+8, l+16, l+24) give 1 move per 4 multiply-adds (dgemm_v: 1 per 2, plus
+// the moves that build doubles from dword pairs). Rows come as ulongs with OWord block reads. A as for dgemm_v (a tile
+// is half of a 16-row panel); B in 32-column panels [n/32][k][32] (pkd_b32*), N padded to 32 (tn = 32).
+#ifndef GMD8
+#define GMD8 4
+#endif
+#define PD32(n, k, Kp) ((size_t)((n) / 32) * (Kp) * 32 + (size_t)(k) * 32 + (n) % 32)
+__kernel void pkd_b32(__global const double *B, __global double *Bp, int K, int N, int ldb, int Kp, long sB, int Np) {
+    const int n = get_global_id(0), k = get_global_id(1), b = get_global_id(2);
+    WR(Bp, (size_t)b * Np * Kp + PD32(n, k, Kp), (n < N && k < K) ? RD(B, b * sB + (size_t)k * ldb + n) : 0.0); }
+__kernel void pkd_b32_t(__global const double *B, __global double *Bp, int K, int N, int ldb, int Kp, long sB, int Np) {
+    const int k = get_global_id(0), n = get_global_id(1), b = get_global_id(2);
+    WR(Bp, (size_t)b * Np * Kp + PD32(n, k, Kp), (n < N && k < K) ? RD(B, b * sB + (size_t)n * ldb + k) : 0.0); }
+__attribute__((intel_reqd_sub_group_size(8)))
+__kernel void dgemm8_v832(__global const double *Ap, __global const double *Bp, __global double *C, int M, int N, int ldc, int K, int Kfull) {
+    const int pid0 = get_group_id(0) * get_num_sub_groups() + get_sub_group_id();
+    const int npm = M / 8, npn = N / 32;
+    const int b = pid0 / (npm * npn), pid = pid0 % (npm * npn);
+    const int group = pid / (GMD8 * npn), m_first = group * GMD8, gsz = min(npm - m_first, GMD8);
+    const int pm = m_first + (pid % (GMD8 * npn)) % gsz, pn = (pid % (GMD8 * npn)) / gsz;
+    // 32-bit offsets (4 GB address space; 64-bit index products miscompute in some forms on CHV, docs/gen8.md 6e)
+    const __global ulong *pa = (const __global ulong *)Ap + (uint)b * (uint)(M * Kfull) + (uint)(pm / 2) * (uint)Kfull * 16u + (uint)(pm % 2) * 8u;
+    const __global ulong *pb = (const __global ulong *)Bp + (uint)b * (uint)(N * Kfull) + (uint)pn * (uint)Kfull * 32u;
+    double acc[8][4];
+#pragma unroll
+    for (int r = 0; r < 8; r++) for (int j = 0; j < 4; j++) acc[r][j] = 0.0;
+    for (int k = 0; k < K; k += 2) {
+        const double a0 = as_double(intel_sub_group_block_read_ul(pa)), a1 = as_double(intel_sub_group_block_read_ul(pa + 16));
+        const ulong4 b0 = intel_sub_group_block_read_ul4(pb), b1 = intel_sub_group_block_read_ul4(pb + 32);
+        pa += 32; pb += 64;
+#pragma unroll
+        for (int r = 0; r < 8; r++) {
+            const double x0 = sub_group_broadcast(a0, r), x1 = sub_group_broadcast(a1, r);
+            acc[r][0] = fma(x0, as_double(b0.s0), acc[r][0]); acc[r][1] = fma(x0, as_double(b0.s1), acc[r][1]);
+            acc[r][2] = fma(x0, as_double(b0.s2), acc[r][2]); acc[r][3] = fma(x0, as_double(b0.s3), acc[r][3]);
+            acc[r][0] = fma(x1, as_double(b1.s0), acc[r][0]); acc[r][1] = fma(x1, as_double(b1.s1), acc[r][1]);
+            acc[r][2] = fma(x1, as_double(b1.s2), acc[r][2]); acc[r][3] = fma(x1, as_double(b1.s3), acc[r][3]);
+        }
+    }
+    __global double *c = C + (uint)b * (uint)(M * ldc) + (uint)(pm * 8) * (uint)ldc + (uint)pn * 32u;
+#pragma unroll
+    for (int r = 0; r < 8; r++)
+#pragma unroll
+        for (int j = 0; j < 4; j++) intel_sub_group_block_write_ul((__global ulong *)(c + (uint)r * (uint)ldc + 8 * j), as_ulong(acc[r][j]));
+}
+#endif

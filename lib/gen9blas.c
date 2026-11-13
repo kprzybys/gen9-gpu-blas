@@ -164,6 +164,9 @@ int gen9blas_init(const char *dir) {
     // OpenCL frame sgemm_v of the Gen9 kernel (comparisons, docs/gen8.md 6d)
     const char *s8 = getenv("GEN9BLAS_SGEMM8");
     if (gen8 && !(s8 && !strcmp(s8, "v"))) { t[2].k = "sgemm8_v32"; t[2].pa = "pkf_a8"; t[2].pb = "pkf_b32"; t[2].tn = 32; }
+    // Gen8 DGEMM: dgemm8_v832 (8 x 32 tiles, SIMD8, B in 32-column panels; bench/dgemm_core.cl); GEN9BLAS_DGEMM8=v: dgemm_v
+    const char *d8 = getenv("GEN9BLAS_DGEMM8");
+    if (gen8 && !(d8 && !strcmp(d8, "v"))) { t[3].k = "dgemm8_v832"; t[3].pb = "pkd_b32"; t[3].tn = 32; }
     for (int i = 0; i < 4; i++) {
         if (gen8 && t[i].es == 2) continue;   // FP16: not on Gen8 yet
         type_t *r = &types[t[i].r]; char n[64];
