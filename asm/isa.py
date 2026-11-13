@@ -112,7 +112,7 @@ ARITY = {"mov": 2, "add": 3, "mul": 3, "sel": 3, "cmp": 3, "shl": 3, "shr": 3, "
          "mad": 4, "math.exp": 2, "math.inv": 2}
 NOREG = {"jmpi", "while", "break", "illegal", "nop"}     # control flow / padding: no GRF operand allowed
 # regions whose GRF footprint span() computes exactly (contiguous rows or scalars)
-REGION = re.compile(r"<(?:0|1|2|0;0|2;1|\d+;[1-9]\d*,\d+)>$")
+REGION = re.compile(r"<(?:0|1|2|4|0;0|2;1|\d+;[1-9]\d*,\d+)>$")   # dst <4>: :q headers 32 B apart
 IMM = re.compile(r"(-?(?:\d+(?:\.\d*)?(?:e[+-]?\d+)?|0x[0-9a-fA-F]+|inf|nan)):(?:b|ub|w|uw|d|ud|q|uq|f|hf|df|v|uv|vf)$")
 LABEL = re.compile(r"^[A-Za-z_]\w*:$")
 # one immediate operand as IGA prints it: decimal, float, or hex; IGA prints in hex a value that does not fit

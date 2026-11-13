@@ -116,12 +116,14 @@ def run(lines, m, max_steps=200000):
         pc += 1
         if not c or isa.LABEL.match(c) or op is None:
             continue
-        pred = re.match(r"^\((W)?&?(~)?(f\d\.\d)?\)", c)
+        pred = re.match(r"^\((W)?&?(~)?(f\d\.\d)?(\.(?:any|all)\d+h)?\)", c)
+        if c.startswith("(") and not pred:
+            raise Unsupported(f"predicate not understood: {c}")
         flag = None
         if pred and pred.group(3):
             flag = m.flags.get(pred.group(3))
-            if flag is None:
-                if not m.attn:
+            if flag is None:                # also .anyNh / .allNh on a data flag; a concrete (counter) flag is
+                if not m.attn:              # uniform across lanes, so any/all of it is its plain value
                     raise Unsupported(f"unknown flag {pred.group(3)}: {c}")
                 flag = "unknown"            # data-dependent (attention softmax): jumps not taken, other ops executed
             elif pred.group(2):
@@ -262,12 +264,21 @@ def scalar_region(region):
     return region in ("<0>", "<0;1,0>") or region.startswith("<0;")
 
 
+def product(b, a):
+    """One product term of a chain; order-independent (mul K q and mad S q K give the same term)."""
+    return tuple(sorted((ident(b), ident(a)), key=repr))
+
+
 def attn_value(op, srcv, src_ops, im):
     vals = [s[0] for s in srcv]
     if op == "mad":
         c, b, a = vals
         items = c[1] if c[0] == "chain" else ()
-        return ("chain", items + ((ident(b), ident(a)),))
+        return ("chain", items + (product(b, a),))
+    if op == "mul" and all(v[0] in ("MV", "id") for v in vals):
+        # chain started by mul (no mov 0 + mad): both factors memory-derived (K and Q), none a chain; a mul with a
+        # chain (O * alpha) or with a kernel argument / constant (Q * scale) keeps the identity rule below
+        return ("chain", (product(vals[0], vals[1]),))
     if op == "mov" and im is not None:
         return ("const",)
     cands = [v for v, so in zip(vals, src_ops) if not scalar_region(so[3])] or vals
