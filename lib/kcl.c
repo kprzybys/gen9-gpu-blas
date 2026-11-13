@@ -80,8 +80,10 @@ static uint64_t kbo_addr(uint64_t size) {
     next_addr += (size + 0xffff) & ~0xffffull;
     return a;
 }
+static void submit_if_listed(kbo *b);
 static void kbo_release(kbo *b) {
     if (!b || --b->ref > 0) return;
+    submit_if_listed(b);   // still listed in the batch being built (several operations per batch): submit before GEM_CLOSE
     if (b->map) munmap(b->map, b->size);
     struct drm_gem_close c = { .handle = b->h };
     ioctl(fd, DRM_IOCTL_GEM_CLOSE, &c);   // safe even if the GPU is still using it (i915 holds a reference)
@@ -115,7 +117,7 @@ static usm_t *usm_find(const void *ptr) {
 // Operation boundary: kcl_new_operation() (gen9blas: at the start of each BLAS function). A region registered after resolving: the object
 // of this operation if it contains it, otherwise NULL (copy through the CPU).
 enum { UP_MAX = 256, UP_MEM = 64, UP_REG = 16 };
-typedef struct { uintptr_t s, e; kbo *bo; uint64_t used, epoch; } up_t;
+typedef struct { uintptr_t s, e; kbo *bo; uint64_t used, epoch; int span; } up_t;   // span: registered by kcl_span_add (not evicted)
 static up_t up[UP_MAX]; static int nup; static uint64_t up_counter, up_bytes, up_limit, up_epoch = 1;
 static struct _cl_mem up_mem[UP_MEM]; static int up_mem_i;   // cl_mem for arguments (valid within the current operation)
 static struct { uintptr_t p, s, e; int wr; struct _cl_mem *m; } reg[UP_REG];   // regions of the current operation
@@ -152,7 +154,7 @@ static up_t *up_object(uintptr_t s, uintptr_t e, int wr) {
         if (up[i].s == s && up[i].e == e && (!wr || !up[i].bo->ro)) { up[i].used = ++up_counter; up[i].epoch = up_epoch; return &up[i]; }
     while (nup == UP_MAX || (nup && up_bytes + (e - s) > up_limit)) {   // make room: the least recently used one outside the operation
         int j = -1;
-        for (int i = 0; i < nup; i++) if (up[i].epoch != up_epoch && (j < 0 || up[i].used < up[j].used)) j = i;
+        for (int i = 0; i < nup; i++) if (up[i].epoch != up_epoch && !up[i].span && (j < 0 || up[i].used < up[j].used)) j = i;
         if (j < 0) break;
         up_remove(j);
     }
@@ -161,7 +163,7 @@ static up_t *up_object(uintptr_t s, uintptr_t e, int wr) {
     kbo *b = calloc(1, sizeof *b);
     if (!b || ioctl(fd, DRM_IOCTL_I915_GEM_USERPTR, &u)) { free(b); return NULL; }
     b->h = u.handle; b->size = e - s; b->ref = 1; b->ro = !wr; b->addr = kbo_addr(e - s);
-    up[nup] = (up_t){ s, e, b, ++up_counter, up_epoch }; up_bytes += e - s;
+    up[nup] = (up_t){ s, e, b, ++up_counter, up_epoch, 0 }; up_bytes += e - s;
     return &up[nup++];
 }
 static void up_assign(struct _cl_mem *m, uintptr_t p, up_t *x) {
@@ -204,11 +206,39 @@ void kcl_userptr_release(const void *ptr, size_t n) {
     const uintptr_t p = (uintptr_t)ptr, s = p & ~4095ul, e = (p + n + 4095) & ~4095ul;
     for (int i = 0; i < nup; i++) if (up[i].s == s && up[i].e == e) { up_remove(i); return; }
 }
+// Spans: whole host buffers (ggml buffers) that several operations of one batch use. A region inside a span always goes
+// through the span's object, so every byte has one GPU address in the batch even when operations are queued without a wait
+// in between (6g.5: two objects on the same pages lose writes). The object is cached like any other (same range -> same
+// object, pinned once) and is not evicted while registered. Byte bounds are the buffer's own: a region is only
+// resolved to a span that contains it entirely.
+enum { SPAN_MAX = 16 };
+static struct { uintptr_t p, n, s; kbo *bo; int wr; } spans[SPAN_MAX]; static int nspans;
+int kcl_span_add(const void *ptr, size_t n, int wr) {
+    if (init() || !ptr || !n) return -1;
+    const uintptr_t p = (uintptr_t)ptr, s = p & ~4095ul, e = (p + n + 4095) & ~4095ul;
+    for (int i = 0; i < nspans; i++) if (spans[i].p == p && spans[i].n == n && (spans[i].wr || !wr)) return 0;
+    if (nspans == SPAN_MAX || e - s > up_limit) return -1;
+    up_t *x = up_object(s, e, wr);
+    if (!x) return -1;
+    x->span = 1;
+    spans[nspans++] = (typeof(spans[0])){ p, n, s, x->bo, wr };
+    return 0;
+}
+void kcl_span_clear(void) {
+    for (int i = 0; i < nup; i++) up[i].span = 0;
+    nspans = 0;
+}
 static cl_mem kcl_userptr_(const void *ptr, size_t n, int wr);
 cl_mem kcl_userptr(const void *ptr, size_t n, int wr) { PHASE_BEGIN; cl_mem m = kcl_userptr_(ptr, n, wr); PHASE_END(F_UP); return m; }
 static cl_mem kcl_userptr_(const void *ptr, size_t n, int wr) {
     if (init() || !ptr || !n) return NULL;
     const uintptr_t p = (uintptr_t)ptr, s = p & ~4095ul, e = (p + n + 4095) & ~4095ul;
+    for (int i = 0; i < nspans; i++)
+        if (p >= spans[i].p && p + n <= spans[i].p + spans[i].n && (!wr || spans[i].wr)) {
+            struct _cl_mem *m = &up_mem[up_mem_i++ % UP_MEM];
+            *m = (struct _cl_mem){ .bo = spans[i].bo, .off = p - spans[i].s, .size = spans[i].bo->size - (p - spans[i].s), .ref = 1 };
+            return m;
+        }
     if (e - s > up_limit) return NULL;   // too big to hold: copy through the CPU
     if (reg_epoch != up_epoch) { reg_epoch = up_epoch; nreg = 0; resolved = 0; }
     struct _cl_mem *m = &up_mem[up_mem_i++ % UP_MEM];
@@ -254,6 +284,7 @@ static void add_bo(kbo *b) {
     if (!b || b->mark == S[cur].seq) return;
     b->mark = S[cur].seq; bo_list[nbo_list++] = b;
 }
+static void submit_if_listed(kbo *b) { if (cur >= 0 && S[cur].seq && b->mark == S[cur].seq) submit(); }
 
 static int wait_slot(int s) {
     if (!S[s].seq || S[s].seq <= seq_done) return 0;

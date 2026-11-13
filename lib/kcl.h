@@ -61,3 +61,7 @@ void kcl_new_operation(void);
 void kcl_userptr_release(const void *ptr, size_t n);
 // Submit the current batch buffer and wait for all work to finish (sleeps in the Linux kernel, GEM_WAIT).
 cl_int kcl_wait(void);
+// Spans: a whole host buffer whose regions always resolve to one userptr object (several operations queued in one batch
+// without a wait see each byte at one GPU address). Registered until kcl_span_clear(). Returns 0 or -1 (not registered).
+int kcl_span_add(const void *ptr, size_t n, int wr);
+void kcl_span_clear(void);

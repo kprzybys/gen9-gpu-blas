@@ -952,3 +952,68 @@ __kernel void trsm_inv3_h(int n, int nb, __global const double *X, __global half
     if (i >= b || j >= b) return;
     out[(size_t)bi * nb * nb + (size_t)i * b + j] = j <= i ? (half)X[(size_t)bi * nb * nb + (size_t)i * nb + j] : (half)0;
 }
+
+// ---------------- ggml backend: per-layer elementwise ops (RMS_NORM(+MUL), ADD / MUL by a row, ROPE) ----------------
+// F32 in and out, host memory (userptr); formulas and operation order as ggml-cpu (ops.cpp) so results differ only by
+// summation order. No private arrays (kcl has no scratch space: lib/gen_kernels.py rejects such kernels).
+#pragma OPENCL FP_CONTRACT OFF
+// y = x / sqrt(mean(x^2) + eps) [* w]: one work-group of 128 per row (grid (128, M)); w = 0: no weight.
+// ggml-cpu: sum in double, mean and scale in float, y = (x * scale) * w.
+__kernel __attribute__((reqd_work_group_size(128, 1, 1)))
+void gen9blas_rms_norm(__global const float *x, int ldx, __global const float *w, int has_w, float eps,
+                       __global float *y, int ldy, int K) {
+    __local float part[128];
+    const int t = get_local_id(0);
+    const size_t r = get_global_id(1);
+    __global const float *xr = x + r * ldx;
+    float s = 0.0f;
+    for (int i = t; i < K; i += 128) { const float v = xr[i]; s += v * v; }
+    part[t] = s;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int h = 64; h > 0; h >>= 1) {
+        if (t < h) part[t] += part[t + h];
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    const float mean = part[0] / (float)K, scale = 1.0f / sqrt(mean + eps);
+    __global float *yr = y + r * ldy;
+    if (has_w) for (int i = t; i < K; i += 128) yr[i] = xr[i] * scale * w[i];
+    else       for (int i = t; i < K; i += 128) yr[i] = xr[i] * scale;
+}
+// c = a + b (op 0) or a * b (op 1), M rows of K; b is one row (ldb = 0, ggml broadcast) or M rows. Grid (K, M).
+__kernel void gen9blas_binop_rows(__global const float *a, int lda, __global const float *b, int ldb,
+                                  __global float *c, int ldc, int op) {
+    const size_t i = get_global_id(0), r = get_global_id(1);
+    const float u = a[r * lda + i], v = b[r * ldb + i];
+    c[r * ldc + i] = op ? u * v : u + v;
+}
+// ggml ROPE (modes NORMAL 0 and NEOX 2, n_dims = ne0, no offset), forward. Element (i, h, t) at t * s2 + h * s1 + i
+// (floats). One work-item per (pair j < n_dims/2, token t); the angle is computed once and applied to all nh heads.
+// Angle as ggml_rope_cache_init: theta = pos, multiplied j times by theta_scale (float), divided by the freq factor,
+// then rope_yarn (ext_factor, corr_dims, mscale = attn_factor). Grid (n_dims/2, n_tok).
+__kernel void gen9blas_rope(__global const float *x, long xs1, long xs2, __global float *y, long ys1, long ys2,
+                            __global const int *pos, __global const float *ff, int has_ff, int nh, int n_dims, int neox,
+                            float theta_scale, float freq_scale, float ext_factor, float attn_factor,
+                            float corr0, float corr1) {
+    const int j = get_global_id(0), t = get_global_id(1);
+    float theta = (float)pos[t];
+    for (int k = 0; k < j; k++) theta *= theta_scale;
+    const float theta_extrap = has_ff ? theta / ff[j] : theta;
+    const float theta_interp = freq_scale * theta_extrap;
+    float th = theta_interp, mscale = attn_factor;
+    if (ext_factor != 0.0f) {
+        const float yv = ((float)j - corr0) / fmax(0.001f, corr1 - corr0);   // rope_yarn_ramp with i0 = 2j
+        const float ramp_mix = (1.0f - fmin(1.0f, fmax(0.0f, yv))) * ext_factor;
+        th = theta_interp * (1.0f - ramp_mix) + theta_extrap * ramp_mix;
+        mscale *= 1.0f + 0.1f * log(1.0f / freq_scale);
+    }
+    const float c = cos(th) * mscale, s = sin(th) * mscale;
+    const int i0 = neox ? j : 2 * j, i1 = neox ? j + n_dims / 2 : 2 * j + 1;
+    for (int h = 0; h < nh; h++) {
+        __global const float *xp = x + t * xs2 + h * xs1;
+        __global float *yp = y + t * ys2 + h * ys1;
+        const float x0 = xp[i0], x1 = xp[i1];
+        yp[i0] = x0 * c - x1 * s;
+        yp[i1] = x0 * s + x1 * c;
+    }
+}
+#pragma OPENCL FP_CONTRACT ON

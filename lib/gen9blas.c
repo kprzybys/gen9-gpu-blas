@@ -119,7 +119,8 @@ static int init_l12(const char *dir) {
 
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
-static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8;   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
+static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8;
+static cl_kernel k_rms, k_binop, k_rope;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
 int gen9blas_init(const char *dir) {
     static int inited;
     if (inited) return 0;
@@ -147,6 +148,9 @@ int gen9blas_init(const char *dir) {
     { cl_int e5; k_dequant2 = clCreateKernel(ph, "gen9blas_dequant_b16s", &e5); if (e5) k_dequant2 = NULL; }
     { cl_int e6; k_pa3_v = clCreateKernel(ph, "pk_a3_f32v", &e6); if (e6) k_pa3_v = NULL; }
     { cl_int e7; k_epi_8 = clCreateKernel(ph, "gen9blas_epilog_hf8", &e7); if (e7) k_epi_8 = NULL; }
+    { cl_int e8; k_rms = clCreateKernel(ph, "gen9blas_rms_norm", &e8); if (e8) k_rms = NULL;
+      k_binop = clCreateKernel(ph, "gen9blas_binop_rows", &e8); if (e8) k_binop = NULL;
+      k_rope = clCreateKernel(ph, "gen9blas_rope", &e8); if (e8) k_rope = NULL; }
     // "v" kernels: (Ap, Bp, C, M, N, ldc, K, Kfull) -- also for chunks of data packed once (sub-buffers)
     // bin = NULL: main kernel from source (FP64: dgemm.cl, OpenCL C), not from an asm binary
     struct { int r; const char *bin, *k, *pa, *pb, *epi, *tri; int es, tn, km; cl_program pr; } t[4] = {
@@ -823,6 +827,81 @@ int gen9blas_ffn_f16w(int M, const float *X, int ldx, const gen9blas_packed *Pg,
     if (to_host(xY, zY, bY, Y)) return -1;
     *nonfinite = *nf != 0;
     return 0;
+}
+
+// ---------------- ggml backend: per-layer elementwise ops (queued without a wait) ----------------
+// Each call is its own operation (userptr regions); without a wait between operations the host buffers must be registered
+// as spans (gen9blas_span), so that a tensor written by one operation and read by the next has one GPU address
+// (docs/no-neo.md 6g.5). An output that is not zero-copy (copied through a work buffer) forces the wait.
+int gen9blas_span(const void *p, size_t bytes, int writes) {
+#ifndef GEN9BLAS_NEO
+    return kcl_span_add(p, bytes, writes);
+#else
+    (void)p; (void)bytes; (void)writes; return -1;
+#endif
+}
+void gen9blas_span_clear(void) {
+#ifndef GEN9BLAS_NEO
+    kcl_span_clear();
+#endif
+}
+int gen9blas_flush(void) { return wait_gpu(); }
+static work_t uD;
+static int ew_done(int sync, bf_t xY, int zY, size_t bY, void *Y) { return sync || !zY ? to_host(xY, zY, bY, Y) : 0; }
+
+int gen9blas_rms_norm(int M, int K, const float *X, int ldx, const float *w, float eps, float *Y, int ldy, int sync) {
+    NEW_OPERATION();
+    if (!k_rms) FAIL("rms_norm: kernel not in this build");
+    if (M <= 0 || K <= 0) return 0;
+    size_t bX = ((size_t)(M - 1) * ldx + K) * 4, bY = ((size_t)(M - 1) * ldy + K) * 4;
+    bf_t xX, xW = BM(NULL), xY; int zX, zW, zY, hw = w != NULL;
+    if (get_obj(X, bX, &uA, 1, 0, &xX, &zX) || (hw && get_obj(w, (size_t)K * 4, &uB, 1, 0, &xW, &zW)) ||
+        get_obj(Y, bY, &uC, 0, 1, &xY, &zY)) return -1;
+    if (!hw) xW = xX;   // any valid buffer; not read
+    ARGB(k_rms, 0, xX); ARG(k_rms, 1, ldx); ARGB(k_rms, 2, xW); ARG(k_rms, 3, hw); ARG(k_rms, 4, eps); ARGB(k_rms, 5, xY);
+    ARG(k_rms, 6, ldy); ARG(k_rms, 7, K);
+    size_t g[2] = { 128, (size_t)M }, l[2] = { 128, 1 };
+    CHECK(clEnqueueNDRangeKernel(q, k_rms, 2, NULL, g, l, 0, NULL, NULL));
+    return ew_done(sync, xY, zY, bY, Y);
+}
+
+int gen9blas_binop_rows(int op, int M, int K, const float *A, int lda, const float *B, int ldb, float *C, int ldc, int sync) {
+    NEW_OPERATION();
+    if (!k_binop) FAIL("binop_rows: kernel not in this build");
+    if (M <= 0 || K <= 0) return 0;
+    size_t bA = ((size_t)(M - 1) * lda + K) * 4, bB = ((size_t)(ldb ? M - 1 : 0) * ldb + K) * 4, bC = ((size_t)(M - 1) * ldc + K) * 4;
+    bf_t xA, xB, xC; int zA, zB, zC;
+    if (get_obj(A, bA, &uA, 1, 0, &xA, &zA) || get_obj(B, bB, &uB, 1, 0, &xB, &zB) || get_obj(C, bC, &uC, 0, 1, &xC, &zC)) return -1;
+    ARGB(k_binop, 0, xA); ARG(k_binop, 1, lda); ARGB(k_binop, 2, xB); ARG(k_binop, 3, ldb); ARGB(k_binop, 4, xC);
+    ARG(k_binop, 5, ldc); ARG(k_binop, 6, op);
+    size_t g[2] = { (size_t)K, (size_t)M };
+    CHECK(clEnqueueNDRangeKernel(q, k_binop, 2, NULL, g, NULL, 0, NULL, NULL));
+    return ew_done(sync, xC, zC, bC, C);
+}
+
+int gen9blas_rope(int n_dims, int nh, int n_tok, const float *X, long xs1, long xs2, float *Y, long ys1, long ys2,
+                  const int *pos, const float *ff, int neox, float freq_base, float freq_scale, float ext_factor,
+                  float attn_factor, const float corr[2], int sync) {
+    NEW_OPERATION();
+    if (!k_rope) FAIL("rope: kernel not in this build");
+    if (n_dims <= 0 || nh <= 0 || n_tok <= 0) return 0;
+    if (n_dims % 2 || xs1 < n_dims || ys1 < n_dims || xs2 < (long)nh * xs1 - (xs1 - n_dims) || ys2 < (long)nh * ys1 - (ys1 - n_dims))
+        FAIL("rope: unsupported layout");
+    size_t bX = ((size_t)(n_tok - 1) * xs2 + (size_t)(nh - 1) * xs1 + n_dims) * 4;
+    size_t bY = ((size_t)(n_tok - 1) * ys2 + (size_t)(nh - 1) * ys1 + n_dims) * 4;
+    bf_t xX, xY, xP, xF = BM(NULL); int zX, zY, zP, zF, hf = ff != NULL;
+    if (get_obj(X, bX, &uA, 1, 0, &xX, &zX) || get_obj(pos, (size_t)n_tok * 4, &uB, 1, 0, &xP, &zP) ||
+        (hf && get_obj(ff, (size_t)n_dims / 2 * 4, &uD, 1, 0, &xF, &zF)) || get_obj(Y, bY, &uC, 0, 1, &xY, &zY)) return -1;
+    if (!hf) xF = xP;
+    const float theta_scale = powf(freq_base, -2.0f / n_dims);   // as ggml-cpu
+    cl_long l1 = xs1, l2 = xs2, m1 = ys1, m2 = ys2;
+    ARGB(k_rope, 0, xX); ARG(k_rope, 1, l1); ARG(k_rope, 2, l2); ARGB(k_rope, 3, xY); ARG(k_rope, 4, m1); ARG(k_rope, 5, m2);
+    ARGB(k_rope, 6, xP); ARGB(k_rope, 7, xF); ARG(k_rope, 8, hf); ARG(k_rope, 9, nh); ARG(k_rope, 10, n_dims); ARG(k_rope, 11, neox);
+    ARG(k_rope, 12, theta_scale); ARG(k_rope, 13, freq_scale); ARG(k_rope, 14, ext_factor); ARG(k_rope, 15, attn_factor);
+    ARG(k_rope, 16, corr[0]); ARG(k_rope, 17, corr[1]);
+    size_t g[2] = { (size_t)n_dims / 2, (size_t)n_tok };
+    CHECK(clEnqueueNDRangeKernel(q, k_rope, 2, NULL, g, NULL, 0, NULL, NULL));
+    return ew_done(sync, xY, zY, bY, Y);
 }
 
 int gen9blas_gemm(int type, int tA, int tB, int M, int N, int K, double alpha, const void *A, int lda,

@@ -48,6 +48,22 @@ void gen9blas_packed_free(gen9blas_packed *Bp);
 int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
 // ggml backend, gated FFN with FP16 weights kept on the GPU: Y = (silu(X Wg) * (X Wu)) Wd (F32 X: M x K, Y: M x Nd);
 // Pg, Pu: K -> N, Pd: N -> Nd, all packed as GEN9BLAS_HS. Intermediates stay FP16 on the GPU; *nonfinite as above.
+// ggml backend, per-layer elementwise ops on host F32 memory. Queued without a wait (sync = 0) when every operand is
+// zero-copy: they run in the batch of the next call that waits (or gen9blas_flush); the caller must register the host
+// buffers involved with gen9blas_span first (else regions of different operations may alias). sync = 1 or a copied
+// operand: waits before returning. 0 or -1 (gen9blas_error()).
+int gen9blas_span(const void *p, size_t bytes, int writes);   // 0 registered, -1 not (then use sync = 1)
+void gen9blas_span_clear(void);
+int gen9blas_flush(void);
+// Y = X / sqrt(mean(X^2) + eps) [* w], M rows of K (w = NULL: no weight).
+int gen9blas_rms_norm(int M, int K, const float *X, int ldx, const float *w, float eps, float *Y, int ldy, int sync);
+// C = A + B (op 0) or A * B (op 1), M rows of K; ldb = 0: B is one row broadcast to all rows.
+int gen9blas_binop_rows(int op, int M, int K, const float *A, int lda, const float *B, int ldb, float *C, int ldc, int sync);
+// ggml ROPE forward, modes NORMAL (neox 0) / NEOX (neox 1), rotating all n_dims = head size elements: X, Y element
+// (i, h, t) at t * s2 + h * s1 + i floats; pos[n_tok]; ff: freq factors (n_dims/2) or NULL; corr: ggml_rope_yarn_corr_dims.
+int gen9blas_rope(int n_dims, int nh, int n_tok, const float *X, long xs1, long xs2, float *Y, long ys1, long ys2,
+                  const int *pos, const float *ff, int neox, float freq_base, float freq_scale, float ext_factor,
+                  float attn_factor, const float corr[2], int sync);
 int gen9blas_ffn_f16w(int M, const float *X, int ldx, const gen9blas_packed *Pg, const gen9blas_packed *Pu,
                       const gen9blas_packed *Pd, float *Y, int ldy, int *nonfinite);
 // ggml backend, quantized weights: N rows of K values in ggml block layout (row n at W + n * row_bytes; qtype
