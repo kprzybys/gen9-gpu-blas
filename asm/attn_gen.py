@@ -634,6 +634,8 @@ def main():
             m = MAD.match(loop[i])
             loop[i] = f"{m.group(1)}{m.group(2)}  {m.group(4)}  {m.group(6)}  -r{m.group(10)}.{m.group(11)}<0>:f"
         n, c = conflicts(loop)
+        if mode == "remap" or mode.startswith("sched"):   # plain/poison: conflicts expected, not checked
+            isa.check_generated(loop, dd, KERNEL, f"attn_gen {mode} {opts}")
         if mode == "remap":
             print([x for x in pro if x.startswith("// --- attn_gen")][0])
         if mode == "remap":

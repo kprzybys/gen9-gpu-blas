@@ -18,6 +18,8 @@ import sys
 import tempfile
 
 HERE = os.path.dirname(os.path.realpath(__file__))
+sys.path.insert(0, HERE)
+import isa  # noqa: E402
 W = "(W)     "
 KINDS = {
     # "v" templates: arguments (Ap, Bp, C, M, N, ldc, K, Kfull) -- pieces of data packed once
@@ -276,6 +278,7 @@ if __name__ == "__main__":
                                  acc_map_f={k: f[v] for k, v in idx_map_f.items()})
         else:
             body = loop_quarters(prologue, loop_k, epilogue, {k: f[v] for k, v in idx_map.items()}, "f")
+        isa.check_generated(body, kind_dir(kind), KINDS[kind]["kernel"], f"gemm_gen {kind}")
         build(kind, prologue, body, epilogue, result)
         print(body[0])
         print(f"instructions: {len(body)}, mad: {sum('mad (' in l for l in body)}")
