@@ -104,6 +104,11 @@ EU count) and lets a corrected GPU fact (e.g. the bank model) re-run every model
   generator: `gemm_gen.free_regs` blocks every register the epilogue mentions (9-17), while only 8-9 are live into
   it (1-2 of them send headers that can be zeroed after the loop). Check such rules before concluding "does not fit":
   the overhead model is part of the instance.
+- A multithreaded model fixed it (`experiments/solver/mt_model.py`, `results/mt-model-2026-11-13.txt`): 7 threads per
+  EU, 2 FPU pipes, a data-port FIFO with limited bytes per clock and a fixed latency. Fitted on the 3 Qwen points
+  (L about 300 clk, about 6 B/clk/EU) and checked on 2 Llama points within 3 %. It says Qwen is bandwidth-bound and
+  Llama is not, so prefetch depth is not the lever for either. Fit few parameters, then predict points the fit has
+  not seen before trusting the model.
 - Compute was not the limit: 320 allocation solves took 1.7 s. A many-core machine (the 32-thread desktop, 32 threads) matters only
   for large scheduling models or wide sweeps; run there with `nice` and a fixed `num_workers`.
 
@@ -119,6 +124,6 @@ python3 sched_model.py calib                 # schedule-model calibration (rejec
 
 ## 7. Open
 
-- A multi-thread schedule model (simulation first, solver second), calibrated on the measured attention variants.
+- Measure the model's predictions (Qwen bandwidth bound, Llama NS3 +1.2 %) and extend it to GEMM; a solver on top of it only if it shows a lever.
 - The GPU description as a file (`experiments/solver/gen9.json`) read by every model, instead of constants in code.
 - The Llama NK=1 fix: verify that Q is not read after the loop, implement in the generator (attention work), measure.

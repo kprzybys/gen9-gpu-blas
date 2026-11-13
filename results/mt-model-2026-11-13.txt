@@ -1,0 +1,25 @@
+# Multithreaded latency-hiding model of the attention loop on one Gen9 EU (experiments/solver/mt_model.py)
+# 2026-11-13. Discrete-event, cycle level: 7 threads per EU, 2 FPU pipes (SIMD8 FP32 mad = 2 clocks on a pipe, other ALU
+# instruction c_other clocks), 1 instruction per thread per clock, in-order; sends: data-port FIFO with bw bytes/clock
+# per EU, then fixed latency L clocks. 6 blocks per thread, start-up included. Peak 384 GFLOPS (24 EU, 1.0 GHz).
+# Calibration sweep on the 32-thread desktop (162 points, 3.5 s): L x bw x c_other against the Qwen measurements of
+# results/attn-asm-hd530-2026-11-13.txt (HD 530, 1.0 GHz): template (IGC, reads right before use) 230.8, NS2 287.7,
+# NS4 295.5 GFLOPS. Raw: experiments/solver/mt_results.json.
+#
+# Best fits (max relative error over the 3 points):
+#   L 300 bw 6 c_other 1: template 225.8 NS2 286.2 NS4 286.3  max err 3.1 %
+#   L 300 bw 6 c_other 2: template 222.5 NS2 281.9 NS4 286.3  max err 3.6 %
+#   next best 10 % and worse. Single-thread model (sched_model.py): no fit at all (docs/solvers.md section 5).
+# Out-of-sample check, Llama shape (D 64, RQ 4, NK 2; softmax/other overhead ASSUMED 154 instructions, not measured);
+# measured template 245.9, NS2 310.2:
+#   L 300 bw 6 c_other 2: template 249.4 (+1.4 %), NS2 318.6 (+2.7 %)   <- accepted parameter set
+#   L 300 bw 6 c_other 1: template 276.1 (+12.3 %), NS2 347.9 (+12.2 %) <- rejected
+# -> parameters L ~300 clk, bw ~6 B/clk/EU (75 % of 64 B/clk/subslice over 8 EUs), c_other 2; 5 points, 3 fitted.
+#
+# Predictions (HYPOTHESES until measured):
+#   Qwen NS2/NS4: bw 6 -> 281.9 / 286.3 | bw 8 -> 332.4 / 335.0 | unlimited bw -> 332.8 / 335.8 | latency 50 clk -> 287.1 / 287.6
+#     => Qwen is limited by L3/data-port bandwidth, not latency: lever = fewer bytes per mad (K/V reuse), not prefetch depth.
+#   Llama NS2/NS3: bw 6 -> 318.6 / 322.3 | bw 8 -> 319.5 / 322.5 | unlimited -> 321.6 / 323.3 | latency 50 -> 323.7 / 323.8
+#     => Llama (RQ 4: twice the reuse) is not memory-bound; NS3 +1.2 %; lever = non-mad instructions.
+# Consistent with the attention session's OA reading (stall 2-3 %); the bandwidth parameter is effective, it may also
+# absorb other port contention.

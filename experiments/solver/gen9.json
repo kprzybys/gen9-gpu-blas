@@ -1,0 +1,178 @@
+{
+  "_about": "Gen9 / Gen9.5 GT2 facts for models and solvers (docs/solvers.md section 4). Every value has a tag (SPEC = documentation, MEAS = measured here, SW = driver/compiler behaviour, EST = Mesa heuristic, HYP = unconfirmed) and a source. Unknowns are listed explicitly; a model that depends on one must say so. Keep in sync with docs/performance-model.md (the source of truth for prose).",
+  "version": "2026-11-13",
+  "devices": {
+    "uhd620": {
+      "name": "UHD 620 (Whiskey Lake, Gen9.5 GT2)",
+      "ocloc_device": "whl",
+      "clock_mhz": [
+        300,
+        1100
+      ],
+      "ram": "2 x DDR4-2400 (kp-laptop) / 1 x DDR4-2400 (gp-laptop)",
+      "tag": "SPEC",
+      "source": "docs/performance-model.md section 1; dmidecode 2026-11-13"
+    },
+    "hd530": {
+      "name": "HD 530 (Skylake, Gen9 GT2)",
+      "ocloc_device": "skl",
+      "clock_mhz": [
+        350,
+        1050
+      ],
+      "tag": "SPEC",
+      "source": "results/attn-asm-hd530-2026-11-13.txt header",
+      "note": "same ISA and binary code as whl (results/attn-kcl-hd530-2026-11-13.txt)"
+    }
+  },
+  "eu": {
+    "count": 24,
+    "threads_per_eu": 7,
+    "subslices": 3,
+    "eu_per_subslice": 8,
+    "tag": "SPEC",
+    "source": "Gen9 whitepaper; clinfo; i915 debugfs"
+  },
+  "grf": {
+    "count": 128,
+    "bytes": 32,
+    "per": "hardware thread (fixed; does not trade against thread count)",
+    "reserved_by_convention": [
+      0
+    ],
+    "reserved_note": "r0 thread payload; asm/gemm_gen.free_regs also keeps r1 and r127",
+    "tag": "SPEC",
+    "source": "Gen9 whitepaper",
+    "occupancy_tradeoff": {
+      "value": "none assumed: 7 threads per EU regardless of registers",
+      "tag": "HYP",
+      "note": "to verify; NVIDIA/AMD-style register-vs-occupancy trade-offs do not apply in this form"
+    }
+  },
+  "banks": {
+    "model": "2 banks by register-number parity",
+    "rule": "mad src1 and src2 in the same bank conflict; src0 does not matter",
+    "penalty": {
+      "mad_vector_vector_gops": [
+        410,
+        272
+      ],
+      "ratio": 0.66
+    },
+    "tag": "MEAS",
+    "source": "results/micro-2026-11-11.txt; docs/isa-notes.md section 4.1",
+    "conflicts_with": {
+      "mesa": "4 banks for Gen7-Gen9 (EST, brw_fs_bank_conflicts.cpp)",
+      "igc_comment": "src1/src2 collision 'upto pre-SKL' (visa/GraphColor.cpp); whether hasBankCollision() is true on SKL: unknown"
+    },
+    "unknown": [
+      "instructions other than mad",
+      "measured on UHD 620 only (repeat on HD 530)"
+    ]
+  },
+  "fpu": {
+    "per_eu": 2,
+    "fp32_lanes_per_clock": 4,
+    "fp16_lanes_per_clock": 8,
+    "fma_per_clock": true,
+    "peak_gflops_1100mhz": {
+      "fp32": 422.4,
+      "fp16": 844.8,
+      "fp64": 105.6
+    },
+    "measured_gflops": {
+      "fp32": 410,
+      "fp16": 803,
+      "fp64": [
+        90,
+        94
+      ]
+    },
+    "tag": "SPEC/MEAS",
+    "source": "docs/performance-model.md sections 1-2; results/arith-throughput-latency-2026-11-11.txt",
+    "notes": [
+      "FP16 mad needs -cl-fast-relaxed-math (else mul+add, 200 vs 791 GFLOPS) [MEAS]",
+      "FP16 two-operand ops with a scalar operand lose the double rate [MEAS]",
+      "SIMD16 not allowed for packed-f16 results of mixed mode [SW]"
+    ]
+  },
+  "issue": {
+    "model": "in-order per thread; threads of an EU interleave",
+    "co_issue_mad_with_send_add_math": {
+      "value": "unknown",
+      "tag": "HYP",
+      "source": "docs/isa-notes.md section 7"
+    },
+    "observed": "attention loop 1229 instructions / 1024 mad: 0.90-0.92 of the issue bound; OA stall 2-3 % (latency hidden by other threads)",
+    "observed_tag": "MEAS",
+    "observed_source": "results/attn-asm-hd530-2026-11-13.txt; message from the attention session 2026-11-13"
+  },
+  "memory": {
+    "latency_clk": {
+      "l3": 147,
+      "ram": 440
+    },
+    "latency_ns": {
+      "l3": 133,
+      "llc": [
+        200,
+        270
+      ],
+      "ram": 400
+    },
+    "latency_tag": "MEAS",
+    "latency_source": "results/memory-latency-2026-11-11.txt",
+    "l3_gbs": {
+      "oword_x1": 116,
+      "oword_x2_in_flight": 156,
+      "media": 154
+    },
+    "llc_working_set_mb": [
+      4,
+      8
+    ],
+    "ram_gbs_gpu": 20,
+    "bandwidth_tag": "MEAS",
+    "bandwidth_source": "results/memory-bandwidth-2026-11-11.txt",
+    "line_bytes": 64,
+    "bytes_per_lane_optimum_simd16": 16,
+    "page_bytes": 4096,
+    "large_pages": false,
+    "page_note": "tiles touching many distant rows collapse 15-20x (TLB) [MEAS, docs/pitfalls.md section 2]",
+    "slm_kb_per_subslice": 64,
+    "slm_gbs_float4": 177,
+    "slm_tag": "SPEC/MEAS"
+  },
+  "send": {
+    "block_read_used": {
+      "bytes": 128,
+      "grf": 4,
+      "descriptor": "0x024D0CFF (a64 OWord block x8)",
+      "header_grf": 1
+    },
+    "header_rule": "the send reads its header at issue: one header can be advanced right after each send and shared",
+    "tag": "SW",
+    "source": "asm/gemm_gen.py, asm/attn_gen.py"
+  },
+  "launch": {
+    "preempt_timeout_ms": 640,
+    "kcl_silently_wrong_beyond": true,
+    "split_launch_ms": 100,
+    "tag": "MEAS/SW",
+    "source": "docs/pitfalls.md section 4; lib (GEN9BLAS_MAX_LAUNCH_MS)"
+  },
+  "platform": {
+    "eu_arbitration": "round-robin (0xE404 = 0x100) via kcl",
+    "mocs_index": 2,
+    "tag": "MEAS",
+    "source": "docs/performance-model.md section 3"
+  },
+  "model_effective": {
+    "latency_clk": 300,
+    "port_bytes_per_clk_per_eu": 6,
+    "alu_other_clk": 2,
+    "tag": "MODEL",
+    "source": "results/mt-model-2026-11-13.txt (fitted on 3 Qwen points, checked on 2 Llama points within 3 %)",
+    "note": "effective values of the multithreaded model, not hardware constants"
+  }
+}
