@@ -64,6 +64,10 @@ int gen9blas_binop_rows(int op, int M, int K, const float *A, int lda, const flo
 int gen9blas_rope(int n_dims, int nh, int n_tok, const float *X, long xs1, long xs2, float *Y, long ys1, long ys2,
                   const int *pos, const float *ff, int neox, float freq_base, float freq_scale, float ext_factor,
                   float attn_factor, const float corr[2], int sync);
+// ggml backend: n (1..8) products of one F32 input with HS-packed weights (Q/K/V), A packed once, one wait;
+// nonfinite[i] per output. Returns 1 if not applicable (an output not zero-copy): compute them one by one.
+int gen9blas_gemm_multi_f16w(int M, const float *A, int lda, int n, const gen9blas_packed *const *P, float *const *C,
+                             const int *ldc, int *nonfinite);
 int gen9blas_ffn_f16w(int M, const float *X, int ldx, const gen9blas_packed *Pg, const gen9blas_packed *Pu,
                       const gen9blas_packed *Pd, float *Y, int ldy, int *nonfinite);
 // ggml backend, quantized weights: N rows of K values in ggml block layout (row n at W + n * row_bytes; qtype

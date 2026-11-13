@@ -789,6 +789,44 @@ static int gemm_dev(type_t *r, cl_mem Ap, cl_mem Bp, cl_mem C, int Mp, int Np, i
     return 0;
 }
 
+// n (1..8) products of one F32 input with HS-packed weights (ggml: Q/K/V MUL_MATs on the same normed input): A packed to
+// FP16 once, then GEMM + epilogue per weight, one wait. nonfinite[i]: output i had inf / NaN (caller recomputes it in F32).
+// Returns 1 (nothing done) when an output is not zero-copy (the copy path has one work buffer for C).
+int gen9blas_gemm_multi_f16w(int M, const float *A, int lda, int n, const gen9blas_packed *const *P, float *const *C,
+                             const int *ldc, int *nonfinite) {
+    static int *nf;   // one USM flag word per output
+    NEW_OPERATION();
+    if (n < 1 || n > 8 || !types[GEN9BLAS_HS].ready || !k_pa3_f32) FAIL("gemm_multi_f16w: bad arguments");
+    if (!nf && !(nf = gen9blas_alloc(64))) return -1;
+    const int K = P[0]->K, Kp = P[0]->Kp, Mp = (M + 15) / 16 * 16;
+    int Npmax = 0;
+    for (int i = 0; i < n; i++) {
+        if (!P[i] || P[i]->type != GEN9BLAS_HS || P[i]->K != K || P[i]->Kp != Kp) FAIL("gemm_multi_f16w: B %d not HS-packed with K = %d", i, K);
+        if (P[i]->Np > Npmax) Npmax = P[i]->Np;
+        nonfinite[i] = 0;
+    }
+    if (M <= 0) return 0;
+    type_t *r = &types[GEN9BLAS_HS];
+    bf_t xA, xC[8]; int zA, zC[8];
+    if (get_obj(A, ((size_t)(M - 1) * lda + K) * 4, &uA, 1, 0, &xA, &zA)) return -1;
+    for (int i = 0; i < n; i++) {
+        if (get_obj(C[i], ((size_t)(M - 1) * ldc[i] + P[i]->N) * 4, &uC, 0, 1, &xC[i], &zC[i])) return -1;
+        if (!zC[i]) return 1;
+    }
+    if (ensure_buf(&dAp, &sAp, (size_t)Mp * Kp * 2 + 4096) || ensure_buf(&dCp, &sCp, (size_t)Mp * Npmax * 2)) return -1;
+    for (int i = 0; i < n; i++) nf[i] = 0;
+    if (pack_a3_f32(xA, dAp, M, K, lda, Kp, Mp)) return -1;
+    for (int i = 0; i < n; i++) {
+        if (gemm_dev(r, dAp, P[i]->buf, dCp, Mp, P[i]->Np, Kp)) return -1;
+        bf_t xnf = { NULL, nf + i };
+        if (epilog_hf(dCp, P[i]->Np, Mp, xC[i], ldc[i], P[i]->N, M, xnf)) return -1;
+    }
+    if (wait_gpu()) return -1;
+    for (int i = 0; i < n; i++) nonfinite[i] = nf[i] != 0;
+    return 0;
+}
+
+
 // Gated FFN with FP16 weights (ggml: down(swiglu(gate(x), up(x)))), all intermediates on the GPU:
 // Y (F32, M x Nd) = (silu(X Wg) * (X Wu)) Wd, with Pg, Pu (K -> N) and Pd (N -> Nd) packed as GEN9BLAS_HS.
 // X is packed to FP16 once; gate and up stay FP16; h is computed in F32 and rounded to FP16 into down's packed A;
