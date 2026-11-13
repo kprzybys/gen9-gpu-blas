@@ -161,8 +161,8 @@ What porting needs, as hypotheses to check in the PRM of each generation before 
   as Broadwell (no assembly kernels, no FP16 yet); `kcl` Gen8 state (pipeline select, base addresses, MOCS, SLM, VFE,
   L3), coherency without LLC, a 4 GB address space and one request per kernel (no preemption); and Cherryview-specific
   fixes found on the hardware: the A64 QWord scattered read hangs the GPU (doubles moved as dword pairs), FP64 division
-  and variable-lane double broadcasts avoided. Measured bandwidth (one DDR3-1600 channel, 12.8 GB/s) is in gen8.md;
-  performance is not measured yet.
+  and variable-lane double broadcasts avoided. Measured bandwidth (one DDR3-1600 channel, 12.8 GB/s) and the
+  SIMD8 GEMM kernels tuned for Gen8 (SGEMM 63-81, DGEMM 10.2 GFLOPS) are in gen8.md (6d, 6e).
 - **Gen7.5 (Haswell).** Gen8 changed the native instruction encoding, so the assembler path (IGA / `ocloc` targets) and
   the templates change more; `kcl` state differs more (Gen7 media pipeline). On Gen7.x the i915 command parser checks
   batch buffers from unprivileged clients, so the first test is whether a `kcl` batch is accepted at all. FP16 has no

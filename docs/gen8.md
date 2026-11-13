@@ -236,7 +236,7 @@ library. `test_level12` skips ROTG/ROTMG/ROTM when SciPy is missing (their refer
 | `test_level3` (GEMM, SYMM, SYRK, SYR2K, TRMM, TRSM, batched, views; FP32, FP64) | all OK |
 | `test_level12` (levels 1 and 2, FP32 and FP64) | all OK |
 | `test_userptr` | all OK |
-| `test_skinny` | **wrong results** exactly in the cases that use `skinny_r4_f` / `skinny_r8_f` (K a multiple of 16, M = 2, 4, 8, B transposed); the cases on `skinny_k*` pass. With `skinny_k*` only: all OK |
+| `test_skinny` | **wrong results** exactly in the cases that use `skinny_r4_f` / `skinny_r8_f` (K a multiple of 16, M = 2, 4, 8, B transposed); the cases on `skinny_k*` pass. With `skinny_k*` only: all OK. Fixed later with 32-bit address offsets (6e) |
 | `test_level3` with `GEN9BLAS_MAX_LAUNCH_MS=0.5` | all OK |
 | `test_long_launch` (DGEMM n = 4096, SGEMM n = 8192, batched DGEMM 2 x 3072) | first **two GPU resets**: the band-split launches went into one batch, which on Gen8 (no preemption) is one request, longer than the heartbeat allows (~10 s). With one request per kernel on Gen8 (`lib/kcl.c` `enqueue_`): all OK |
 
@@ -248,7 +248,7 @@ other one is a subnormal quotient off by 1 ulp, as the emulation predicted. `dtr
 `skinny_r*` differ from the passing SLM/barrier kernels (`skinny_k4_f`, `trsv_block_f`, same 16 threads per group) by
 SIMD8 and the A64 aligned OWord block read x4 (`intel_sub_group_block_read2`); which of the two (if either) is the cause
 is not known [HYP]. They are only the faster variant, so on Gen8 `gen9blas.c` uses `skinny_k*` instead (as with
-`GEN9BLAS_SKINNY_R=0`).
+`GEN9BLAS_SKINNY_R=0`). Neither was the cause: 64-bit index products were (6e).
 
 ## 6d. Performance (2026-11-13, `results/braswell-gen8-2026-11-13.txt`) [MEAS]
 
@@ -265,17 +265,78 @@ The SGEMM main kernel on Gen8 is the OpenCL C frame (`sgemm_v`) of the Gen9 asm 
 reaches a larger share of its (much lower) peak. The band-splitting estimate (`est_ms`: 50 / 8 GFLOPS) is right for FP64
 and 1.2-1.4x optimistic for FP32. No CPU comparison: the target has only the reference BLAS.
 
+## 6e. Tuning (2026-11-13, branch `gen8-tune`) [MEAS]
+
+Ceilings first (`lib/bench_gen8`, kernels in `bench/gen8_probe.cl`, at 600 MHz; FMA loops of 8 independent chains per
+work-item, long enough for the clock to ramp up from 200 MHz):
+
+| | measured | theoretical (CHV PRM vol04 p.5) |
+|---|---|---|
+| FP32 FMA (SIMD16) | 83.9 GFLOPS | 115.2 |
+| FP64 FMA (SIMD8) | 11.4 GFLOPS | 14.4 |
+| memory read / write / copy (float4, grid-stride, 128 MB) | 6.8-7.9 / 7.1-8.2 / 6.0-7.3 GB/s (two runs) | 12.8 |
+
+Levels 1 and 2 already stream at 6.7-8.1 GB/s (6d), i.e. at the memory ceiling: nothing to gain there. The GEMMs were
+far from the FMA ceilings (SGEMM 0.43-0.56, DGEMM about 0.7 of the measured values), so the tuning went into them.
+
+**SGEMM: `sgemm8_v32`** (`bench/sgemm.cl`, `#ifdef GEN8_CHV`). `sgemm_v` was written for SIMD16 on Gen9; a wider tile
+in SIMD16 spilled (424, 679 and fewer scratch messages in the variants tried), because a per-lane float takes 2 GRF in
+SIMD16 and 1 GRF in SIMD8. The new kernel: one SIMD8 subgroup per 16 x 32 tile of C (`float acc[16][4]`, 64 GRF), A packed
+in 16 x 16 blocks (`pkf_a8`) and B in 32-column panels (`pkf_b32`), so that per 4 k the subgroup does three block reads
+(A: 16 rows x 4 k; B: 2 x 2 k x 32 columns) and broadcasts the A values with `sub_group_broadcast`. The inner loop is
+256 `mad` out of 275 instructions (93 %), no scratch [SCAN]. Tile order: groups of `GM8` tile rows; sweep at n = 2048 /
+4096 [MEAS]:
+
+| GM8 | 2 | **4** | 8 | 16 | 32 | 64 |
+|---|---|---|---|---|---|---|
+| GFLOPS n = 2048 | 61.2 | **76.2** | 75.9 | 75.7 | 75.0 | 75.6 |
+| GFLOPS n = 4096 | 57.2 | **68.7** | 55.5 | 56.2 | 55.4 | 55.7 |
+
+Result: 69.9 / 76.2 / 68.7 GFLOPS at n = 1024 / 2048 / 4096 (was 47.3 / 40.1 / 36.9 with `sgemm_v`; same session),
+0.82-0.91 of the measured FMA ceiling. `GEN9BLAS_SGEMM8=v` selects the old kernel (comparisons).
+
+**DGEMM: `dgemm8_v832`** (`bench/dgemm_core.cl`). `dgemm_v` (16 x 16 per two SIMD8 subgroups) spends 151 instructions
+per 64 `mad:df` in its loop: Gen8 3-source instructions are Align16 only, so each broadcast A value is a separate
+`mov:df`. The new kernel: one SIMD8 subgroup per 8 x 32 tile (`double acc[8][4]`), A from the existing 16-row packing,
+B in 32-column panels (`pkd_b32`), all reads as `ulong` block reads (no QWord scattered read, section 6a), 100 instructions
+per 64 `mad:df` [SCAN]. Result: 9.96 / 10.25 / 10.14 GFLOPS at n = 1024 / 2048 / 4096 (was 8.01 / 8.20 / 8.12), 0.87-0.90
+of the measured FP64 ceiling. `GEN9BLAS_DGEMM8=v` selects `dgemm_v`.
+
+**64-bit index products miscompute on the Cherryview** [MEAS + HYP]. The first `sgemm8_v32` gave correct single GEMMs but
+zeros in C[b >= 1] of a batched GEMM. A debug kernel (`bench_gen8 ids`) showed correct group and subgroup ids; computing
+the batch offset `(size_t)b * M * K` as a 32-bit product instead made the result correct, with nothing else changed. The
+same change fixed `skinny_r4/r8` (6c): their row pointers `W + (long)row * ldw` became `W + (uint)row * (uint)ldw`
+(`OFS` in `bench/level12.cl`), and `test_skinny` passes with them enabled. On Gen8 the address space is 4 GB, so 32-bit
+offsets cannot overflow there; the Gen9 build keeps 64-bit products. Hypothesis for the cause: the compiler emulates the
+64-bit multiply with DW x DW `mul`/`mach` sequences that break Cherryview's region rules (section 3, R1a; 922 such
+sequences in the scan). Not every such sequence fails (most kernels contain them and pass), and which instruction gives
+the wrong value was not isolated.
+
+**After tuning** (`results/braswell-gen8-tuned-2026-11-13.txt`, load 2.2-2.5 on the 2 cores): all seven GPU suites of 6c
+all OK (`test_skinny` with `skinny_r`), no reset; Gen9 regression on the HD 530 unchanged (`make check` 10/10, GEMM within
+0.3 %).
+
+| | before (6d) | after | |
+|---|---|---|---|
+| SGEMM n = 1024 / 2048 / 3072 / 4096 | 42.3 / 40.5 / 38.0 / 36.2 | 69.8 / 76.1 / 80.6 / 62.9 GFLOPS | 1.65-2.1x |
+| DGEMM n = 2048 / 4096 | 8.2 / 8.1 | 10.3 / 10.2 GFLOPS | 1.25x |
+| skinny SGEMM A·Wᵀ, K = 4096, M = 2-4 / 8 / 16 | `skinny_k` | `skinny_r` | 1.2-1.3x / 1.9x / 2.6-2.8x |
+
+SGEMM n = 4096 reached 68.7 GFLOPS in the tuning runs at lower load; at this load the spread is several percent.
+
 ## 7. Open questions and known limitations
 
-- Why `skinny_r4/r8` give wrong results (SIMD8? A64 OWord block read x4?); Gen8 uses `skinny_k*` instead (6c).
+- Which instruction of the 64-bit index multiply goes wrong (6e); other kernels with such products pass the suites, but
+  a form that fails only for some sizes cannot be excluded [HYP].
 - The A64 QWord scattered *write* was never tested on its own (no kernel of the Gen8 build uses it any more).
 - The accuracy of `native_recip` on the hardware is not measured; `div_chv` tolerates a 1e-3 error in emulation, and the
   hardware test of the division (6c) is the check.
 - Snooping: coherent in all tests so far (including command-streamer fetches of the WC-mapped batch); its bandwidth cost
   against uncached memory with clflush is not measured (streaming routines reach 0.52-0.63 of the theoretical 12.8 GB/s, 6d).
-- SGEMM reaches 0.31-0.37 of the FP32 peak with the untuned OpenCL C kernel (6d).
-- `est_ms` assumes 50 / 8 GFLOPS (FP32 / FP64) for band splitting; measured 36-42 / 8.1-8.2 (6d), so FP32 bands run up to
-  ~1.4x longer than `GEN9BLAS_MAX_LAUNCH_MS`.
+- The measured FP32 FMA ceiling (83.9 GFLOPS) is 0.73 of the theoretical 115.2; why (issue rate of SIMD16 `mad`, or
+  too few independent chains in the microbenchmark: 8 per work-item) is not known, so SGEMM may have more headroom than 6e suggests [HYP].
+- `est_ms` assumes 50 / 8 GFLOPS (FP32 / FP64) for band splitting; after tuning the kernels reach 69-76 / 10 (6e), so bands
+  are shorter than `GEN9BLAS_MAX_LAUNCH_MS` (safe for the heartbeat, slightly more launches).
   With one request per kernel only a single launch has to fit the ~10 s heartbeat; only GEMM is band-split.
 - The 4 GB address space: when it is full, kcl waits for the GPU and retries, but does not evict cached userptr objects
   (up to `KCL_USERPTR_MB`, default 1 GB); `KCL_ADDR` (2 MB alignment, colouring) is ignored on Gen8.

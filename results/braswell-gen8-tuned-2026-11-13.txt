@@ -1,0 +1,54 @@
+# Gen8 (Braswell / Cherryview) after kernel tuning, 2026-11-13 (docs/gen8.md 6e); before: braswell-gen8-2026-11-13.txt
+# Machine: as in braswell-gen8-2026-11-13.txt (Intel HD Graphics 400, Cherryview 0x22b1, 12 EU, 200-600 MHz; Celeron
+#   N3010; one DDR3-1600 module). Code: tree of commit 3ccf39a (branch gen8-tune); lib/kernels.c md5
+#   02e260eb5c20ceabb31ea0335da2255e (Gen9, unchanged), lib/kernels_gen8.c md5 c78522e1ca0b3054058591fdd24d2e36.
+# Background load: 2-core load 2.2-2.5 before each stage (higher than in the first measurements); nice 19 / ionice idle,
+#   started only below load 2.5. GPU clock sampled every second: GEMM stages at 600 MHz (249 s at 600, 44 s at 200);
+#   hottest core 67 C. Peaks at 600 MHz: FP32 115.2 / FP64 14.4 GFLOPS theoretical, 83.9 / 11.4 measured (lib/bench_gen8).
+
+## Summary
+# - Test suites before the measurements, all "RESULT: all OK", no GPU reset: test_basic, test_level3, test_level12,
+#   test_userptr, test_skinny (skinny_r enabled), test_level3 with GEN9BLAS_MAX_LAUNCH_MS=0.5, test_long_launch.
+#   Gen9 regression of the same tree on the HD 530: make check 10/10 OK, GEMM within 0.3 % of skylake-hd530-2026-11-12.txt
+#   for n >= 2048.
+# - SGEMM (sgemm8_v32): 69.8 / 76.1 / 80.6 / 62.9 GFLOPS for n = 1024 / 2048 / 3072 / 4096 (before: 42.3 / 40.5 / 38.0 /
+#   36.2), 1.65-2.1x. n = 4096 gave 68.7 in the tuning runs (lower load); the spread at this load is several percent.
+# - DGEMM (dgemm8_v832): 10.1-10.3 GFLOPS (before 8.1-8.2), 1.25x; n = 4096 takes 13.5 s instead of 16.9 s.
+# - Skinny SGEMM A . W^T (FP32, K = 4096): with skinny_r (now enabled on Gen8) vs skinny_k (the only path before):
+#   M = 2-4: 1.2-1.3x, M = 8: 1.9x, M = 16: 2.6-2.8x faster; M = 1 uses skinny_k1 in both runs (the ~15 % difference
+#   at N = 4096 is run-to-run spread). M <= 4 runs at the memory ceiling (6.4-6.9 GB/s of weights).
+# - Levels 1-2 unchanged (at the memory ceiling, braswell-gen8-2026-11-13.txt).
+
+## gemm_sizes.log (bench/gemm_sizes.py)
+     n       FP16  FP16 accurate       FP32   (GFLOPS)
+  1024        nan            nan       69.8
+  2048        nan            nan       76.1
+  3072        nan            nan       80.6
+  4096        nan            nan       62.9
+## dgemm.log (the script of braswell-gen8-2026-11-13.txt)
+round 1  dgemm n= 2048    10.2 GFLOPS   1676.2 ms  rel err rows 0-3 5.9e-16
+round 1  dgemm n= 4096    10.2 GFLOPS  13538.1 ms  rel err rows 0-3 6.0e-16
+round 2  dgemm n= 2048    10.3 GFLOPS   1675.8 ms  rel err rows 0-3 7.0e-16
+round 2  dgemm n= 4096    10.1 GFLOPS  13542.3 ms  rel err rows 0-3 1.2e-15
+## skinny_r.log (bench/skinny_gen8.py)
+N=  4096 K=4096 M=  1    10.163 ms   6.60 GB/s    3.30 GFLOPS  err 1.1e-07
+N=  4096 K=4096 M=  2     9.793 ms   6.85 GB/s    6.85 GFLOPS  err 1.6e-07
+N=  4096 K=4096 M=  4    10.532 ms   6.37 GB/s   12.74 GFLOPS  err 1.8e-07
+N=  4096 K=4096 M=  8    11.887 ms   5.65 GB/s   22.58 GFLOPS  err 1.5e-07
+N=  4096 K=4096 M= 16    19.363 ms   3.47 GB/s   27.73 GFLOPS  err 1.7e-07
+N= 11008 K=4096 M=  1    21.560 ms   8.37 GB/s    4.18 GFLOPS  err 1.5e-07
+N= 11008 K=4096 M=  2    26.421 ms   6.83 GB/s    6.83 GFLOPS  err 1.3e-07
+N= 11008 K=4096 M=  4    26.222 ms   6.88 GB/s   13.76 GFLOPS  err 1.8e-07
+N= 11008 K=4096 M=  8    31.361 ms   5.75 GB/s   23.00 GFLOPS  err 1.7e-07
+N= 11008 K=4096 M= 16    49.173 ms   3.67 GB/s   29.34 GFLOPS  err 1.8e-07
+## skinny_k.log (GEN9BLAS_SKINNY_R=0 python3 bench/skinny_gen8.py)
+N=  4096 K=4096 M=  1     8.775 ms   7.65 GB/s    3.82 GFLOPS  err 1.1e-07
+N=  4096 K=4096 M=  2    12.313 ms   5.45 GB/s    5.45 GFLOPS  err 1.2e-07
+N=  4096 K=4096 M=  4    13.575 ms   4.94 GB/s    9.89 GFLOPS  err 1.4e-07
+N=  4096 K=4096 M=  8    22.629 ms   2.97 GB/s   11.86 GFLOPS  err 1.7e-07
+N=  4096 K=4096 M= 16    50.346 ms   1.33 GB/s   10.66 GFLOPS  err 1.7e-07
+N= 11008 K=4096 M=  1    22.176 ms   8.13 GB/s    4.07 GFLOPS  err 1.5e-07
+N= 11008 K=4096 M=  2    31.397 ms   5.74 GB/s    5.74 GFLOPS  err 1.2e-07
+N= 11008 K=4096 M=  4    34.873 ms   5.17 GB/s   10.34 GFLOPS  err 1.6e-07
+N= 11008 K=4096 M=  8    59.451 ms   3.03 GB/s   12.13 GFLOPS  err 2.0e-07
+N= 11008 K=4096 M= 16   136.180 ms   1.32 GB/s   10.60 GFLOPS  err 1.7e-07
