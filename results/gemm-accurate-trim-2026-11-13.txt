@@ -23,3 +23,7 @@ llama-bench pp512 Qwen2.5-1.5B Q4_K_M (-r 4, alternating): old 179.3 / 184.7, ne
 A 16x32 accurate tile is register-bound: per the CP-SAT count of an earlier run, it fits only after free_regs() keeps
 only the epilogue's live-in registers (E = 7-9 instead of 17), with one load buffer (kl 4) or two half-size buffers
 sharing headers, and no spare register at all; 8x32 fits easily but reads more per mad (6.4 vs 8 FMA per element).
+## Carry as one SIMD16 mixed-mode add (f 2 GRF, h 1 GRF) instead of two SIMD8 halves
+[HYP] 16 fewer instructions per chunk (67 -> 51 non-mad) -> ~+2.7 %. Bit test: identical (so the hardware executes the
+SIMD16 mixed-mode add correctly on this regioning). Kernel-only GFLOPS, alternating (gate/up, down):
+  before 696 698 | 671 705 | 697 691      SIMD16 carry 710 704 | 698 696 | 704 711   -> ~+1.5 % (below the prediction)
