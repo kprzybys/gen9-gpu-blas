@@ -131,7 +131,7 @@ const char *gen9blas_error(void);
 // llama.cpp layouts: Q and O F32 [token][H][D]; K and V F16 rows of HKV*D values (row j, head h at h*D), the first nk
 // rows used (nk a multiple of 16); k_bytes / v_bytes: bytes from K / V to the end of the whole KV tensor (pinned once).
 // Token t attends to keys 0 .. min(nk, vis0 + dvis*t) - 1 (dvis 1: causal, 0: the same count for all), scores scaled
-// by scale, FP32 accumulation. Shapes with a built-in binary: (D, H/HKV, HKV) = (128, 6, 2) and (64, 4, 8).
+// by scale, FP32 accumulation. Shapes with a built-in binary: (D, H/HKV, HKV) = (128, 6, 2), (64, 4, 8) and (64, 1, 20).
 // Returns 0 (done), 1 (not handled: unsupported shape or memory not mappable; nothing was written), -1 (GPU error:
 // O is undefined, recompute it). *launches (may be NULL): number of k_attn launches (split at ~2e10 FLOP).
 int gen9blas_attn_supported(int D, int H, int HKV);

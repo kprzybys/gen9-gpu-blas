@@ -20,6 +20,7 @@ typedef struct { int D, G, HKV, RQ, NK; const char *bin; cl_kernel kt, attn; int
 static attn_bin_t bins[] = {
     { 128, 6, 2, 2, 2, "attn_qwen_tokc.bin", NULL, NULL, 0 },    // Qwen2.5-1.5B (sched4)
     { 64, 4, 8, 4, 2, "attn_llama_tokc.bin", NULL, NULL, 0 },    // Llama-3.2-1B (sched2)
+    { 64, 1, 20, 4, 2, "attn_whisper_tokc.bin", NULL, NULL, 0 }, // whisper large-v3(-turbo) encoder (sched2); G < RQ: dvis 0 only
 };
 static cl_mem dKt; static size_t sKt;
 static char aerr[512];
@@ -66,7 +67,13 @@ int gen9blas_attn_f16kv(int D, int H, int HKV, int nq, int nk, const float *Q, c
     attn_bin_t *b = find_bin(D, H, HKV);
     if (!b) return 1;
     const int G = H / HKV, NK = b->NK;
-    if (nq <= 0 || nk <= 0 || nk % (8 * NK) || vis0 < 1 || (dvis != 0 && dvis != 1) || G % b->RQ) return 1;
+    // rows (token-major, row = t * G + head) split into whole RQ-row subgroups: every launch slice is a multiple of 8
+    // tokens except the last, so 8 * G and nq * G must divide by RQ (G % RQ for the GQA shapes; whisper G 1, RQ 4)
+    if (nq <= 0 || nk <= 0 || nk % (8 * NK) || vis0 < 1 || (dvis != 0 && dvis != 1) || (8 * G) % b->RQ ||
+        ((long)nq * G) % b->RQ) return 1;
+    // asm/attn.cl computes the visible key count once per subgroup, from the token of its first row: right only when
+    // all RQ rows are one token (G % RQ == 0) or every token sees the same count (dvis 0). G 1 with causal: unsupported.
+    if (G % b->RQ && dvis != 0) return 1;
     const size_t row = (size_t)HKV * D * 2;
     if (k_bytes < (size_t)nk * row || v_bytes < (size_t)nk * row) return 1;
     if (((uintptr_t)Q | (uintptr_t)K | (uintptr_t)V | (uintptr_t)O) & 15) return 1;   // OWord block reads / writes

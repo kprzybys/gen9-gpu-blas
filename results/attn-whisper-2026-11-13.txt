@@ -1,0 +1,30 @@
+Attention on the GPU for the whisper.cpp encoder: binary attn_whisper_tokc (D 64, G 1, H_kv 20), 2026-11-13
+==========================================================================================================
+
+Machine: desktop i5-6500 / HD 530 (Gen9, 24 EU), GPU ~1000 MHz, NEO 24.35.30872.36, IGC 1.0.17537.24, DEVICE=skl.
+Code: ggml-backend branch at deb6045 + this change (asm/attn_gen.py imm(), lib/gen9blas_attn.c shape + G % RQ rule,
+ggml-backend/ggml-gen9.cpp n_k rounding + V tail check, test_attn modes whisper / whispernan).
+
+Generator
+  12 existing binaries (skl + whl) rebuilt with the fixed attn_gen: 12/12 identical to asm/attn_sha256.txt,
+  loopcheck OK in all. `make attn-sha` adds only skl/whl attn_whisper_tokc.
+  attn_whisper_tokc (sched2, RQ 4, NK 2): loopcheck OK, mad bank conflicts 0, check_generated OK.
+  Same for a G 4 / H_kv 20 test shape (not in the Makefile; it failed in the same way before the fix).
+  Cause of the failure before the fix: IGC's V pointer steps for keys 13..15 at a 2560 B row are 0x8200:uw, 0x8C00:uw,
+  0x9600:uw (do not fit :w, printed in hex); attn_gen.imm() read decimal only -> +0 -> "key mismatch" assert.
+
+bench/attn_kcl (kcl + userptr, llama.cpp-like KV buffer), STEP=1 (whole output vs FP64)
+  shape                                     VIS0 DVIS  error vs FP64     attn GFLOPS (steady, 5 passes)
+  H 20 HKV 20 D 64 n_q 1500 n_k 1504, 32 L  1500 0     2.00-2.16e-6      317.1 (incl. k_kt 312.5, + submit/wait 310.8)
+  H 80 HKV 20 D 64 n_q 512  n_k 1504         1500 0     -                 317.3
+  H 80 HKV 20 D 64 n_q 512  n_k 1504         992  1     2.38-2.42e-6      315.6
+  H 32 HKV 8  D 64 n_q 512  n_k 4096 (Llama) 3584 1     2.76-2.85e-6      (control)
+  poison binary, whisper shape                1500 0     0.74-0.95         (the GPU runs our ISA)
+  Per whisper encoder layer: 36.3 ms attention + 0.53 ms k_kt; 32 layers = 1.16 s per 30 s window.
+
+ggml-backend/test_attn (FLASH_ATTN_EXT node through GEN9 vs ggml-cpu, 4 threads), GEN9_ATTN=1
+  64 20 20 1500 0 1536 whisper     : GPU 3/3, rounded up 3; NMSE 2.6e-13, max rel 1.2e-6; GEN9 40.6 ms, ggml-cpu 81.9 ms
+  64 20 20 1500 0 1536 whispernan  : V tail not finite -> ggml-cpu 3; NMSE 0 (finite)
+  64 20 20 512 0 1536 causal       : library declines (G % RQ != 0 with dvis 1) -> ggml-cpu; NMSE 0
+
+Not yet: whisper.cpp end to end with GEN9_ATTN=1 (encoder time, WER) on the laptop UHD 620.

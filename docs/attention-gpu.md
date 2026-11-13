@@ -334,8 +334,9 @@ raw outputs, predictions with timestamps and tables in `results/attn-integration
   returns "not handled" and the backend computes the node with ggml-cpu. Qwen2.5-7B at 32k (1.8 GB of K/V) would be
   re-pinned through kcl's LRU per layer (~15 ms per layer [EST]); it has no binary yet anyway (G = 7).
 - Backend (`ggml-backend/ggml-gen9.cpp`, opt-in `GEN9_ATTN=1`): supports_op accepts F16 K/V, F32 Q/O, no ALiBi /
-  soft-capping / sinks, (D, G, H_kv) with a binary ((128, 6, 2) Qwen2.5-1.5B, (64, 4, 8) Llama-3.2-1B), llama.cpp's
-  layouts (Q the permuted view of Qcur, K/V rows of H_kv*D, dst contiguous), n_q >= 32, n_kv a multiple of 16, mask
+  soft-capping / sinks, (D, G, H_kv) with a binary ((128, 6, 2) Qwen2.5-1.5B, (64, 4, 8) Llama-3.2-1B, (64, 1, 20) whisper encoder), llama.cpp's
+  layouts (Q the permuted view of Qcur, K/V rows of H_kv*D, dst contiguous), n_q >= 32, n_kv a multiple of 16 (or,
+  without a mask, rounded up when the rows exist behind the views; see the whisper paragraph below), mask
   F16 [n_kv, >= n_q, 1, 1] or none, kv_rows [n, 1] if present. The mask contents exist only at compute time: each
   row must be +0 for the first n_t columns and -inf after, with n_t = n_0 + dvis*t (word-wise check, 0.3 ms per node,
   ~2 % of the attention time); with kv_rows the listed rows must be the identity over the visible columns. Anything
@@ -352,6 +353,22 @@ are random values and its K/V are not in the KV-cache layout), so the GPU path i
 (FLASH_ATTN_EXT node on GEN9 vs ggml-cpu in llama.cpp's layouts, test-backend-ops' NMSE metric): NMSE 4e-14..4e-12
 (bound 5e-4) for causal, depth 0..3584, n_q 75, large logits, no mask, kv_rows; a mask with a hole goes to ggml-cpu
 (NMSE 0).
+
+**whisper.cpp encoder (64, 1, 20).** Third binary `attn_whisper_tokc` (sched2, RQ 4, NK 2): whisper large-v3(-turbo)
+encoder self-attention, 20 heads of 64, no GQA, no mask, n_q = n_k = 1500. Three things made it fit:
+- n_k 1500 is not a multiple of 16: without a mask the backend rounds it up when the tensor behind the K/V views has the
+  rows (whisper.cpp's kv_pad: 1536 rows, zeroed at creation) and runs with vis0 1500, dvis 0; the kernel masks keys
+  >= vis0 by substitution (-1e30 into the scores), so K there is harmless, but p = 0 times Inf/NaN is NaN: the V rows
+  1500..1503 are checked at compute time (F16 exponent all ones -> ggml-cpu, counted as "V tail not finite").
+- G 1 < RQ 4: a subgroup holds 4 tokens and the kernel takes the visible key count of the first one, so the library
+  accepts G % RQ != 0 only with dvis 0 (causal with this shape goes to ggml-cpu).
+- attn_gen's symbolic pass read only decimal immediates; with a V row of 2560 B IGC steps the V pointer by
+  `0x8200:uw` (33280 B, printed in hex because it does not fit :w), which counted as +0 and stopped the pass on its key
+  assert. Fixed (hex with the type's sign; an address step without a readable immediate now stops the generator); the
+  12 existing binaries are unchanged (attn_sha256.txt).
+Measured on HD 530 (1.0 GHz): bench/attn_kcl STEP 1 error 2.0-2.2e-6 vs FP64, 317 GFLOPS (311 with k_kt and
+submit/wait), poison 0.74-0.95; test_attn 64 20 20 1500 0 1536 whisper: NMSE 2.6e-13, 40.6 ms vs ggml-cpu 81.9 ms.
+Results: `results/attn-whisper-2026-11-13.txt`.
 
 **Perplexity** (-c 2048, 8 chunks, -fa on): Qwen 9.4610 (ATTN=0) vs 9.4603 (ATTN=1), -0.007 %; Llama 21.0995 vs
 21.0978, -0.008 %; within noise (statistical error +-0.28 / +-0.73). Every n_q 512 attention node ran on the GPU

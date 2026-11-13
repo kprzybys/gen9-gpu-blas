@@ -218,8 +218,19 @@ def params(opts):
 
 
 def imm(line):
-    m = re.search(r"\s(-?\d+):(?:w|uw|d|ud)\b", isa.code(line))
-    return int(m.group(1)) if m else None
+    """Integer immediate of the line (None if there is none). IGA prints a value that does not fit the signed type
+    in hex with the unsigned type: with HKV 20 (V row 2560 B) IGC advances the V pointer by 0x8200:uw = 33280 B,
+    which the old decimal-only pattern missed; the address add then counted as +0, the PV mad of key 13 read as
+    key 0 and igc_maps stopped on its key assert. Hex values of a signed type (:w, :d) are two's complement."""
+    m = re.search(r"\s(-?\d+|0x[0-9a-fA-F]+):(w|uw|d|ud)\b", isa.code(line))
+    if not m:
+        return None
+    v, t = m.group(1), m.group(2)
+    if not v.startswith("0x"):
+        return int(v)
+    v, bits = int(v, 16), 16 if t in ("w", "uw") else 32
+    assert v < 1 << bits, ("immediate wider than its type", line)
+    return v - (1 << bits) if t in ("w", "d") and v >> (bits - 1) else v
 
 
 def igc_maps(pro, loop, epi, P):
@@ -261,7 +272,10 @@ def igc_maps(pro, loop, epi, P):
             if sr not in addr:
                 assert ops[1][4] in ("q", "uq") or ops[1][2] == 0, ("address taken from a non-:q subregister", l)
             base, off = addr.get(sr, ((sr, ops[1][2]), 0))
-            off += (imm(l) or 0) if op == "add" else 0
+            if op == "add":     # an address step must be an immediate the pass can read (no silent +0)
+                step = imm(l)
+                assert step is not None, ("address add without an integer immediate", l)
+                off += step
             for r in isa.span(ops[0], n):
                 addr[r] = (base, off)
                 if n > 1:
