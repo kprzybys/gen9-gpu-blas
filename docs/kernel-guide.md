@@ -40,12 +40,14 @@ Also check the platform settings that act like a kernel change: EU thread arbitr
 ### Four checks before choosing or tuning a kernel
 
 1. **Profile the whole pass first, kernels second.** The share a kernel can win is bounded by its share of the pass.
-   In a pp512 pass (Qwen 1.5B Q4_K_M, ~220 t/s) the GEMM is 80 %, packing + epilogue 7 %, attention 3 %, and ~10 %
-   is GPU idle (waits / CPU ops, cause open) [MEAS, `results/ggml-backend-pass-profile-attn-gpu-2026-11-13.txt`].
+   In a pp512 pass (Qwen 1.5B Q4_K_M, ~220 t/s) the GEMM is 80 %, packing + epilogue 7 %, attention 3 %, and ~9 %
+   is GPU idle: ~2 % wake-up after each wait, ~7 % CPU ops (swiglu, rms_norm, rope, add) [MEAS, `results/ggml-backend-pass-profile-attn-gpu-2026-11-13.txt`].
    Use `KCL_PROFILE_KERNELS=1` (kernel sums), `KCL_PHASES=1` (submission and wait) and `GEN9_INFO=1` (backend
    decisions) together, and separate one-time from per-pass cost by varying the pass count (`-r 1` vs `-r 6`): a
    per-call average of execbuf (0.75 ms) first read as 7-8 % of the pass was in fact first-use page zeroing; per
-   pass it is ~0.035 ms per submission, 0.3 %.
+   pass it is ~0.035 ms per submission, 0.3 %. And before comparing a variant, check the counter that shows it ran
+   (`GEN9_INFO`): a morning "fused FFN costs +5.6 % energy on Q4_K_M" compared two identical configurations, because
+   the fusion was F16-only (c1b8586); once it ran it gave +3-8 % pp512.
 2. **Decide port-bound vs issue-bound by measurement, with a microbenchmark in the same bytes-per-instruction ratio.**
    The OWord block-read port gives 7.1-7.3 B/clock/EU on HD 530 and 7.6 on UHD 620 with >= 2 reads in flight; up to
    ~12 SIMD8 FP32 mads per 128 B block hide under the reads. At 16 mads per block (Qwen attention) the loop is
