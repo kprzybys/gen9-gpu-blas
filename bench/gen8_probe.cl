@@ -11,3 +11,31 @@ __kernel void probe_qword(__global const ulong *x, __global ulong *y) {
     const size_t i = get_global_id(0);
     y[i] = x[i] + 1;
 }
+// Ceilings for the Gen8 performance model (lib/bench_gen8.c): FMA peak and memory bandwidth.
+#define FMA8(T) x0 = fma(x0, a, b); x1 = fma(x1, a, b); x2 = fma(x2, a, b); x3 = fma(x3, a, b); \
+    x4 = fma(x4, a, b); x5 = fma(x5, a, b); x6 = fma(x6, a, b); x7 = fma(x7, a, b);
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void peak_f32(__global float *out, int iters, float a, float b) {
+    const float s = get_global_id(0) * 1e-7f;
+    float x0 = s, x1 = s + 1, x2 = s + 2, x3 = s + 3, x4 = s + 4, x5 = s + 5, x6 = s + 6, x7 = s + 7;
+    for (int i = 0; i < iters; i++) { FMA8(float) FMA8(float) }
+    out[get_global_id(0)] = x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7;
+}
+__attribute__((intel_reqd_sub_group_size(8)))
+__kernel void peak_f64(__global uint *out, int iters, double a, double b) {
+    const double s = get_global_id(0) * 1e-7;
+    double x0 = s, x1 = s + 1, x2 = s + 2, x3 = s + 3, x4 = s + 4, x5 = s + 5, x6 = s + 6, x7 = s + 7;
+    for (int i = 0; i < iters; i++) { FMA8(double) }
+    vstore2(as_uint2(x0 + x1 + x2 + x3 + x4 + x5 + x6 + x7), get_global_id(0), out);
+}
+__kernel void mem_read(__global const float4 *p, long n4, __global float *out) {
+    float4 s = 0.0f;
+    for (long i = get_global_id(0); i < n4; i += get_global_size(0)) s += p[i];
+    out[get_global_id(0)] = s.x + s.y + s.z + s.w;
+}
+__kernel void mem_write(__global float4 *p, long n4) {
+    for (long i = get_global_id(0); i < n4; i += get_global_size(0)) p[i] = (float4)(i);
+}
+__kernel void mem_copy(__global const float4 *p, __global float4 *q, long n4) {
+    for (long i = get_global_id(0); i < n4; i += get_global_size(0)) q[i] = p[i];
+}

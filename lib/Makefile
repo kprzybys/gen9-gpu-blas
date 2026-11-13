@@ -23,6 +23,8 @@ KCL_DEP = $(KCL_SRC) kcl.h kcl_desc.h kcl_gen8.h $(GEN)/gen9_pack.h $(GEN)/gen8_
 # Gen8 bring-up probe (bench/gen8_probe.cl through kcl, docs/gen8.md 6a): its own Gen8 table with the probe program
 kernels_gen8_probe.c: gen_kernels.py $(filter %.cl,$(CL_SOURCES)) ../bench/gen8_probe.cl
 	python3 gen_kernels.py ../bench .kernels_gen8_probe bdw-probe > $@
+bench_gen8: bench_gen8.c kcl.c kcl_gen8.c kernels.c kernels_gen8_probe.c kcl.h kcl_desc.h kcl_gen8.h $(GEN)/gen9_pack.h $(GEN)/gen8_pack.h
+	gcc -O2 -Wall -I$(GEN) -o $@ bench_gen8.c kcl.c kcl_gen8.c kernels.c kernels_gen8_probe.c -lm
 test_gen8_probe: test_gen8_probe.c kcl.c kcl_gen8.c kernels.c kernels_gen8_probe.c kcl.h kcl_desc.h kcl_gen8.h $(GEN)/gen9_pack.h $(GEN)/gen8_pack.h
 	gcc -O2 -Wall -I$(GEN) -o $@ test_gen8_probe.c kcl.c kcl_gen8.c kernels.c kernels_gen8_probe.c -lm
 
@@ -49,7 +51,7 @@ check: libgen9blas.so libgen9blas_blas.so
 	python3 test_long_launch.py
 
 clean:
-	rm -f libgen9blas.so libgen9blas_neo.so libgen9blas_blas.so libgen9blas_blas_neo.so kernels.c kernels_gen8.c kernels_gen8_probe.c test_gen8_probe
+	rm -f libgen9blas.so libgen9blas_neo.so libgen9blas_blas.so libgen9blas_blas_neo.so kernels.c kernels_gen8.c kernels_gen8_probe.c test_gen8_probe bench_gen8
 
 # Full BLAS/CBLAS: S/D functions on the GPU, the rest through jumps to OpenBLAS (gen9blas_blas_forward.c generated from the symbol list).
 libgen9blas_blas.so: gen9blas.c gen9blas.h $(KCL_DEP) gen9blas_blas.c gen9blas_blas_d.inc gen9blas_blas_forward.c

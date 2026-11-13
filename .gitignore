@@ -36,3 +36,4 @@ asm/*.d/
 lib/test_gen8_probe
 lib/kernels_gen8_probe.c
 lib/.kernels_gen8_probe/
+lib/bench_gen8
