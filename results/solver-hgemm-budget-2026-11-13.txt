@@ -1,0 +1,171 @@
+# Register budget of an accurate HGEMM loop (FP16 chunk sums carried into FP32) with an R x 32 tile, Gen9 128 GRF
+# 2026-11-13, for the accurate-HGEMM work (gemm_gen.py / hgemm_kc). Scripts: experiments/solver/gemm_*.py
+# (gemm_extract.py, gemm_epi.py on kp-laptop, read-only use of asm/gemm_gen.py and asm/attn_gen.live_in;
+# gemm_solve.py: CP-SAT on the 32-thread desktop, OR-Tools 9.15.6755, 144 configurations, 0.4 s). No GPU run; nothing measured.
+#
+# Overhead taken from the existing kernels (gemm_extract.py / gemm_epi.py):
+#   kind  acc GRF  ptr  cnt/lim  epilogue regs mentioned (free_regs blocks them)  live into the epilogue (of them headers)
+#   h     32       4    1        17                                               9 (2)
+#   hd    48       4    1        10                                               9 (1)
+#   s     32       4    1         9                                               8 (1)
+# -> E = 17 (today's free_regs), 9 (live-in), 7 (live-in minus send headers zeroed after the loop).
+#
+# Model: hf accumulators R x 2 GRF, FP32 accumulators R x 2 pairs of 2 GRF, per buffer A (R*kl*2 B) + B0 + B1 (kl GRF
+# each), all blocks at even registers (gemm_gen layout, zero bank conflicts), headers 3 per buffer or 3 shared;
+# fixed r0, r1, r127, 2 pointers x 2 GRF, counter/limit 1, E. Accumulators placed freely (best case).
+# CP-SAT status equals the count bound in every case (no fragmentation effect).
+#
+# Summary (need / 128)
+# 16x32: E=17: nothing fits (minimum 130).
+#        E=9:  kl4 x1 128 (no spare); kl2 x2 shared headers 128; kl2 x1 122.
+#        E=7:  kl4 x1 126; kl2 x2 shared 126.
+#        kl4 x2 (quarters double-buffered, as hd today) and every kl8: impossible (>= 138).
+#        kl2 means 2-GRF blocks = 64 B sends instead of 128 B.
+# 8x32:  fits everywhere (kl8 x2 at E=17: 119); but 6.4 FMA per loaded element vs 8 for 16x16 and 10.7 for 16x32.
+#
+# Full table
+R  kl buf hdr      E   f-pair | need/128 | CP-SAT
+16  2   1 perbuf   17 any  |  130/128 | INFEASIBLE
+16  2   1 perbuf   17 even |  130/128 | INFEASIBLE
+16  2   1 perbuf    9 any  |  122/128 | OPTIMAL
+16  2   1 perbuf    9 even |  122/128 | OPTIMAL
+16  2   1 perbuf    7 any  |  120/128 | OPTIMAL
+16  2   1 perbuf    7 even |  120/128 | OPTIMAL
+16  2   1 shared   17 any  |  130/128 | INFEASIBLE
+16  2   1 shared   17 even |  130/128 | INFEASIBLE
+16  2   1 shared    9 any  |  122/128 | OPTIMAL
+16  2   1 shared    9 even |  122/128 | OPTIMAL
+16  2   1 shared    7 any  |  120/128 | OPTIMAL
+16  2   1 shared    7 even |  120/128 | OPTIMAL
+16  2   2 perbuf   17 any  |  139/128 | INFEASIBLE
+16  2   2 perbuf   17 even |  139/128 | INFEASIBLE
+16  2   2 perbuf    9 any  |  131/128 | INFEASIBLE
+16  2   2 perbuf    9 even |  131/128 | INFEASIBLE
+16  2   2 perbuf    7 any  |  129/128 | INFEASIBLE
+16  2   2 perbuf    7 even |  129/128 | INFEASIBLE
+16  2   2 shared   17 any  |  136/128 | INFEASIBLE
+16  2   2 shared   17 even |  136/128 | INFEASIBLE
+16  2   2 shared    9 any  |  128/128 | OPTIMAL
+16  2   2 shared    9 even |  128/128 | OPTIMAL
+16  2   2 shared    7 any  |  126/128 | OPTIMAL
+16  2   2 shared    7 even |  126/128 | OPTIMAL
+16  4   1 perbuf   17 any  |  136/128 | INFEASIBLE
+16  4   1 perbuf   17 even |  136/128 | INFEASIBLE
+16  4   1 perbuf    9 any  |  128/128 | OPTIMAL
+16  4   1 perbuf    9 even |  128/128 | OPTIMAL
+16  4   1 perbuf    7 any  |  126/128 | OPTIMAL
+16  4   1 perbuf    7 even |  126/128 | OPTIMAL
+16  4   1 shared   17 any  |  136/128 | INFEASIBLE
+16  4   1 shared   17 even |  136/128 | INFEASIBLE
+16  4   1 shared    9 any  |  128/128 | OPTIMAL
+16  4   1 shared    9 even |  128/128 | OPTIMAL
+16  4   1 shared    7 any  |  126/128 | OPTIMAL
+16  4   1 shared    7 even |  126/128 | OPTIMAL
+16  4   2 perbuf   17 any  |  151/128 | INFEASIBLE
+16  4   2 perbuf   17 even |  151/128 | INFEASIBLE
+16  4   2 perbuf    9 any  |  143/128 | INFEASIBLE
+16  4   2 perbuf    9 even |  143/128 | INFEASIBLE
+16  4   2 perbuf    7 any  |  141/128 | INFEASIBLE
+16  4   2 perbuf    7 even |  141/128 | INFEASIBLE
+16  4   2 shared   17 any  |  148/128 | INFEASIBLE
+16  4   2 shared   17 even |  148/128 | INFEASIBLE
+16  4   2 shared    9 any  |  140/128 | INFEASIBLE
+16  4   2 shared    9 even |  140/128 | INFEASIBLE
+16  4   2 shared    7 any  |  138/128 | INFEASIBLE
+16  4   2 shared    7 even |  138/128 | INFEASIBLE
+16  8   1 perbuf   17 any  |  148/128 | INFEASIBLE
+16  8   1 perbuf   17 even |  148/128 | INFEASIBLE
+16  8   1 perbuf    9 any  |  140/128 | INFEASIBLE
+16  8   1 perbuf    9 even |  140/128 | INFEASIBLE
+16  8   1 perbuf    7 any  |  138/128 | INFEASIBLE
+16  8   1 perbuf    7 even |  138/128 | INFEASIBLE
+16  8   1 shared   17 any  |  148/128 | INFEASIBLE
+16  8   1 shared   17 even |  148/128 | INFEASIBLE
+16  8   1 shared    9 any  |  140/128 | INFEASIBLE
+16  8   1 shared    9 even |  140/128 | INFEASIBLE
+16  8   1 shared    7 any  |  138/128 | INFEASIBLE
+16  8   1 shared    7 even |  138/128 | INFEASIBLE
+16  8   2 perbuf   17 any  |  175/128 | INFEASIBLE
+16  8   2 perbuf   17 even |  175/128 | INFEASIBLE
+16  8   2 perbuf    9 any  |  167/128 | INFEASIBLE
+16  8   2 perbuf    9 even |  167/128 | INFEASIBLE
+16  8   2 perbuf    7 any  |  165/128 | INFEASIBLE
+16  8   2 perbuf    7 even |  165/128 | INFEASIBLE
+16  8   2 shared   17 any  |  172/128 | INFEASIBLE
+16  8   2 shared   17 even |  172/128 | INFEASIBLE
+16  8   2 shared    9 any  |  164/128 | INFEASIBLE
+16  8   2 shared    9 even |  164/128 | INFEASIBLE
+16  8   2 shared    7 any  |  162/128 | INFEASIBLE
+16  8   2 shared    7 even |  162/128 | INFEASIBLE
+ 8  2   1 perbuf   17 any  |   81/128 | OPTIMAL
+ 8  2   1 perbuf   17 even |   81/128 | OPTIMAL
+ 8  2   1 perbuf    9 any  |   73/128 | OPTIMAL
+ 8  2   1 perbuf    9 even |   73/128 | OPTIMAL
+ 8  2   1 perbuf    7 any  |   71/128 | OPTIMAL
+ 8  2   1 perbuf    7 even |   71/128 | OPTIMAL
+ 8  2   1 shared   17 any  |   81/128 | OPTIMAL
+ 8  2   1 shared   17 even |   81/128 | OPTIMAL
+ 8  2   1 shared    9 any  |   73/128 | OPTIMAL
+ 8  2   1 shared    9 even |   73/128 | OPTIMAL
+ 8  2   1 shared    7 any  |   71/128 | OPTIMAL
+ 8  2   1 shared    7 even |   71/128 | OPTIMAL
+ 8  2   2 perbuf   17 any  |   89/128 | OPTIMAL
+ 8  2   2 perbuf   17 even |   89/128 | OPTIMAL
+ 8  2   2 perbuf    9 any  |   81/128 | OPTIMAL
+ 8  2   2 perbuf    9 even |   81/128 | OPTIMAL
+ 8  2   2 perbuf    7 any  |   79/128 | OPTIMAL
+ 8  2   2 perbuf    7 even |   79/128 | OPTIMAL
+ 8  2   2 shared   17 any  |   86/128 | OPTIMAL
+ 8  2   2 shared   17 even |   86/128 | OPTIMAL
+ 8  2   2 shared    9 any  |   78/128 | OPTIMAL
+ 8  2   2 shared    9 even |   78/128 | OPTIMAL
+ 8  2   2 shared    7 any  |   76/128 | OPTIMAL
+ 8  2   2 shared    7 even |   76/128 | OPTIMAL
+ 8  4   1 perbuf   17 any  |   86/128 | OPTIMAL
+ 8  4   1 perbuf   17 even |   86/128 | OPTIMAL
+ 8  4   1 perbuf    9 any  |   78/128 | OPTIMAL
+ 8  4   1 perbuf    9 even |   78/128 | OPTIMAL
+ 8  4   1 perbuf    7 any  |   76/128 | OPTIMAL
+ 8  4   1 perbuf    7 even |   76/128 | OPTIMAL
+ 8  4   1 shared   17 any  |   86/128 | OPTIMAL
+ 8  4   1 shared   17 even |   86/128 | OPTIMAL
+ 8  4   1 shared    9 any  |   78/128 | OPTIMAL
+ 8  4   1 shared    9 even |   78/128 | OPTIMAL
+ 8  4   1 shared    7 any  |   76/128 | OPTIMAL
+ 8  4   1 shared    7 even |   76/128 | OPTIMAL
+ 8  4   2 perbuf   17 any  |   99/128 | OPTIMAL
+ 8  4   2 perbuf   17 even |   99/128 | OPTIMAL
+ 8  4   2 perbuf    9 any  |   91/128 | OPTIMAL
+ 8  4   2 perbuf    9 even |   91/128 | OPTIMAL
+ 8  4   2 perbuf    7 any  |   89/128 | OPTIMAL
+ 8  4   2 perbuf    7 even |   89/128 | OPTIMAL
+ 8  4   2 shared   17 any  |   96/128 | OPTIMAL
+ 8  4   2 shared   17 even |   96/128 | OPTIMAL
+ 8  4   2 shared    9 any  |   88/128 | OPTIMAL
+ 8  4   2 shared    9 even |   88/128 | OPTIMAL
+ 8  4   2 shared    7 any  |   86/128 | OPTIMAL
+ 8  4   2 shared    7 even |   86/128 | OPTIMAL
+ 8  8   1 perbuf   17 any  |   96/128 | OPTIMAL
+ 8  8   1 perbuf   17 even |   96/128 | OPTIMAL
+ 8  8   1 perbuf    9 any  |   88/128 | OPTIMAL
+ 8  8   1 perbuf    9 even |   88/128 | OPTIMAL
+ 8  8   1 perbuf    7 any  |   86/128 | OPTIMAL
+ 8  8   1 perbuf    7 even |   86/128 | OPTIMAL
+ 8  8   1 shared   17 any  |   96/128 | OPTIMAL
+ 8  8   1 shared   17 even |   96/128 | OPTIMAL
+ 8  8   1 shared    9 any  |   88/128 | OPTIMAL
+ 8  8   1 shared    9 even |   88/128 | OPTIMAL
+ 8  8   1 shared    7 any  |   86/128 | OPTIMAL
+ 8  8   1 shared    7 even |   86/128 | OPTIMAL
+ 8  8   2 perbuf   17 any  |  119/128 | OPTIMAL
+ 8  8   2 perbuf   17 even |  119/128 | OPTIMAL
+ 8  8   2 perbuf    9 any  |  111/128 | OPTIMAL
+ 8  8   2 perbuf    9 even |  111/128 | OPTIMAL
+ 8  8   2 perbuf    7 any  |  109/128 | OPTIMAL
+ 8  8   2 perbuf    7 even |  109/128 | OPTIMAL
+ 8  8   2 shared   17 any  |  116/128 | OPTIMAL
+ 8  8   2 shared   17 even |  116/128 | OPTIMAL
+ 8  8   2 shared    9 any  |  108/128 | OPTIMAL
+ 8  8   2 shared    9 even |  108/128 | OPTIMAL
+ 8  8   2 shared    7 any  |  106/128 | OPTIMAL
+ 8  8   2 shared    7 even |  106/128 | OPTIMAL

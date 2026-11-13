@@ -13,6 +13,7 @@ rules a model must encode are in [isa-notes.md](isa-notes.md) §4.
 | Does a placement satisfying hard rules exist; if not, prove it | CP-SAT feasibility | Llama attention NS 4: impossible, needs 8*NS + 21 registers, 45 free |
 | Cheapest change that makes it legal | CP-SAT with a cost objective | Llama NK=1: one `mov (8)` of a Q register removes 8 bank conflicts |
 | Is our heuristic optimal | solver vs the heuristic on all instances | attn_gen `Alloc` first-fit: 0 disagreements over 320 cases |
+| Which tile / buffering fits before writing a kernel | budget model over a sweep of designs | accurate HGEMM 16x32: fits only with live-in epilogue registers and no spare GRF; 8x32 fits but reuses less |
 | Placement in time (prefetch distance, send order) | scheduling model, **only after calibration** | single-thread model rejected: does not reproduce NS2 vs NS4 |
 | Algorithm, data layout, packing, tiling | none: design work, then measurement | packing gave 20x (TLB); no solver would propose it |
 | Choice among about 10 variants | enumeration and measurement ([kernel-guide.md](kernel-guide.md) §4) | NS / NK / RQ of attention |
@@ -98,6 +99,11 @@ EU count) and lets a corrected GPU fact (e.g. the bank model) re-run every model
   0.9 of the issue bound). Latency on Gen9 is hidden mostly by the other threads of the EU [HYP]. A scheduling model
   needs several threads and the shared send port / L3 (a discrete-event simulation, calibrated with OA counters,
   [isa-notes.md](isa-notes.md) §6) before a solver can optimise anything.
+- The second use (accurate HGEMM 16x32 vs 8x32, `results/solver-hgemm-budget-2026-11-13.txt`) was answered before
+  any kernel existed, from overhead measured on the existing kernels. It also exposed a conservative rule in a
+  generator: `gemm_gen.free_regs` blocks every register the epilogue mentions (9-17), while only 8-9 are live into
+  it (1-2 of them send headers that can be zeroed after the loop). Check such rules before concluding "does not fit":
+  the overhead model is part of the instance.
 - Compute was not the limit: 320 allocation solves took 1.7 s. A many-core machine (the 32-thread desktop, 32 threads) matters only
   for large scheduling models or wide sweeps; run there with `nice` and a fixed `num_workers`.
 
