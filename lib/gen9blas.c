@@ -25,6 +25,7 @@ typedef struct {
     cl_kernel main, pa, pb, pa_t, pb_t, pa_q, pb_w2,   // pa_q, pb_w2: faster packing without transpose (NULL: absent)
               epi, epi_tri, tL, tY, tZ, tI[4], expand, syr2k_merge;   // t*: TRSM; expand: full matrix; syr2k_merge: SYR2K join
     int es, tn, km, ready;
+    int sg;   // work-items per C tile in the main kernel: its subgroup size (16; Gen8 sgemm8_v32: 8)
 } type_t;
 
 static cl_context ctx;
@@ -185,6 +186,7 @@ int gen9blas_init(const char *dir) {
         snprintf(n, sizeof n, "%s_q", t[i].pa); r->pa_q = old_pack ? NULL : clCreateKernel(t[i].pr, n, &e3); if (e3) r->pa_q = NULL;
         snprintf(n, sizeof n, "%s_w2", t[i].pb); r->pb_w2 = old_pack ? NULL : clCreateKernel(t[i].pr, n, &e3); if (e3) r->pb_w2 = NULL;
         r->es = t[i].es; r->tn = t[i].tn; r->km = t[i].km; r->ready = 1;
+        r->sg = (gen8 && t[i].r == GEN9BLAS_S && t[i].tn == 32) ? 8 : 16;
     }
     errbuf[0] = 0;
     inited = 1;
@@ -379,7 +381,7 @@ int gen9blas_gemm_batched(int type, int tA, int tB, int M, int N, int K, double 
     bf_t target = direct ? xC : BM(dCp); int ldtarget = direct ? ldc : Np;
     ARG(r->main, 0, dAp); ARG(r->main, 1, dBp); ARGB(r->main, 2, target); ARG(r->main, 3, Mp); ARG(r->main, 4, Np);
     ARG(r->main, 5, ldtarget); ARG(r->main, 6, Kp); ARG(r->main, 7, Kp);
-    size_t gm = (size_t)count * (Np / r->tn) * (Mp / 16) * 16, lm = 16;
+    size_t gm = (size_t)count * (Np / r->tn) * (Mp / 16) * r->sg, lm = r->sg;
     cl_event ev = NULL;
     if (!split) CHECK(clEnqueueNDRangeKernel(q, r->main, 1, NULL, &gm, &lm, 0, NULL, &ev));
     else {
@@ -482,7 +484,7 @@ static int launch1(type_t *r, cl_mem Ap, size_t oA, cl_mem Bp, size_t oB, cl_mem
     }
     ARG(r->main, 0, sub[0]); ARG(r->main, 1, sub[1]); ARG(r->main, 2, sub[2]); ARG(r->main, 3, M); ARG(r->main, 4, N);
     ARG(r->main, 5, ldc); ARG(r->main, 6, K); ARG(r->main, 7, Kfull);
-    size_t gm = (size_t)(N / r->tn) * (M / 16) * 16, lm = 16; cl_event ev;
+    size_t gm = (size_t)(N / r->tn) * (M / 16) * r->sg, lm = r->sg; cl_event ev;
     CHECK(clEnqueueNDRangeKernel(q, r->main, 1, NULL, &gm, &lm, 0, NULL, &ev));
     if (measure && nev < (int)(sizeof evs / sizeof evs[0])) evs[nev++] = ev; else clReleaseEvent(ev);
     for (int i = 0; i < 3; i++) if (sub_made[i]) clReleaseMemObject(sub[i]);
