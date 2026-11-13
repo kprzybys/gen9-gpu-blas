@@ -221,16 +221,9 @@ def imm(line):
     """Integer immediate of the line (None if there is none). IGA prints a value that does not fit the signed type
     in hex with the unsigned type: with HKV 20 (V row 2560 B) IGC advances the V pointer by 0x8200:uw = 33280 B,
     which the old decimal-only pattern missed; the address add then counted as +0, the PV mad of key 13 read as
-    key 0 and igc_maps stopped on its key assert. Hex values of a signed type (:w, :d) are two's complement."""
-    m = re.search(r"\s(-?\d+|0x[0-9a-fA-F]+):(w|uw|d|ud)\b", isa.code(line))
-    if not m:
-        return None
-    v, t = m.group(1), m.group(2)
-    if not v.startswith("0x"):
-        return int(v)
-    v, bits = int(v, 16), 16 if t in ("w", "uw") else 32
-    assert v < 1 << bits, ("immediate wider than its type", line)
-    return v - (1 << bits) if t in ("w", "d") and v >> (bits - 1) else v
+    key 0 and igc_maps stopped on its key assert. Parsing is isa.imm's (hex of a signed type is two's complement)."""
+    r = isa.imm(line, ("w", "uw", "d", "ud"))     # asserts on a value wider than its type
+    return r[0] if r else None
 
 
 def igc_maps(pro, loop, epi, P):
