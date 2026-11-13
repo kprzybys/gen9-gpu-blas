@@ -1,6 +1,6 @@
 # Attention on the Gen9 GPU: performance model (stage 1)
 
-Status: model only, no kernel yet. Evidence tags as in [performance-model.md](performance-model.md)
+Status: model (sections 1-7) and stage 2 result (section 8: criterion not met, direction closed). Evidence tags as in [performance-model.md](performance-model.md)
 ([SPEC], [MEAS], [SW], [EST], [HYP]). Stage 2 (a standalone kernel in `bench/`) starts only from this prediction,
 and its result is judged against the stop criterion in section 6.
 
@@ -115,5 +115,39 @@ tries the FP16-partial-sum variant before deciding.
 |---|---|---|
 | ~~`exp` throughput~~ | measured: softmax costs 1 % with `native_exp` (3-5 % with precise `exp`) | done, `bench/attn_micro.sh` |
 | ~~SLM read bandwidth~~ | measured: 177 GB/s, broadcast as fast as consecutive, stride 2 halves it | done, `bench/attn_micro.sh` |
-| ~~Mixed-mode `mad` rate~~ | not needed: each K/V element is reused by B_q x g queries (Qwen 4 x 6), so it is converted to FP32 once and the products run as plain FP32 `mad` (410 GFLOPS, measured) | dropped |
+| ~~Mixed-mode `mad` rate~~ | measured in stage 2: a packed FP16 source folds into an FP32 `mad` at the full FP32 rate (323 GFLOPS in the same loop either way) | done, `k_mix` in `bench/attn_micro.cl` |
 | CPU attention rate on the laptop (UHD 620, PL1) | the baseline there; expected below the desktop's 106 GFLOPS | the depth sweep of `results/attention-depth-hd530-2026-11-13.txt` on the laptop |
+
+## 8. Stage 2 result
+
+Measured on HD 530 (desktop, 1.0 GHz) with a standalone fused kernel (`bench/attn.cl`, host `bench/attn.c`,
+runner `bench/attn.sh`); full table in `results/attn-kernel-hd530-2026-11-13.txt` [MEAS].
+
+| Variant | Qwen shape (n_k 4096) | Llama shape | Error vs FP64 | Note |
+|---|---|---|---|---|
+| A: FP32 accumulation, SIMD8, lane = key for Q K^T (K pre-transposed, packed FP16 folded into `mad`), lane = dim for P V, 2 rows (Qwen) / 4 rows (Llama) per subgroup, no SLM, work-group 128 | **215 GFLOPS** (2.0x CPU) | **234 GFLOPS** (2.2x) | 2e-6 | no spill; prediction 200-300 met at its lower end |
+| A2: A + register prefetch of K/V | 224 (spills 128 B) | 237 | 2e-6 | no real gain: load latency is not the limit |
+| B: FP16 Q and FP16 partial sums of Q K^T over 8 dims | 192 | 183-211 | 2.4-2.6e-3 | slower and above the 2e-3 bound |
+| C: non-fused | skipped | | | see the results file |
+
+**Verdict: the stop criterion (>= 265 GFLOPS, 2.5x the CPU, on the Qwen shape) is not met; the direction is
+closed at this level (OpenCL C through IGC 24.35).** What limits it:
+
+- The compiled instruction stream itself: with K/V pointers frozen so that every read hits (diagnostic `ADV=0`)
+  the same kernel runs at 261-269 GFLOPS, about 68 % of the 384 GFLOPS FP32 peak at 1.0 GHz. About half of the
+  `mad`s have a src1/src2 GRF bank conflict, which IGC does not let us control (the project's GEMMs avoid it only in
+  hand-written assembly). So even perfect memory behaviour would only touch the threshold.
+- Registers: FP32 Q and O take 32 GRF per row at d_head 128, so a subgroup holds 2 rows (3 or more spill), and each
+  K/V element read serves only 2 rows. Halving the bytes per `mad` (Llama, 4 rows) did not help, nor did
+  register prefetch, and n_k 512 (all in L3) gives the same rate: the remaining 13-28 % loss on real K/V streams is
+  neither bandwidth nor load latency; it is not explained yet.
+- Mixed-mode `mad` (FP16 operand, FP32 accumulator) is not the problem: it runs at the full FP32 rate
+  (`k_mix` in `bench/attn_micro.cl`: 323 GFLOPS for both).
+- FP16 arithmetic, the only way past the FP32 ceiling, costs accuracy: 8-dim FP16 partial sums already give
+  2.4-2.6e-3 (> 2e-3), and broadcast-scalar FP16 `mad`s lose the double rate.
+
+Implications for stage 3: integration is not started. A 2.0x gain on attention would cut a Qwen 512-token ubatch at
+d = 3584 by about 25 % (6.09 -> ~4.6 s) at the cost of a new ggml op with masks for three model families; by the
+rule of section 6 that is below the threshold. The direction could be reopened only by a hand-scheduled assembly
+kernel (bank-conflict-free register allocation, as `asm/` does for GEMM, with 4 rows per thread via Q in SLM), whose
+ceiling from the `ADV=0` diagnostic plus the conflict share is about 300-330 GFLOPS — or on a GPU with more registers.

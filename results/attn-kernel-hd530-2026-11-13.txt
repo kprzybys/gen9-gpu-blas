@@ -1,0 +1,88 @@
+# Fused attention kernel, stage 2 of docs/attention-gpu.md: bench/attn.cl + bench/attn.c (bench/attn.sh)
+# Desktop HD 530 (i5-6500; Gen9 GT2, 24 EU, max 1050 MHz), NEO 24.35.30872.36, nice 19, 2026-11-13; background
+# service ~30 % of one CPU core. GPU clock 1000 MHz in every sampled run (the first runs of variant A printed -1:
+# a bug in the clock sampling, fixed afterwards; same kernels re-measured at 1000 MHz give the same times).
+# One layer, non-causal, n_q 512, n_k 4096. Rate = 4 * n_q * n_k * H * d_head / time of the attention kernel
+# (the K-transpose pre-pass k_kt, 0.28 ms Qwen / 0.58 ms Llama, is also given "incl. kt").
+# Error = max |O - O_ref| / max |O_ref| against FP64 on the CPU for 33 query tokens (every 16th + last), all heads.
+# Q float [H][n_q][D], K/V half [n_k][H_kv][D], O float [n_q][H][D] (llama.cpp layouts); random Q ~ N(0, 5^2),
+# K, V ~ N(0, 1) (scores std 5, range about -20..20). All kernels SIMD8 (intel_reqd_sub_group_size(8)).
+# Spill = CL_KERNEL_SPILL_MEM_SIZE_INTEL, private = CL_KERNEL_PRIVATE_MEM_SIZE (bytes per thread / per lane).
+# Ceilings at 1.0 GHz: FP32 mad 384 GFLOPS (410 measured at ~1.07 GHz), FP16 ~770, SLM 177 GB/s.
+# Stop criterion: >= 265 GFLOPS on the Qwen shape (2.5 x CPU 106) with error <= 2e-3.
+
+## Design common to all variants
+One SIMD8 subgroup = RQ query rows of one KV head (query heads of the same KV head, token-major). No SLM.
+S = Q K^T with lane = key: K pre-transposed to [H_kv][n_k/8][D][8] half so a 128 B block read gives packed halfs
+that fold into a mixed-mode mad (no conversion instruction); q[r][d] FP32 broadcast from lane-split registers
+(scalar register region, no instruction). P V with lane = 8 dims of O; V row read as 64-half blocks; p broadcast.
+Online softmax in FP32, native_exp2 with scale*log2(e) folded into Q, O rescaled only when the row max grows.
+Q and O FP32 in registers: 16 GRF per row each at d_head 128 -> RQ <= 2 (Qwen), RQ <= 4 (Llama) without spill.
+
+## Variant A: FP32 accumulation (prediction for Qwen RQ 2: 180-240 GFLOPS; ALU ~80 % mad, 1 B per mad from L3)
+shape  RQ NK local  spill priv  attn ms   GFLOPS  incl.kt  error     notes
+Qwen   2  1  64     0     0     80.9      159.3   158.7    2.1e-06
+Qwen   2  2  64     0     0     65.9      195.5   194.7    2.1e-06   (repeat 193.8, 192.9)
+Qwen   1  4  64     0     0     -         171.2   170.5    2.1e-06
+Qwen   2  1  128    0     0     -         160.1   159.5    2.1e-06
+Qwen   2  2  128    0     0     59.0-60.1 214-218  213-217  2.1e-06  BEST QWEN (final run: 215.2)
+Qwen   2  2  256    0     0     -         215.7   214.6    2.1e-06
+Qwen   3/4 any      224-10976 B  -        -       -        -         spills (IGC 24.35): not run
+Llama  2  1  64     0     0     76.5      224.5   222.8    2.0e-06
+Llama  2  2  64     0     0     73.7      233.0   231.2    1.6e-06
+Llama  4  1  64     0     0     83.3      206.2   204.8    2.0e-06
+Llama  4  2  64     0     0     75.4      227.8   226.0    1.6e-06
+Llama  4  2  128    0     0     73.3      233.9-234.3  232.5  1.6e-06  BEST LLAMA (non-spilling, local 128)
+Llama  2  2  128/256 0    0     -         222-225  220-223 1.6e-06
+Llama  6/8 any      640-14784 B  -        -       -        -         spills: not run
+Reading: 51-57 % of the 384 GFLOPS ceiling for Qwen, 61 % for Llama; 2.0x / 2.2x the CPU (106 / 107 GFLOPS).
+Larger work-groups (128) put consecutive subgroups (same KV head, neighbouring tokens) together: +10 % for Qwen.
+
+## Diagnostics (variant A code, ISA from ocloc -device whl and timing)
+- Loop instruction mix, Qwen RQ 2 NK 2, per 16 keys: 1024 mad (all FP32 with folded hf sources), 64 SIMD8 64-bit
+  address adds, 64 block reads, ~20 softmax ops; no conversions. Llama RQ 4 NK 2: 1024 mad, 32 address adds.
+- n_k 512 (K/V of a layer fit L3) instead of 4096: same rate (Qwen 194.7, Llama 224.0) -> not LLC/RAM bound.
+- ADV=0 (K/V pointers do not advance: same instruction stream, every read hits the same lines; wrong results):
+  Qwen 268.6 GFLOPS (n_k 512: 248.2), Llama 260.8 (246.3). This is the ceiling of the compiled instruction stream:
+  68-70 % of 384, i.e. about 265 even with perfect memory. The rest of the loss on real data is memory-side
+  (Qwen -28 %, Llama -13 %) but not bandwidth: Llama RQ 4 (0.5 B/mad) is no faster than RQ 2 (1 B/mad).
+- The mad stream has GRF bank conflicts (src1/src2 same parity, e.g. "mad r118 r118 r7.8:hf r95.0": 272 vs 410
+  Gop/s measured for conflicting mads, performance-model.md) on about half the mads; IGC gives no control over it.
+- Mixed-mode mad rate (new microbenchmark k_mix in bench/attn_micro.cl, clbench, global 131072, local 64, n 400):
+    MIX=0 (float operand)            323.1 / 324.5 GFLOPS  GPU ~1000 MHz
+    MIX=1 (packed half operand)      323.0 / 323.6 GFLOPS  GPU ~990-1000 MHz
+  -> FP32 mad with a packed FP16 source runs at the full FP32 rate (fills the gap in attention-gpu.md section 7).
+
+## Variant A2: register prefetch of K/V, PF=1 (prediction: if load latency limits, +15-25 %)
+shape  RQ NK PD local  spill  GFLOPS  error
+Llama  2  2  0  64     0      232.7   1.6e-06  (reference, PF=0)
+Llama  2  2  1  64     0      236.8   1.6e-06
+Llama  2  2  2  64     0      235.0   1.6e-06
+Llama  2  2  3  64     0      234.2   1.6e-06
+Qwen   2  2  1  128    128    224.1 / 224.5  2.1e-06  spills 128 B (correct through NEO): does not count
+Qwen   2  2  2  -      1920   -       -        not run
+Reading: no gain beyond noise (Llama +1-2 %); load latency is not the limit. Qwen +4 % but only with a spill.
+
+## Variant B: FP16 Q and FP16 partial sums of Q K^T over 8 dims, SH=1 (prediction: S phase at half cost,
+## Qwen 220-240, Llama 260-280; error close to the bound)
+shape  RQ NK local  spill  GFLOPS        error
+Qwen   2  2  64     0      168.1         2.61e-03   (ADV=0: 234.8)
+Qwen   2  2  128    0      192.2         2.61e-03
+Llama  2  2  64     0      211.2         2.39e-03
+Llama  4  2  64/128 0      182.0/183.3   2.39e-03
+Reading: slower than A and above the 2e-3 error bound -> rejected. The FP16 mads take a broadcast scalar operand
+(loses the double rate, performance-model.md section 2) and each partial sum is a chain of 8 dependent mads.
+Q in half does not save registers either (IGC keeps one GRF per SIMD8 half component), so RQ cannot grow.
+
+## Variant C (non-fused S, softmax, P V): skipped. The fused FP32 kernel is accurate to 2e-6 and its compiled
+## instruction stream alone tops out at ~265 GFLOPS; a non-fused version adds 100 MB of S/P traffic per layer
+## (Qwen, n_k 4096) and short-K (128) GEMMs, so it would not reach 265 either without hand-written assembly.
+
+## Verdict
+Best (non-spilling): Qwen 215 GFLOPS (2.0x CPU 106), error 2.1e-6; Llama 234 GFLOPS (2.2x CPU 107), error 1.6e-6.
+Stop criterion (265 GFLOPS, 2.5x) NOT met; prediction for variant A (200-300) met at its lower end.
+Limits: (1) the IGC-compiled mad stream reaches only ~68 % of the FP32 peak even with every read hitting
+(bank conflicts on ~half the mads + address/softmax overhead) = ~265 GFLOPS at 1.0 GHz, no margin;
+(2) registers: FP32 Q + O take 32 GRF per row at d_head 128, so a subgroup holds only 2 rows and every K/V element
+serves 2 rows; (3) a further 13-28 % is lost on real K/V streams (not bandwidth, not latency of loads).
+FP16 arithmetic (variant B) fails the accuracy bound.
