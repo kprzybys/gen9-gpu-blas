@@ -9,6 +9,10 @@ submits them straight to the Linux `i915` kernel driver. No OpenCL runtime (NEO)
 The library is called `gen9blas`: `libgen9blas.so` + `gen9blas.h` for C, the `gen9blas` module for Python/NumPy, and
 `libgen9blas_blas.so`, a drop-in BLAS/CBLAS that can be injected into existing programs with `LD_PRELOAD`.
 
+The name stays "gen9" although the library also runs, experimentally, on a Gen8 GPU (Braswell/Cherryview, FP32 and FP64,
+see "Tested configuration"): Gen9 is what it is built and measured for, and the published names (`libgen9blas`,
+`gen9blas_*`, the Python module) are kept for compatibility.
+
 The repository is also a worked example of programming a GPU from public documentation: a performance model with
 evidence-tagged constants, a reproducible assembly build, and every measurement kept as a text file in `results/`.
 
@@ -23,6 +27,15 @@ All results in this repository come from one machine, below, unless a result fil
 Intel HD Graphics 530 (Skylake-S GT2, Core i5-6500, Linux 7.0.0-34, Ubuntu 26.04), runs the same `-device whl` kernels
 unchanged: all 10 test suites pass and GEMM speed is 0.89-0.94 of the UHD 620, about the GPU clock ratio
 (1000 vs 1100 MHz under load); see `results/skylake-hd530-2026-11-12.txt`.
+
+**Gen8 (experimental):** Intel HD Graphics 400 (Braswell/Cherryview, Celeron N3010, 12 EU, Linux 7.0.0-43). One library
+binary selects the generation at start-up; the Gen8 kernels are compiled for Broadwell (`ocloc -device bdw`, the only
+Gen8 target of `ocloc`) with source changes for Cherryview's restrictions. FP32 and FP64 pass the GPU test suites
+(`test_basic`, `test_level3`, `test_level12` without the SciPy-referenced ROTG/ROTMG/ROTM cases, `test_userptr`,
+`test_skinny`, `test_long_launch`); the drop-in BLAS layer suites (`test_blas*`, which need OpenBLAS) were not run. No
+FP16, no assembly kernels, the faster skinny-GEMM variant is off, FP64 division is emulated (IEEE results except
+subnormal quotients, which may be off by 1 ulp), and no performance has been measured yet. Details, sources and the
+hardware findings (e.g. the A64 QWord scattered read hangs this GPU): [docs/gen8.md](docs/gen8.md).
 
 | Item | Value |
 |---|---|
@@ -145,8 +158,11 @@ Reproducing the measurements: [docs/benchmarks.md](docs/benchmarks.md).
 
 ## Limitations
 
-- Tested on two GPUs: the UHD 620 (all measurements) and an HD 530 (Skylake, tests and level-3 speed; see "Tested
+- Tested on two Gen9 GPUs: the UHD 620 (all measurements) and an HD 530 (Skylake, tests and level-3 speed; see "Tested
   configuration"). Other Gen9/Gen9.5 parts may work but are untested; newer generations and the `xe` driver are not supported.
+- Gen8: only Braswell/Cherryview (PCI 0x22b0-0x22b3), experimental: FP32 and FP64 only, not tuned, not measured
+  ([docs/gen8.md](docs/gen8.md)). `kcl` treats every other GPU as Gen9: on Broadwell or on a newer generation it
+  would send Gen9 commands, so do not run it there.
 - `kcl` is a subset of OpenCL, just enough for the kernels of this library. It does not configure scratch space: a
   kernel that spills registers would compute wrong results (the kernel generator rejects the cases found so far). It
   does not export `cl*` symbols, and it uses a single device (the first render node).
@@ -188,6 +204,7 @@ Reproducing the measurements: [docs/benchmarks.md](docs/benchmarks.md).
 | [docs/references.md](docs/references.md) | External documents and source code used, versions, checksums |
 | [docs/roadmap.md](docs/roadmap.md) | Open problems and possible next steps |
 | [docs/related-work.md](docs/related-work.md) | Similar projects and papers (web survey, 2026-11-12) |
+| [docs/gen8.md](docs/gen8.md) | Gen8 (Braswell/Cherryview) port: hardware and driver facts, Cherryview restrictions, test results |
 
 Evidence tags used in the documents and in `results/`: [SPEC] Intel documentation; [MEAS] our measurement of a hardware
 constant; [SW] software behaviour, fixed for a given driver/compiler version; [EST] estimate from third-party code

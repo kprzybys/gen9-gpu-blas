@@ -18,6 +18,9 @@ import gen9blas  # noqa: E402
 rng = np.random.default_rng(11)
 errors = 0
 TOL = {np.float32: 1e-6, np.float16: 2e-3, np.float64: 1e-13}
+DTYPES = tuple(dt for dt in (np.float32, np.float16, np.float64) if gen9blas.available(dt))   # Gen8: no FP16
+if np.float16 not in DTYPES:
+    print("NOTE: FP16 unavailable on this GPU (Gen8), skipping the FP16 cases")
 SOLVE_TOL = {np.float32: 1e-5, np.float16: 3e-3, np.float64: 1e-12}   # relative error of solutions (TRSV, TBSV, TPSV)
 
 
@@ -40,7 +43,7 @@ def vector(n, dt, step=1, shift=0):
     return v[::-1] if step < 0 else v
 
 
-for dt in (np.float32, np.float16, np.float64):
+for dt in DTYPES:
     tol = TOL[dt]
     print(f"== {np.dtype(dt).name}")
     for n in (1, 5, 255, 256, 1000, 100003):
@@ -94,7 +97,7 @@ for dt in (np.float32, np.float16, np.float64):
     check("gemv submatrix", y, Bd[10:200, 5:305] @ Bd[0, :300], abs(Bd[10:200, 5:305]) @ abs(Bd[0, :300]), tol)
 
 # stage B: SYMV, TRMV, TRSV, SYR, SYR2 (both triangles, transposes, unit diagonal, A.T view, strides)
-for dt in (np.float32, np.float16, np.float64):
+for dt in DTYPES:
     tol = TOL[dt]
     for n in (1, 5, 63, 64, 65, 200, 1000):
         A = rng.uniform(-1, 1, (n, n)).astype(dt); Ad = A.astype(np.float64)
@@ -143,35 +146,40 @@ for dt in (np.float32, np.float16, np.float64):
                  abs(Ad) + 0.25 * (np.outer(abs(Xs), abs(Ys)) + np.outer(abs(Ys), abs(Xs))), tol)
 
 # ROTG, ROTMG (CPU) and ROTM (GPU) against OpenBLAS (SciPy): random and extreme data (zeros, 1e-30, 1e30, d1 < 0)
-import scipy.linalg.blas as sb  # noqa: E402
-cases = [(0.0, 0.0), (0.0, 2.0), (3.0, 0.0), (1e-30, 3e-30), (1e30, -2e30), (-4.0, 3.0)] + \
-            [tuple(rng.uniform(-10, 10, 2) * 10.0 ** rng.integers(-5, 5)) for _ in range(200)]
-for a_, b_ in cases:
-    r, z, c, s_ = gen9blas.rotg(a_, b_)
-    c0, s0 = sb.srotg(a_, b_)
-    if not (np.isclose(c, c0, rtol=1e-5, atol=1e-7) and np.isclose(s_, s0, rtol=1e-5, atol=1e-7)):
-        errors += 1; print(f"  ERR rotg({a_}, {b_}): ({c}, {s_}) != ({c0}, {s0})")
-    rr = np.float32(c) * np.float32(a_) + np.float32(s_) * np.float32(b_)   # r = c·a + s·b
-    if not np.isclose(r, rr, rtol=1e-5, atol=1e-30):
-        errors += 1; print(f"  ERR rotg r({a_}, {b_}): {r} != {rr}")
-cases = [(1.0, 1.0, 0.0, 1.0), (1.0, 0.0, 1.0, 1.0), (-1.0, 2.0, 1.0, 1.0), (1e-10, 1.0, 1.0, 1e-3), (1e10, 1.0, 1e3, 1.0),
-             (1.0, 1e-9, 2.0, 3.0), (1.0, 1e9, 2.0, 3.0)] + \
-            [tuple(np.abs(rng.uniform(0.1, 10, 2)) ** rng.uniform(-3, 3, 2)) + tuple(rng.uniform(-5, 5, 2)) for _ in range(200)]
-for d1, d2, x1, y1 in cases:
-    w = gen9blas.rotmg(d1, d2, x1, y1)
-    p0 = sb.srotmg(d1, d2, x1, y1)
-    fl = w[3][0]
-    relevant = {-2.0: [], -1.0: [1, 2, 3, 4], 0.0: [2, 3], 1.0: [1, 4]}.get(float(fl), [1, 2, 3, 4])
-    if fl != p0[0] or not np.allclose(w[3][relevant], p0[relevant], rtol=1e-4, atol=1e-12):
-        errors += 1; print(f"  ERR rotmg{(d1, d2, x1, y1)}: {w[3]} != {p0}")
-for dt in (np.float32, np.float16, np.float64):
-    for param in ([-1.0, 0.5, -0.3, 0.2, 1.5], [0.0, 9, -0.3, 0.2, 9], [1.0, 0.5, 9, 9, 1.5], [-2.0, 9, 9, 9, 9]):
-        x = vector(1001, dt, -2, 1); y = vector(1001, dt, 3); X, Y = x.astype(np.float64), y.astype(np.float64)
-        rt = np.float64 if dt == np.float64 else np.float32   # reference: OpenBLAS srotm / drotm
-        rx, ry = (sb.drotm if dt == np.float64 else sb.srotm)(X.astype(rt), Y.astype(rt), np.array(param, rt))
-        gen9blas.rotm(x, y, param)
-        check(f"rotm {np.dtype(dt).name} flag {param[0]}", np.concatenate([x, y]), np.concatenate([rx, ry]).astype(np.float64),
-             np.concatenate([abs(X) + abs(Y)] * 2) * 2, TOL[dt])
+try:
+    import scipy.linalg.blas as sb  # noqa: E402
+except ImportError:   # e.g. a machine with only the GPU library (Gen8 bring-up)
+    sb = None
+    print("NOTE: SciPy not installed, skipping ROTG/ROTMG/ROTM (they need OpenBLAS from SciPy as the reference)")
+if sb is not None:
+    cases = [(0.0, 0.0), (0.0, 2.0), (3.0, 0.0), (1e-30, 3e-30), (1e30, -2e30), (-4.0, 3.0)] + \
+                [tuple(rng.uniform(-10, 10, 2) * 10.0 ** rng.integers(-5, 5)) for _ in range(200)]
+    for a_, b_ in cases:
+        r, z, c, s_ = gen9blas.rotg(a_, b_)
+        c0, s0 = sb.srotg(a_, b_)
+        if not (np.isclose(c, c0, rtol=1e-5, atol=1e-7) and np.isclose(s_, s0, rtol=1e-5, atol=1e-7)):
+            errors += 1; print(f"  ERR rotg({a_}, {b_}): ({c}, {s_}) != ({c0}, {s0})")
+        rr = np.float32(c) * np.float32(a_) + np.float32(s_) * np.float32(b_)   # r = c·a + s·b
+        if not np.isclose(r, rr, rtol=1e-5, atol=1e-30):
+            errors += 1; print(f"  ERR rotg r({a_}, {b_}): {r} != {rr}")
+    cases = [(1.0, 1.0, 0.0, 1.0), (1.0, 0.0, 1.0, 1.0), (-1.0, 2.0, 1.0, 1.0), (1e-10, 1.0, 1.0, 1e-3), (1e10, 1.0, 1e3, 1.0),
+                 (1.0, 1e-9, 2.0, 3.0), (1.0, 1e9, 2.0, 3.0)] + \
+                [tuple(np.abs(rng.uniform(0.1, 10, 2)) ** rng.uniform(-3, 3, 2)) + tuple(rng.uniform(-5, 5, 2)) for _ in range(200)]
+    for d1, d2, x1, y1 in cases:
+        w = gen9blas.rotmg(d1, d2, x1, y1)
+        p0 = sb.srotmg(d1, d2, x1, y1)
+        fl = w[3][0]
+        relevant = {-2.0: [], -1.0: [1, 2, 3, 4], 0.0: [2, 3], 1.0: [1, 4]}.get(float(fl), [1, 2, 3, 4])
+        if fl != p0[0] or not np.allclose(w[3][relevant], p0[relevant], rtol=1e-4, atol=1e-12):
+            errors += 1; print(f"  ERR rotmg{(d1, d2, x1, y1)}: {w[3]} != {p0}")
+    for dt in DTYPES:
+        for param in ([-1.0, 0.5, -0.3, 0.2, 1.5], [0.0, 9, -0.3, 0.2, 9], [1.0, 0.5, 9, 9, 1.5], [-2.0, 9, 9, 9, 9]):
+            x = vector(1001, dt, -2, 1); y = vector(1001, dt, 3); X, Y = x.astype(np.float64), y.astype(np.float64)
+            rt = np.float64 if dt == np.float64 else np.float32   # reference: OpenBLAS srotm / drotm
+            rx, ry = (sb.drotm if dt == np.float64 else sb.srotm)(X.astype(rt), Y.astype(rt), np.array(param, rt))
+            gen9blas.rotm(x, y, param)
+            check(f"rotm {np.dtype(dt).name} flag {param[0]}", np.concatenate([x, y]), np.concatenate([rx, ry]).astype(np.float64),
+                 np.concatenate([abs(X) + abs(Y)] * 2) * 2, TOL[dt])
 
 # Banded and packed (row layout): reference from a dense matrix packed into the format
 def to_band(D, KL, KU):
@@ -190,7 +198,7 @@ def pack(D, uplo):
     n = D.shape[0]; return np.concatenate([D[i, i:] if uplo == "U" else D[i, :i + 1] for i in range(n)])
 
 
-for dt in (np.float32, np.float16, np.float64):
+for dt in DTYPES:
     tol = TOL[dt]
     for M, N, KL, KU in ((1, 1, 0, 0), (50, 40, 3, 5), (300, 310, 0, 7), (257, 200, 30, 0), (100, 100, 99, 99)):
         D = rng.uniform(-1, 1, (M, N)).astype(dt).astype(np.float64) * band_mask(M, N, KL, KU)
@@ -259,7 +267,7 @@ for attempt in range(20):
     if not ((y[5:n + 5] == attempt + 1).all() and (y[:5] == 1).all()):
         errors += 1; print(f"  ERR USM: attempt {attempt}")
     del x, y
-for dt in (np.float32, np.float16, np.float64):   # the same set as above, but on USM memory (slices, strides, negative strides)
+for dt in DTYPES:   # the same set as above, but on USM memory (slices, strides, negative strides)
     tol = TOL[dt]
     A = gen9blas.empty((700, 900), dt); A[:] = rng.uniform(-1, 1, A.shape); Ad = A.astype(np.float64)
     v = gen9blas.empty((5000,), dt); v[:] = rng.uniform(-1, 1, v.shape); V = v.astype(np.float64)

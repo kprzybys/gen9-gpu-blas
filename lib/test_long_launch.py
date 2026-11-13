@@ -36,8 +36,8 @@ def check(name, A, B, C, tol):
     print(f"{'OK ' if ok else 'ERR'} {name}: max rel err {e:.1e} (tolerance {tol:.0e})")
 
 
-for name, dt, n, tol in [("dgemm n=4096", np.float64, 4096, 1e-12), ("sgemm n=8192", np.float32, 8192, 1e-4),
-                         ("hgemm accurate n=8192", np.float16, 8192, 5e-3)]:
+for name, dt, n, tol in [c for c in (("dgemm n=4096", np.float64, 4096, 1e-12), ("sgemm n=8192", np.float32, 8192, 1e-4),
+                         ("hgemm accurate n=8192", np.float16, 8192, 5e-3)) if gen9blas.available(c[1], c[1] == np.float16)]:
     A, B = rand((n, n), dt), rand((n, n), dt)
     try:
         check(name, A, B, gen9blas.gemm(A, B, accurate=dt == np.float16), tol)

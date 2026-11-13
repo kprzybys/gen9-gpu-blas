@@ -29,7 +29,7 @@ def extract(name):
 
 names = ["gen9blas_epilog_fb", "gen9blas_epilog_trif", "trsm_L_f", "trsm_Y_f", "trsm_store_f", "gen9blas_expand_f", "gen9blas_syr2k_merge_f",
          "trsm_inv0_f", "trsm_inv1_f", "trsm_inv2_f", "trsm_inv3_f"]
-macros = "".join(l + "\n" for l in sg.splitlines() if l.startswith(("#define INV_L", "#define INV_X")))
+macros = "".join(l + "\n" for l in sg.splitlines() if l.startswith("#define INV_"))
 text = macros + "".join(extract(n) for n in names)
 text = re.sub(r"\bfloat\b", "double", text)
 text = re.sub(r"(\d+\.\d+)f\b", r"\1", text)

@@ -94,8 +94,12 @@ static int program_src(const char *dir, const char *file, const char *options, c
 // Level 1–2 kernels (bench/level12.cl): L12[0] FP16 (GEN9BLAS_H, GEN9BLAS_HS), L12[1] FP32.
 typedef struct { cl_kernel axpy, scal, copy, copy16, rot, red, iamax, gemv_n, gemv_nw, gemv_t1, gemv_t1b, gemv_t2, ger, syr2, to_f, from_f, trsv_block, trsv_upd_n, trsv_upd_t, rotm, pmv, psv, spr2, symv1, symv2, skinny_k1, skinny_k4, skinny_k8, skinny_r4, skinny_r8, skinny_n4, skinny_n2; int es; } l12_t;
 static l12_t L12[3];   // 0 FP16, 1 FP32, 2 FP64
+// Gen8 Cherryview (kcl, docs/gen8.md): no FP16 for now (its kernels need scratch there), GEMM main kernels from OpenCL C
+// instead of the Gen9 assembler binaries, gemv_n_f unavailable (scratch) -> the grouped GEMV for every N.
+static int gen8;
 static int init_l12(const char *dir) {
     for (int i = 0; i < 3; i++) {
+        if (gen8 && i == 0) continue;
         cl_program pr; const char *suf = "hfd" + i, *opc[3] = { "-cl-std=CL3.0 -DHALF", "-cl-std=CL3.0", "-cl-std=CL3.0 -DDBL" };
         char n[32], sf[2] = { *suf, 0 };
         if (program_src(dir, "level12.cl", opc[i], &pr)) return -1;
@@ -106,7 +110,11 @@ static int init_l12(const char *dir) {
             { "to_f", &k->to_f }, { "from_f", &k->from_f }, { "trsv_block", &k->trsv_block },
             { "trsv_upd_n", &k->trsv_upd_n }, { "trsv_upd_t", &k->trsv_upd_t }, { "rotm", &k->rotm }, { "pmv", &k->pmv },
             { "psv", &k->psv }, { "spr2", &k->spr2 }, { "symv1", &k->symv1 }, { "symv2", &k->symv2 } };
-        for (size_t j = 0; j < sizeof t / sizeof t[0]; j++) { snprintf(n, sizeof n, "%s_%s", t[j].n, suf); KER(pr, n, *t[j].k); }
+        for (size_t j = 0; j < sizeof t / sizeof t[0]; j++) {
+            snprintf(n, sizeof n, "%s_%s", t[j].n, suf);
+            if (gen8 && t[j].k == &k->gemv_n) { cl_int e; k->gemv_n = clCreateKernel(pr, n, &e); if (e) k->gemv_n = NULL; continue; }
+            KER(pr, n, *t[j].k);
+        }
         if (i < 2) {   // skinny GEMM: FP16 and FP32 only (bench/level12.cl, #ifndef DBL)
             struct { const char *n; cl_kernel *k; } c[] = { { "skinny_k1", &k->skinny_k1 }, { "skinny_k4", &k->skinny_k4 }, { "skinny_k8", &k->skinny_k8 },
                 { "skinny_r4", &k->skinny_r4 }, { "skinny_r8", &k->skinny_r8 },
@@ -132,6 +140,9 @@ int gen9blas_init(const char *dir) {
     profile = getenv("GEN9BLAS_PROFILE") != NULL;
     cl_queue_properties qp[] = { CL_QUEUE_PROPERTIES, profile ? CL_QUEUE_PROFILING_ENABLE : 0, 0 };
     q = clCreateCommandQueueWithProperties(ctx, dev, qp, &err); CHECK(err);
+#ifndef GEN9BLAS_NEO
+    gen8 = kcl_gen8();
+#endif
     cl_program ph, ps, pd;
     if (program_src(dir, "hgemm.cl", "", &ph) || program_src(dir, "sgemm.cl", "", &ps) ||
         program_src(dir, "dgemm.cl", "", &pd)) return -1;
@@ -149,9 +160,11 @@ int gen9blas_init(const char *dir) {
         { GEN9BLAS_S,  "gen_s.bin",  "sgemm_v",    "pkf_a", "pkf_b",  "gen9blas_epilog_fb", "gen9blas_epilog_trif", 4, 16, 16, ps },
         { GEN9BLAS_D,  NULL,         "dgemm_v",    "pkd_a", "pkd_b",  "gen9blas_epilog_db", "gen9blas_epilog_trid", 8, 16, 16, pd } };
     for (int i = 0; i < 4; i++) {
+        if (gen8 && t[i].es == 2) continue;   // FP16: not on Gen8 yet
         type_t *r = &types[t[i].r]; char n[64];
-        if (t[i].bin ? program_bin(dir, t[i].bin, t[i].k, &r->main) : 0) return -1;
-        if (!t[i].bin) KER(t[i].pr, t[i].k, r->main);
+        const char *bin = gen8 ? NULL : t[i].bin;   // Gen8: sgemm_v from sgemm.cl (same arguments as gen_s.bin)
+        if (bin ? program_bin(dir, bin, t[i].k, &r->main) : 0) return -1;
+        if (!bin) KER(t[i].pr, t[i].k, r->main);
         KER(t[i].pr, t[i].pa, r->pa); KER(t[i].pr, t[i].pb, r->pb); KER(t[i].pr, t[i].epi, r->epi);
         KER(t[i].pr, t[i].tri, r->epi_tri);
         const char *suf = t[i].es == 4 ? "f" : t[i].es == 8 ? "d" : "h";
@@ -450,6 +463,7 @@ static double max_launch_ms(void) {
 }
 static double est_ms(type_t *r, double M, double N, double K) {   // conservative GFLOPS of the main kernels
     double gf = r == &types[GEN9BLAS_D] ? 45 : r == &types[GEN9BLAS_S] ? 300 : r == &types[GEN9BLAS_HS] ? 500 : 600;
+    if (gen8) gf = r == &types[GEN9BLAS_D] ? 8 : 50;   // CHV peaks: FP64 14, FP32 115 GFLOPS (docs/gen8.md); not measured yet
     return 2 * M * N * K / (gf * 1e6);
 }
 
@@ -949,7 +963,7 @@ static int gemv_inner(l12_t *k, int trans, int M, int N, double alpha, bf_t A, i
         // GEN9BLAS_GEMV_N=old|grouped forces a variant (comparisons).
         static int forced = -1;
         if (forced < 0) { const char *e = getenv("GEN9BLAS_GEMV_N"); forced = !e ? 0 : !strcmp(e, "old") ? 1 : !strcmp(e, "grouped") ? 2 : 0; }
-        const int grouped = forced == 2 || (forced == 0 && N >= 1024);
+        const int grouped = !k->gemv_n || forced == 2 || (forced == 0 && N >= 1024);
         cl_kernel K = grouped ? k->gemv_nw : k->gemv_n;
         ARG(K, 0, M); ARG(K, 1, N); ARGR(K, 2, alpha); ARGB(K, 3, A); ARG(K, 4, oa); ARG(K, 5, lda); ARGB(K, 6, x);
         ARG(K, 7, ox); ARG(K, 8, ix); ARGR(K, 9, beta); ARGB(K, 10, y); ARG(K, 11, oy); ARG(K, 12, iy); ARG(K, 13, mode); ARG(K, 14, unit);
@@ -1286,6 +1300,7 @@ static int gemm_skinny(int type, int tA, int tB, int M, int N, int K, double alp
     int iK = K, iM = Mc, iN = Nc;
     static int no_r = -1;   // GEN9BLAS_SKINNY_R=0: old skinny_k4/k8 (comparisons)
     if (no_r < 0) { const char *e = getenv("GEN9BLAS_SKINNY_R"); no_r = e && !atoi(e); }
+    if (gen8) no_r = 1;   // skinny_r4/r8 give wrong results on the Cherryview (cause not found, docs/gen8.md 6c); skinny_k* pass
     const int KL = es == 2 ? 4 : 2;   // k elements per lane (8 B), as in skinny_r in level12.cl
     const uintptr_t align_or = (uintptr_t)(M <= N ? A : B) | (uintptr_t)(M <= N ? B : A) | (uintptr_t)(sam * es) | (uintptr_t)(swn * es);
     // the GPU address has the same offset within a page as on the host (USM, kcl userptr; work buffer aligned)

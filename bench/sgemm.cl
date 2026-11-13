@@ -128,9 +128,15 @@ __kernel void sgemm_16x16p_b(__global const uint *Ap, __global const uint *Bp, _
     for (int r = 0; r < 16; r++)
         intel_sub_group_block_write((__global uint *)(C + (size_t)(pm * 16 + r) * ldc + pn * 16), as_uint(acc[r]));
 }
+#ifdef GEN8_PLAIN_PACK   // Gen8 build (lib/gen_kernels.py bdw, docs/gen8.md): the main kernel is sgemm_v below, which reads
+                         // the plain layout of pack_af / pack_bf, not the layout of the Gen9 assembler kernel (gen_s.bin)
+#define PKF_IDX_A(m, k, Kp) (((((size_t)((m) / 16) * ((Kp) / 16) + (k) / 16) * 16 + (m) % 16) * 16) + (k) % 16)
+#define PKF_IDX_B(n, k, Kp) (((size_t)((n) / 16) * (Kp) + (k)) * 16 + (n) % 16)
+#else
 #define PKF_IDX_A(m, k, Kp) ((((size_t)((m) / 16) * ((Kp) / 16) + (k) / 16) * 256 + ((k) % 16 / 4) * 64 + \
     (2 * ((m) % 16 / 4) + (((k) % 4) % 2 == 0)) * 8 + ((m) % 4) * 2 + ((k) % 4) / 2))
 #define PKF_IDX_B(n, k, Kp) ((((size_t)((n) / 16) * (Kp) + ((k) - (k) % 4) + ((k) % 4 % 2) * 2 + ((k) % 4) / 2)) * 16 + (n) % 16)
+#endif
 __kernel void pkf_a(__global const float *A, __global float *Ap, int M, int K, int lda, int Kp, long sA, int Mp) {
     const int k = get_global_id(0), m = get_global_id(1), b = get_global_id(2);
     Ap[(size_t)b * Mp * Kp + PKF_IDX_A(m, k, Kp)] = (m < M && k < K) ? A[b * sA + (size_t)m * lda + k] : 0.0f; }
@@ -143,12 +149,52 @@ __kernel void pkf_b(__global const float *B, __global float *Bp, int K, int N, i
 __kernel void pkf_b_t(__global const float *B, __global float *Bp, int K, int N, int ldb, int Kp, long sB, int Np) {
     const int k = get_global_id(0), n = get_global_id(1), b = get_global_id(2);
     Bp[(size_t)b * Np * Kp + PKF_IDX_B(n, k, Kp)] = (n < N && k < K) ? B[b * sB + (size_t)n * ldb + k] : 0.0f; }
+// Element access in the helper kernels below. lib/gen_dgemm.py copies them into dgemm.cl (float -> double), where
+// dgemm_core.cl defines RD/WR as FP64 accesses. RDD/WRD/DIVD: FP64 data and division (also in this FP32 program, trsm_inv).
+// Gen8 Cherryview (GEN8_CHV, docs/gen8.md 6a): no A64 QWord messages (doubles as uint pairs), no math.invm/madm.
+#define RD(p, i) ((p)[i])
+#define WR(p, i, v) ((p)[i] = (v))
+#ifdef GEN8_CHV
+#define RDD(p, i) as_double(vload2((i), (const __global uint *)(p)))
+#define WRD(p, i, v) vstore2(as_uint2((double)(v)), (i), (__global uint *)(p))
+inline double div_chv(double a, double b) {   // a / b with DF mul/fma and dword integer ops only (Gen8 Cherryview)
+    const uint2 ua = as_uint2(a), ub = as_uint2(b);
+    const uint ea = (ua.s1 >> 20) & 0x7ffu, eb = (ub.s1 >> 20) & 0x7ffu, sign = (ua.s1 ^ ub.s1) & 0x80000000u;
+    const int a_zero = ((ua.s1 & 0x7fffffffu) | ua.s0) == 0, b_zero = ((ub.s1 & 0x7fffffffu) | ub.s0) == 0;
+    const int a_inf = ea == 0x7ffu && ((ua.s1 & 0xfffffu) | ua.s0) == 0, b_inf = eb == 0x7ffu && ((ub.s1 & 0xfffffu) | ub.s0) == 0;
+    const int a_nan = ea == 0x7ffu && !a_inf, b_nan = eb == 0x7ffu && !b_inf;
+    // both operands brought into [1, 2) (a subnormal first scaled by 2^54), quotient in (0.5, 2), then scaled by 2^(ka - kb)
+    const uint2 na = as_uint2(ea == 0 ? a * 0x1p54 : a), nb = as_uint2(eb == 0 ? b * 0x1p54 : b);
+    int k = ((int)((na.s1 >> 20) & 0x7ffu) - (ea == 0 ? 54 : 0)) - ((int)((nb.s1 >> 20) & 0x7ffu) - (eb == 0 ? 54 : 0));
+    const double am = as_double((uint2)(na.s0, (na.s1 & 0x800fffffu) | 0x3ff00000u));
+    const double bm = as_double((uint2)(nb.s0, (nb.s1 & 0x800fffffu) | 0x3ff00000u));
+    double r = (double)native_recip((float)bm);
+    r = fma(r, fma(-bm, r, 1.0), r); r = fma(r, fma(-bm, r, 1.0), r); r = fma(r, fma(-bm, r, 1.0), r);
+    double q = am * r;
+    q = fma(r, fma(-bm, q, am), q);
+    for (int t = 0; t < 3; t++) {   // 2^k as up to three normal factors (a result beyond the range overflows / underflows here)
+        const int kt = clamp(k, -1022, 1023);
+        q *= as_double((uint2)(0u, (uint)(kt + 1023) << 20)); k -= kt;
+    }
+    const uint2 nan = (uint2)(0u, 0x7ff80000u), inf = (uint2)(0u, sign | 0x7ff00000u), zero = (uint2)(0u, sign);
+    uint2 res = as_uint2(q);
+    res = (b_inf || a_zero) ? zero : res;
+    res = (a_inf || b_zero) ? inf : res;
+    res = (a_nan || b_nan || (a_inf && b_inf) || (a_zero && b_zero)) ? nan : res;
+    return as_double(res);
+}
+#define DIVD(a, b) div_chv(a, b)
+#else
+#define RDD(p, i) ((p)[i])
+#define WRD(p, i, v) ((p)[i] = (v))
+#define DIVD(a, b) ((a) / (b))
+#endif
 __kernel void gen9blas_epilog_fb(__global const float *Cp, int ldp, int Mp, __global float *C, int ldc, long sC, float alpha, float beta) {
     const int j = get_global_id(0), i = get_global_id(1), b = get_global_id(2);
-    float v = alpha * Cp[(size_t)b * Mp * ldp + (size_t)i * ldp + j];
+    float v = alpha * RD(Cp, (size_t)b * Mp * ldp + (size_t)i * ldp + j);
     __global float *c = C + b * sC + (size_t)i * ldc + j;
-    if (beta != 0.0f) v += beta * c[0];
-    c[0] = v;
+    if (beta != 0.0f) v += beta * RD(c, 0);
+    WR(c, 0, v);
 }
 
 // Version "v" (see hgemm_v): (Ap, Bp, C, M, N, ldc, K, Kfull).
@@ -185,10 +231,10 @@ __kernel void sgemm_v(__global const uint *Ap, __global const uint *Bp, __global
 __kernel void gen9blas_epilog_trif(__global const float *Cp, int ldp, __global float *C, int ldc, float alpha, float beta, int uplo) {
     const int j = get_global_id(0), i = get_global_id(1);
     if ((uplo == 0 && j > i) || (uplo == 1 && j < i)) return;
-    float v = alpha * Cp[(size_t)i * ldp + j];
+    float v = alpha * RD(Cp, (size_t)i * ldp + j);
     __global float *c = C + (size_t)i * ldc + j;
-    if (beta != 0.0f) v += beta * c[0];
-    c[0] = v;
+    if (beta != 0.0f) v += beta * RD(c, 0);
+    WR(c, 0, v);
 }
 
 // ---------- TRSM: preparation and store on the GPU (float) ----------
@@ -198,22 +244,22 @@ __kernel void trsm_L_f(__global const float *A, int lda, __global float *L, int 
     const int si = rev ? n - 1 - i : i, sj = rev ? n - 1 - j : j;
     const int ai = tr ? sj : si, aj = tr ? si : sj;
     const int w = uplo == 0 ? aj <= ai : aj >= ai;
-    float v = w ? A[(size_t)ai * lda + aj] : 0.0f;
+    float v = w ? RD(A, (size_t)ai * lda + aj) : 0.0f;
     if (diag && si == sj) v = 1.0f;
-    L[(size_t)i * n + j] = v;
+    WR(L, (size_t)i * n + j, v);
 }
 // Y (np × mp) = alpha·R, R = B (left) or Bᵀ (right), rows in the order given by rev; zero padding.
 __kernel void trsm_Y_f(__global const float *B, int ldb, __global float *Y, int n, int m, int mp, int left, int rev, float alpha) {
     const int j = get_global_id(0), i = get_global_id(1);
     float v = 0.0f;
-    if (i < n && j < m) { const int si = rev ? n - 1 - i : i; v = alpha * (float)(left ? B[(size_t)si * ldb + j] : B[(size_t)j * ldb + si]); }
-    Y[(size_t)i * mp + j] = (float)v;
+    if (i < n && j < m) { const int si = rev ? n - 1 - i : i; v = alpha * (float)(left ? RD(B, (size_t)si * ldb + j) : RD(B, (size_t)j * ldb + si)); }
+    WR(Y, (size_t)i * mp + j, (float)v);
 }
 // Result back into B (the reverse of trsm_Y, without alpha).
 __kernel void trsm_store_f(__global const float *Y, int mp, __global float *B, int ldb, int n, int left, int rev) {
     const int j = get_global_id(0), i = get_global_id(1);
     const int si = rev ? n - 1 - i : i;
-    if (left) B[(size_t)si * ldb + j] = Y[(size_t)i * mp + j]; else B[(size_t)j * ldb + si] = Y[(size_t)i * mp + j];
+    if (left) WR(B, (size_t)si * ldb + j, RD(Y, (size_t)i * mp + j)); else WR(B, (size_t)j * ldb + si, RD(Y, (size_t)i * mp + j));
 }
 
 // ---------- Level 3 data preparation on the GPU (float) ----------
@@ -225,8 +271,8 @@ void gen9blas_expand_f(__global const float *A, int lda, __global float *T, int 
     __local float D[16][17], E[16][17];
     const int lj = get_local_id(0), li = get_local_id(1), bj = get_group_id(0) * 16, bi = get_group_id(1) * 16;
     const int r = bi + li, c = bj + lj;
-    D[li][lj] = r < n && c < n ? A[(size_t)r * lda + c] : 0.0f;
-    if (sym || tr) E[li][lj] = bj + li < n && bi + lj < n ? A[(size_t)(bj + li) * lda + bi + lj] : 0.0f;
+    D[li][lj] = r < n && c < n ? RD(A, (size_t)r * lda + c) : 0.0f;
+    if (sym || tr) E[li][lj] = bj + li < n && bi + lj < n ? RD(A, (size_t)(bj + li) * lda + bi + lj) : 0.0f;
     barrier(CLK_LOCAL_MEM_FENCE);
     if (r >= n || c >= n) return;
     // result element T(r, c) = F(i, j), (i, j) = tr ? (c, r) : (r, c); A[r][c] = D[li][lj], A[c][r] = E[lj][li]
@@ -235,28 +281,30 @@ void gen9blas_expand_f(__global const float *A, int lda, __global float *T, int 
     const int w = uplo == 0 ? j <= i : j >= i;
     float v = w ? aij : (sym ? aji : 0.0f);
     if (!sym && diag && i == j) v = 1.0f;
-    T[(size_t)r * n + c] = v;
+    WR(T, (size_t)r * n + c, v);
 }
 // SYR2K: X = [op(A) | op(B)], Y = [op(B) | op(A)] (N × 2K, ld 2K); trans: A, B stored as K×N.
 __kernel void gen9blas_syr2k_merge_f(__global const float *A, int lda, __global const float *B, int ldb, __global float *X, __global float *Y,
                          int K, int trans) {
     const int k = get_global_id(0), i = get_global_id(1);
-    const float a = trans ? A[(size_t)k * lda + i] : A[(size_t)i * lda + k], b = trans ? B[(size_t)k * ldb + i] : B[(size_t)i * ldb + k];
+    const float a = trans ? RD(A, (size_t)k * lda + i) : RD(A, (size_t)i * lda + k), b = trans ? RD(B, (size_t)k * ldb + i) : RD(B, (size_t)i * ldb + k);
     const size_t x = (size_t)i * 2 * K + k;
-    X[x] = a; X[x + K] = b; Y[x] = b; Y[x + K] = a;
+    WR(X, x, a); WR(X, x + K, b); WR(Y, x, b); WR(Y, x + K, a);
 }
 // TRSM: inverses of the diagonal blocks of L (n×n, ld n, lower) in FP64, recursively. "Global" indices g = 0..nbl·nb
 // (padding above n: L = I). X (double): block bi starts at bi·nb·nb, ld nb; the upper triangle of X is never read.
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
-#define INV_L(i, k) ((i) < n && (k) < n ? (double)L[(size_t)(i) * n + (k)] : (double)((i) == (k)))
-#define INV_X(X, i, k) X[(size_t)((i) / nb) * nb * nb + (size_t)((i) % nb) * nb + (k) % nb]
+#define INV_L(i, k) ((i) < n && (k) < n ? (double)RD(L, (size_t)(i) * n + (k)) : (double)((i) == (k)))
+#define INV_XI(i, k) ((size_t)((i) / nb) * nb * nb + (size_t)((i) % nb) * nb + (k) % nb)
+#define INV_X(X, i, k) RDD(X, INV_XI(i, k))
+#define INV_XW(X, i, k, v) WRD(X, INV_XI(i, k), v)
 // Base blocks 32×32: work-item = column j of block g, forward substitution.
 __kernel void trsm_inv0_f(__global const float *L, int n, int nb, __global double *X) {
     const int j = get_global_id(0), g0 = get_global_id(1) * 32;
     for (int i = j; i < 32; i++) {
         double s = i == j ? 1.0 : 0.0;
         for (int k = j; k < i; k++) s -= INV_L(g0 + i, g0 + k) * INV_X(X, g0 + k, g0 + j);
-        INV_X(X, g0 + i, g0 + j) = s / INV_L(g0 + i, g0 + i);
+        INV_XW(X, g0 + i, g0 + j, DIVD(s, INV_L(g0 + i, g0 + i)));
     }
 }
 // Level h (pairs of h×h blocks into a 2h block): step 1: Tm = L21·X11 (Tm in place of X21 in the Tm buffer),
@@ -265,17 +313,17 @@ __kernel void trsm_inv1_f(__global const float *L, int n, int nb, __global doubl
     const int j = get_global_id(0), i = get_global_id(1), r0 = get_global_id(2) * 2 * h;
     double s = 0.0;
     for (int k = j; k < h; k++) s += INV_L(r0 + h + i, r0 + k) * INV_X(X, r0 + k, r0 + j);
-    INV_X(Tm, r0 + h + i, r0 + j) = s;
+    INV_XW(Tm, r0 + h + i, r0 + j, s);
 }
 __kernel void trsm_inv2_f(__global const float *L, int n, int nb, __global double *X, __global double *Tm, int h) {
     const int j = get_global_id(0), i = get_global_id(1), r0 = get_global_id(2) * 2 * h;
     double s = 0.0;
     for (int k = 0; k <= i; k++) s += INV_X(X, r0 + h + i, r0 + h + k) * INV_X(Tm, r0 + h + k, r0 + j);
-    INV_X(X, r0 + h + i, r0 + j) = -s;
+    INV_XW(X, r0 + h + i, r0 + j, -s);
 }
 // Result: out (block bi starts at bi·nb·nb, ld b = min(nb, n − bi·nb)), upper triangle = 0. Grid (nb, nb, nbl).
 __kernel void trsm_inv3_f(int n, int nb, __global const double *X, __global float *out) {
     const int j = get_global_id(0), i = get_global_id(1), bi = get_global_id(2), b = min(nb, n - bi * nb);
     if (i >= b || j >= b) return;
-    out[(size_t)bi * nb * nb + (size_t)i * b + j] = j <= i ? (float)X[(size_t)bi * nb * nb + (size_t)i * nb + j] : 0.0f;
+    WR(out, (size_t)bi * nb * nb + (size_t)i * b + j, j <= i ? (float)RDD(X, (size_t)bi * nb * nb + (size_t)i * nb + j) : 0.0f);
 }

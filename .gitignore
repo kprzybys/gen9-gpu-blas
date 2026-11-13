@@ -5,6 +5,9 @@
 *.o
 lib/kernels.c
 lib/.kernels/
+lib/kernels_gen8.c
+lib/.kernels_gen8/
+lib/.check_patchtokens/
 lib/gen9blas_blas_d.inc
 lib/gen9blas_blas_forward.c
 bench/dgemm.cl
@@ -30,3 +33,6 @@ experiments/no-neo/*
 experiments/isa/out/
 asm/out/
 asm/*.d/
+lib/test_gen8_probe
+lib/kernels_gen8_probe.c
+lib/.kernels_gen8_probe/
