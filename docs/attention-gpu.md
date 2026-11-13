@@ -182,14 +182,19 @@ built for `whl`.
 its use, and with ~6 threads per EU the read latency stays exposed; the hand loop keeps the next one to three steps
 in flight (+25 % over the same template in OpenCL C). Removing the conflicts alone gave nothing for Qwen.
 
-What limits it now: OPEN. The OA counters (`results/oa-attention-hd530-2026-11-13.txt`) show stalls 2-3 %, both
-FPU pipes busy 86-88 % of active time, and ~20 % (Qwen) / 13 % (Llama) of EU time without a thread [MEAS]; work-group
-64 cut the idle share and gave 305 GFLOPS (section 10). Whether Qwen is bound by the data port / L3 is not settled:
-by arithmetic the loop demands 148 GB/s (~6.2 B/clock/EU) at 296 GFLOPS while the uncalibrated L3ShaderThroughput
-counter shows 112-118 GB/s, and other multi-thread EU model (`results/mt-model-2026-11-13.txt`, commit
-665094c) fits the Qwen points with an effective ~6 B/clock/EU port limit and finds Llama not memory-bound. Deciding
-test: a block-read microbenchmark in the Qwen access pattern (7 threads/EU, with and without mads, work-group 64 vs
-128) under OA, which also calibrates the counter.
+What limits it now: **not the data port, but instruction issue** [MEAS] (`results/l3port-2026-11-13.txt`, commit
+227624c, `bench/l3port.cl`, separate work). The L3 data port tops out at 170-176 GB/s on HD 530 at 1.0 GHz
+(7.1-7.3 B/clock/EU; UHD 620: 200 GB/s at 1.1 GHz, 7.6 B/clock/EU) with >= 2 reads in flight, independent of
+work-group size, prefetch depth and region size; up to 12 mads per 128 B block hide under the reads. In the Qwen
+proportion (16 mads per block) the microbenchmark gives 146-153 GB/s = 293-306 GFLOPS, the same as the attention loop,
+with OA EU active 88-91 %, stall 5 %, both FPU pipes 95 % of active time: the port runs at ~87 %. Removing non-mad
+instructions from the Qwen loop pays until the port binds at ~172 GB/s, i.e. ~344 GFLOPS on HD 530 (+13 % over 305).
+The multi-thread EU model's ~6 B/clock/EU (`results/mt-model-2026-11-13.txt`, 665094c) is thus an effective fit, not
+the hardware limit. L3ShaderThroughput, rescaled by the OA report clock, reads 97-100 % of the true bytes on the
+microbenchmark; why it showed 112-118 GB/s for the Qwen loop (demand 148 GB/s at 296 GFLOPS) is still open (repeat the
+OA run printing the same run's clock and GFLOPS). Earlier OA reading (`results/oa-attention-hd530-2026-11-13.txt`):
+stalls 2-3 %, both FPU pipes 86-88 % of active, ~20 % / 13 % EU time without a thread; work-group 64 cut the idle share
+(305 GFLOPS, section 10).
 The original estimate, kept for the record: L3 read bandwidth for Qwen. At 2 rows per thread each 128 B block read feeds 16 SIMD8
 mads (8 B per mad), and 296 GFLOPS is 148 GB/s = 148 B per clock, the block-read ceiling measured on UHD 620
 (155-158 GB/s at ~1.1 GHz). More speed would need more query rows per thread, but FP32 Q and O already take 64 of
