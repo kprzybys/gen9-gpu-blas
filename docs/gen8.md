@@ -240,6 +240,11 @@ library. `test_level12` skips ROTG/ROTMG/ROTM when SciPy is missing (their refer
 | `test_level3` with `GEN9BLAS_MAX_LAUNCH_MS=0.5` | all OK |
 | `test_long_launch` (DGEMM n = 4096, SGEMM n = 8192, batched DGEMM 2 x 3072) | first **two GPU resets**: the band-split launches went into one batch, which on Gen8 (no preemption) is one request, longer than the heartbeat allows (~10 s). With one request per kernel on Gen8 (`lib/kcl.c` `enqueue_`): all OK |
 
+After the review fixes (full-range FP64 division, 2026-11-13): `test_gen8_smoke.py ddiv` (the library's division
+through TRSV 1x1) gives 2288 of 2289 pairs bit-exact with IEEE `a / b`, including all special and extreme pairs; the
+other one is a subnormal quotient off by 1 ulp, as the emulation predicted. `dtrsm_scaled` (diagonals 1e50, 1e-50,
+1e-300) has relative residuals 1.2e-16 .. 1.7e-16; `test_level12` and `test_level3` all OK again.
+
 `skinny_r*` differ from the passing SLM/barrier kernels (`skinny_k4_f`, `trsv_block_f`, same 16 threads per group) by
 SIMD8 and the A64 aligned OWord block read x4 (`intel_sub_group_block_read2`); which of the two (if either) is the cause
 is not known [HYP]. They are only the faster variant, so on Gen8 `gen9blas.c` uses `skinny_k*` instead (as with
