@@ -119,6 +119,13 @@ inline double div_chv(double a, double b) {   // a / b with DF mul/fma and dword
 #define SV4T(v, p) vstore4(v, 0, p)
 #endif
 typedef long L;
+// Index x stride for an address offset. Gen8 Cherryview: 32-bit (a 4 GB address space), because 64-bit products of 32-bit
+// operands miscompute in some SIMD8 forms there (wrong skinny_r results, docs/gen8.md 6e).
+#ifdef GEN8_CHV
+#define OFS(i, s) ((uint)(i) * (uint)(s))
+#else
+#define OFS(i, s) ((L)(i) * (s))
+#endif
 
 // ---- level 1: work-item = 4 consecutive elements; with stride 1 vector read/write (vload4/vstore4) ----
 // Previously one element per work-item: a lane read 4 B (FP32) / 2 B (FP16) per instruction, FP32 reductions 13-17 GB/s,
@@ -772,8 +779,8 @@ __kernel void F(skinny_r##MT)(int M, int N, int K, R alpha, R beta, __global con
     const int l = get_sub_group_local_id(), sg = get_sub_group_id(); \
     const int m0 = (int)get_group_id(0) * MT, r0 = (int)get_group_id(1) * 8, mt = min(MT, M - m0); \
     const __global T *wr[8], *ar[MT]; \
-    __attribute__((opencl_unroll_hint(8))) for (int r = 0; r < 8; r++) wr[r] = W + (L)min(r0 + r, N - 1) * ldw; \
-    __attribute__((opencl_unroll_hint(MT))) for (int m = 0; m < MT; m++) ar[m] = A + (L)(m0 + min(m, mt - 1)) * sam; \
+    __attribute__((opencl_unroll_hint(8))) for (int r = 0; r < 8; r++) wr[r] = W + OFS(min(r0 + r, N - 1), ldw); \
+    __attribute__((opencl_unroll_hint(MT))) for (int m = 0; m < MT; m++) ar[m] = A + OFS(m0 + min(m, mt - 1), sam); \
     SKINNY_W8(CR_ZERO) \
     SKINNY_LOOP(RREAD) \
     CR_PAIR(s0, s4, 4) CR_PAIR(s1, s5, 4) CR_PAIR(s2, s6, 4) CR_PAIR(s3, s7, 4) \
@@ -785,7 +792,7 @@ __kernel void F(skinny_r##MT)(int M, int N, int K, R alpha, R beta, __global con
         if (m < mt && n < N) { \
             float t = 0.0f; \
             for (int g = 0; g < SKINNY_S; g++) t += part[g][o]; \
-            const L kc = (L)(m0 + m) * scm + (L)n * scn; \
+            const L kc = OFS(m0 + m, scm) + OFS(n, scn); \
             ST(C, kc, beta == 0.0f ? alpha * t : fma(alpha, t, beta * LD(C, kc))); \
         } \
     } \
