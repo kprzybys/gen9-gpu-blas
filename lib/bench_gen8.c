@@ -33,12 +33,12 @@ int main(int argc, char **argv) {
     const size_t G = 12 * 7 * 16 * 8;   // 8 thread groups' worth per hardware thread slot (12 EU x 7 threads, SIMD16)
     float *out = alloc(ctx, NULL, G * 8, 64, &err); CHECK(err);
     { cl_kernel k = clCreateKernel(pr, "peak_f32", &err); CHECK(err);
-      const int it = 4096; const float a = 0.999f, b = 0.001f;
+      const int it = 32768; const float a = 0.999f, b = 0.001f;
       CHECK(arg_ptr(k, 0, out)); CHECK(clSetKernelArg(k, 1, 4, &it)); CHECK(clSetKernelArg(k, 2, 4, &a)); CHECK(clSetKernelArg(k, 3, 4, &b));
       const double t = best_time(k, G, 0);
       printf("peak FP32 FMA: %7.1f GFLOPS (%.2f ms)\n", (double)G * it * 16 * 2 / t / 1e9, t * 1e3); }
     { cl_kernel k = clCreateKernel(pr, "peak_f64", &err); CHECK(err);
-      const int it = 1024; const double a = 0.999, b = 0.001; const size_t g = G / 2;
+      const int it = 8192; const double a = 0.999, b = 0.001; const size_t g = G / 2;
       CHECK(arg_ptr(k, 0, out)); CHECK(clSetKernelArg(k, 1, 4, &it)); CHECK(clSetKernelArg(k, 2, 8, &a)); CHECK(clSetKernelArg(k, 3, 8, &b));
       const double t = best_time(k, g, 0);
       printf("peak FP64 FMA: %7.1f GFLOPS (%.2f ms)\n", (double)g * it * 8 * 2 / t / 1e9, t * 1e3); }
