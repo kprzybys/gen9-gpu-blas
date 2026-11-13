@@ -47,7 +47,9 @@ Also check the platform settings that act like a kernel change: EU thread arbitr
    per-call average of execbuf (0.75 ms) first read as 7-8 % of the pass was in fact first-use page zeroing; per
    pass it is ~0.035 ms per submission, 0.3 %. And before comparing a variant, check the counter that shows it ran
    (`GEN9_INFO`): a morning "fused FFN costs +5.6 % energy on Q4_K_M" compared two identical configurations, because
-   the fusion was F16-only (c1b8586); once it ran it gave +3-8 % pp512.
+   the fusion was F16-only (c1b8586); once it ran it gave +3-8 % pp512. In llama.cpp measure the GEN9 backend with `-ngl 0`:
+   with the default `-ngl` llama.cpp pins the layer norms to the CPU (llama-context.cpp:3257), so GPU norm/RoPE ops
+   never run; write the `-ngl` used into every results file.
 2. **Decide port-bound vs issue-bound by measurement, with a microbenchmark in the same bytes-per-instruction ratio.**
    The OWord block-read port gives 7.1-7.3 B/clock/EU on HD 530 and 7.6 on UHD 620 with >= 2 reads in flight; up to
    ~12 SIMD8 FP32 mads per 128 B block hide under the reads. At 16 mads per block (Qwen attention) the loop is
