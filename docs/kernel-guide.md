@@ -33,6 +33,11 @@ split appears in external work (CLBlast 125 -> 230 GFLOPS by source changes; C-f
 about +10 % over expert OpenCL on Gen11 [EXT]). Drop to ISA only under the conditions in
 [isa-notes.md](isa-notes.md) §1; for memory-bound work it does not pay (packing 20x, assembly +19 %, [pitfalls.md](pitfalls.md) §5).
 
+Do not run blitter (BCS) copies next to compute kernels: on UHD 620 a FAST_COPY loop beside SGEMM cut it from 326 to
+27-32 GFLOPS (-90 %) and stretched one GEMM call from 54 to 669 ms, past the 640 ms preemption timeout; GEMV fell
+78 %, while a CPU memcpy beside them cost -3 % / -27 %; the copy itself costs more energy on BCS (0.62 vs 0.46 J/GB)
+[MEAS, `results/blt-contend-gp-2026-11-13.txt`]. The blitter adds no DRAM bandwidth (FAST_COPY 11.3 GB/s = CPU memcpy).
+
 Also check the platform settings that act like a kernel change: EU thread arbitration round-robin (SGEMM K = 8192:
 211-220 -> 362 GFLOPS) and MOCS index 2 (index 0 is uncached, 2x slower), both set by `lib/kcl.c` [MEAS]
 ([performance-model.md](performance-model.md) §3).
