@@ -4,6 +4,7 @@ check() / check_all() reject every line form this parser does not understand (un
 accumulator operands, unknown regions, sends without the rd:/wr: decoding), so that a register analysis built on
 defs_uses() fails loudly instead of silently missing a read or a write (e.g. after an IGC/NEO update)."""
 import re
+import struct
 
 TS = {"b": 1, "ub": 1, "w": 2, "uw": 2, "hf": 2, "d": 4, "ud": 4, "f": 4, "q": 8, "uq": 8, "df": 8}
 OPND = re.compile(r"(-?)(r\d+|null|acc\d+)(?:\.(\d+))?(<[^>]*>)?:(\w+)")
@@ -114,6 +115,40 @@ NOREG = {"jmpi", "while", "break", "illegal", "nop"}     # control flow / paddin
 REGION = re.compile(r"<(?:0|1|2|0;0|2;1|\d+;[1-9]\d*,\d+)>$")
 IMM = re.compile(r"(-?(?:\d+(?:\.\d*)?(?:e[+-]?\d+)?|0x[0-9a-fA-F]+|inf|nan)):(?:b|ub|w|uw|d|ud|q|uq|f|hf|df|v|uv|vf)$")
 LABEL = re.compile(r"^[A-Za-z_]\w*:$")
+# one immediate operand as IGA prints it: decimal, float, or hex; IGA prints in hex a value that does not fit
+# the signed type (e.g. 0x8200:uw), and hex values of a signed type are two's complement
+IMM_OPERAND = re.compile(r"(?<!\S)(-?(?:0x[0-9a-fA-F]+|\d+(?:\.\d*)?(?:e[+-]?\d+)?|inf|nan))"
+                         r":(b|ub|w|uw|d|ud|q|uq|f|hf|df|v|uv|vf)\b")
+INT_BITS = {"b": 8, "ub": 8, "w": 16, "uw": 16, "d": 32, "ud": 32, "q": 64, "uq": 64}
+FLOAT_HEX = {"hf": ("<H", "<e"), "f": ("<I", "<f"), "df": ("<Q", "<d")}
+
+
+def imm_value(s, t):
+    """Value of an immediate printed as s with type t (int for integer types, float for f/hf/df; packed vector
+    types v/uv/vf come back as the raw int)."""
+    if s.startswith(("0x", "-0x")):
+        v = int(s, 16)
+        if t in FLOAT_HEX:
+            raw, fl = FLOAT_HEX[t]
+            return struct.unpack(fl, struct.pack(raw, v))[0]
+        if t in INT_BITS:
+            bits = INT_BITS[t]
+            assert 0 <= v < 1 << bits, ("immediate wider than its type", s, t)
+            if not t.startswith("u") and v >> (bits - 1):
+                v -= 1 << bits
+        return v
+    if t in FLOAT_HEX:
+        return float(s)
+    return int(s)
+
+
+def imm(line, types=None):
+    """(value, type) of the line's last immediate operand (of one of `types` if given), or None."""
+    found = [m for m in IMM_OPERAND.finditer(code(line)) if types is None or m.group(2) in types]
+    if not found:
+        return None
+    m = found[-1]
+    return imm_value(m.group(1), m.group(2)), m.group(2)
 
 
 def full_writes(line):

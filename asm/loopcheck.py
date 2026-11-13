@@ -25,7 +25,6 @@ import gemm_gen as G  # noqa: E402
 import isa  # noqa: E402
 
 K_TOTAL = 64
-IMM = re.compile(r"\s(-?(?:0x[0-9a-fA-F]+|\d+(?:\.\d*)?(?:e[+-]?\d+)?)):(\w+)\s*(?:\{|$)")
 FLOAT = {"f", "hf", "df"}
 
 
@@ -94,12 +93,7 @@ def elem_addr(op, i, n, dst=False):
 
 
 def imm_of(line):
-    m = IMM.search(isa.code(line) + " ")
-    if not m:
-        return None
-    s, t = m.group(1), m.group(2)
-    v = float(s) if t in FLOAT else int(s, 0)
-    return v, t
+    return isa.imm(line)
 
 
 def norm_addr(v, imm):
