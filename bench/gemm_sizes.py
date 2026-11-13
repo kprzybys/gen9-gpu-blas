@@ -17,6 +17,9 @@ print(f"{'n':>6s} {'FP16':>10s} {'FP16 accurate':>14s} {'FP32':>10s}   (GFLOPS)"
 for n in [int(a) for a in sys.argv[1:]] or [1024, 2048, 3072, 4096]:
     row = []
     for dt, acc in ((np.float16, False), (np.float16, True), (np.float32, False)):
+        if not gen9blas.available(dt, acc):   # Gen8: no FP16
+            row.append(float("nan"))
+            continue
         A, B, C = (gen9blas.empty((n, n), dt) for _ in range(3))
         A[:] = rng.uniform(-1, 1, (n, n))
         B[:] = rng.uniform(-1, 1, (n, n))
