@@ -13,6 +13,7 @@ struct kcl_kernel_desc {
     struct kcl_arg_desc arg[24];
     int16_t off_ls[3], off_els[3], off_gid[3], off_gs[3], off_ng[3], off_wdim, off_const, off_priv;
     uint32_t private_size, slm, barrier, nbti;
+    int32_t const_bti;         // binding-table slot through which the kernel reads the program constants, -1 = none
     const char *unsupported;   // "" = supported
 };
 

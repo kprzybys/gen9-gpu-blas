@@ -720,6 +720,20 @@ static cl_int enqueue_(cl_command_queue q, cl_kernel k, cl_uint dim, const size_
             if (a->off_boff >= 0) { uint32_t b32 = (uint32_t)shift; memcpy(ind + a->off_boff, &b32, 4); }
         }
     }
+    // program constants read through a binding-table slot (IGC: const_base with bti_value; __constant data, tables of
+    // library math such as log10): a raw buffer surface over the program's constant buffer, like a stateful argument
+    if (o->const_bti >= 0) {
+        kbo *cb = consts[k->prog];
+        if (!cb || !tab) { fprintf(stderr, "kcl: %s: constants through bti %d but no constant buffer\n", o->name, o->const_bti); return CL_INVALID_KERNEL; }
+        add_bo(cb);
+        const uint64_t len = ((kcl_programs[k->prog].nconstants + 3) & ~3ull) - 1;
+        struct GFX9_RENDER_SURFACE_STATE ss = { .SurfaceType = SURFTYPE_BUFFER, .SurfaceFormat = 0x1ff /* RAW */,
+            .SurfaceVerticalAlignment = VALIGN_4, .TileMode = LINEAR, .MOCS = MOCS_WB,
+            .Width = len & 0x7f, .Height = (len >> 7) & 0x3fff, .Depth = (len >> 21) & 0x7ff,
+            .SurfaceBaseAddress = cb->addr };
+        GFX9_RENDER_SURFACE_STATE_pack(NULL, D + o_ss, &ss);
+        tab[o->const_bti] = o_ss - O_SS; o_ss += 64;
+    }
     // per-thread data: local ID (a row per dimension: 32 B for SIMD8/16, 64 B for SIMD32)
     if (o->lid) {
         const uint32_t row = o->simd == 32 ? 64 : 32;

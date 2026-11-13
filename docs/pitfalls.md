@@ -204,6 +204,16 @@ catalogue; `benchdnn` reports kernel time, not call time. Compare like with like
 Details of the method are in `docs/no-neo.md`. `kcl` submits command buffers directly to i915 and does no
 validation: a wrong buffer can hang the GPU. Start new work with minimal kernels and a timeout in the wait.
 
+**Program constants through a binding-table slot read as zeros (fixed 2026-11-13).**
+IGC may read program-scope `__constant` data and the coefficient tables of library math (`log10`, `exp`, ...) through
+a binding-table slot: in `.ze_info` the `const_base` payload then carries a `bti_value`. Until 2026-11-13
+`gen_kernels.py` kept only the stateless offset and `kcl` never filled that slot, so such kernels ran without an
+error and read zeros (the GPU log-mel kernel produced an all-zero spectrum; `bench/kcl_const` failed with a relative
+error of 11.8). Fix: `gen_kernels.py` records `const_bti` (and counts it in the binding table), `kcl` puts a raw buffer
+surface over the program's constant buffer into that slot; a `const_base` with a slot but no constants marks the
+kernel unsupported. Regression test: `make -C bench kcl_const && bench/kcl_const` (PASS: 3.4e-7) [MEAS,
+`results/mel-gpu-kp-2026-11-13.txt`]. The library's own kernels never used the slot (all `const_bti` = -1).
+
 **GPU hang and reset affect the desktop.**
 i915 detects a hang (heartbeat 2500 ms) and resets the render engine; the desktop freezes for a fraction of a
 second to seconds, and a context that hangs repeatedly is banned for the rest of the process [EST: i915]. A

@@ -117,6 +117,8 @@ for pi, (file, options) in enumerate(PROGRAMS):
         arg = {}   # indeks -> [off, size, wsk, bti, off_adr, off_boff]
         special = {v: [] for v in SPECIAL.values()}
         other = {"const_base": -1, "private_base_stateless": -1, "work_dimensions": -1}
+        const_bti = -1   # IGC may read program constants (__constant data, library math tables) through a binding-table
+                         # slot: const_base carries bti_value; kcl must then put a surface for the constant buffer there
         end = 0
         for a in k.get("payload_arguments", []):
             t = a["arg_type"]
@@ -146,6 +148,10 @@ for pi, (file, options) in enumerate(PROGRAMS):
                 special[SPECIAL[t]].append(a["offset"])
             elif t in other:
                 other[t] = a["offset"]
+                if t == "const_base" and "bti_value" in a:
+                    const_bti = a["bti_value"]
+                    if not constants:
+                        unsup.append("const_base bti without program constants")
             else:
                 unsup.append(t)
         nargs = max(arg) + 1 if arg else 0
@@ -169,7 +175,8 @@ for pi, (file, options) in enumerate(PROGRAMS):
                      f'{lid}, {nargs}, {{{args_s}}}, {three(special["ls"])}, {three(special["els"])}, {three(special["gid"])}, '
                      f'{three(special["gs"])}, {three(special["ng"])}, {other["work_dimensions"]}, {other["const_base"]}, '
                      f'{other["private_base_stateless"]}, {env.get("private_size", 0)}, {env.get("slm_size", 0)}, '
-                     f'{1 if env.get("barrier_count") else 0}, {max(bti.values()) + 1 if bti else 0}, '
+                     f'{1 if env.get("barrier_count") else 0}, {max(list(bti.values()) + [const_bti]) + 1 if bti or const_bti >= 0 else 0}, '
+                     f'{const_bti}, '
                      f'"{" ".join(unsup)}"}}')
     print(f"static const struct kcl_kernel_desc {base}_kernels[] = {{\n    " + ",\n    ".join(descs) + "\n};")
     progs.append(f'{{"{file}", {"NULL" if options is None else chr(34) + options + chr(34)}, {base}_kernels, '

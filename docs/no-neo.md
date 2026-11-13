@@ -232,7 +232,8 @@ Model in kcl: a queue = a command buffer built on the fly (IDD + indirect data +
 barrier between kernels), submitted on wait or when full (64 IDD); 8 rotating buffers (wait for a slot before reuse);
 `cl_mem` = a GEM object (softpin, increasing addresses, never reused); "USM host" = a GEM object mapped WB;
 multi-thread groups (local IDs as NEO: 32 B row / 64 B for SIMD32), SLM, barriers, private memory (private_size x SIMD x
-168), program constants (`const_base`), PIPE_CONTROL timestamps (`GEN9BLAS_PROFILE`, `KCL_PROFILE_KERNELS`).
+168), program constants (`const_base`: stateless address and, when IGC asks for it, a binding-table slot `const_bti`),
+PIPE_CONTROL timestamps (`GEN9BLAS_PROFILE`, `KCL_PROFILE_KERNELS`).
 
 **Facts found while porting (all confirmed by measurement):**
 1. **The buffer surface size must be rounded up to 4 B** (NEO: `alignUp(size, 4)`): the hardware checks RAW bounds per
