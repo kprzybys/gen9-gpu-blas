@@ -135,9 +135,11 @@ memory-bound routines (levels 1-2, skinny GEMM) reach 0.78-0.93 of the UHD 620, 
 37.5 GB/s limit (theoretical ratio 0.91); DGEMM 50.6 GFLOPS (0.90-0.94); batched GEMM 0.70-0.89, lowest for the smallest
 matrices; ten minutes of HGEMM n = 2048 at a constant 607-609 GFLOPS and 1000 MHz, no throttling [MEAS].
 
-### Older generations: Gen8 and Gen7.5 (not started)
+### Older generations: Gen8 (experimental, done) and Gen7.5 (not started)
 
-Two older parts are available for porting tests (state 2026-11-12, nothing run on their GPUs yet). Device IDs, clock
+Two older parts are available for porting tests. Gen8 (Braswell) has since been ported (2026-11-13, experimental: FP32 and
+FP64 pass the GPU test suites; see [gen8.md](gen8.md), which supersedes the Gen8 hypotheses below); the table keeps the
+state of 2026-11-12. Device IDs, clock
 range, CPU and kernel are read from the machines [SYS]; EU counts are Intel's published figures for each part, not yet
 checked against a source in `docs/references.md` [HYP]. Peak = EU x 16 FLOP/clock (FP32 FMA, 2 x SIMD4 per EU) x max clock.
 
@@ -155,17 +157,21 @@ checked against a source in `docs/references.md` [HYP]. Peak = EU x 16 FLOP/cloc
 
 What porting needs, as hypotheses to check in the PRM of each generation before any GPU run [HYP]:
 
-- **Gen8 (Braswell).** The Gen8 instruction encoding is the one Gen9 extends, so the assembly templates may need only
-  small changes; `kcl` needs the Gen8 state (MEDIA_VFE_STATE sizes for 12 EU, pipeline select, cache control, surface
-  formats) and the GEMM tiling re-tuned for half the EU count and a lower clock. Expected effort: moderate.
+- **Gen8 (Braswell): done, experimental** ([gen8.md](gen8.md)). What it actually took: kernels from OpenCL C compiled
+  as Broadwell (no assembly kernels, no FP16 yet); `kcl` Gen8 state (pipeline select, base addresses, MOCS, SLM, VFE,
+  L3), coherency without LLC, a 4 GB address space and one request per kernel (no preemption); and Cherryview-specific
+  fixes found on the hardware: the A64 QWord scattered read hangs the GPU (doubles moved as dword pairs), FP64 division
+  and variable-lane double broadcasts avoided. Measured bandwidth (one DDR3-1600 channel, 12.8 GB/s) is in gen8.md;
+  performance is not measured yet.
 - **Gen7.5 (Haswell).** Gen8 changed the native instruction encoding, so the assembler path (IGA / `ocloc` targets) and
   the templates change more; `kcl` state differs more (Gen7 media pipeline). On Gen7.x the i915 command parser checks
   batch buffers from unprivileged clients, so the first test is whether a `kcl` batch is accepted at all. FP16 has no
   speed advantage if the 2x rate is absent, so FP32 (384 GFLOPS peak, close to the UHD 620) is the interesting target.
   Expected effort: largest.
-- Order: Gen8 first (closest to working code), Gen7.5 second; on each part, start with a fill / copy kernel before GEMM.
-- Memory bandwidth of both machines is not known yet (channel configuration needs `dmidecode`); memory-bound routines
-  cannot be predicted until it is.
+- Order: Gen8 first (done), Gen7.5 second; start with a fill / copy kernel before GEMM, and check the PRM's
+  restrictions of the generation against the compiled code (`scripts/chv_scan.py` is the Gen8 example).
+- Memory bandwidth of the Haswell machine is not known yet (channel configuration needs `dmidecode`); memory-bound
+  routines cannot be predicted until it is.
 - Same safety rules as on Gen9: a hang can reset the engine or need a reboot ([pitfalls.md](pitfalls.md)).
 
 ### Model gaps
