@@ -27,3 +27,10 @@ sharing headers, and no spare register at all; 8x32 fits easily but reads more p
 [HYP] 16 fewer instructions per chunk (67 -> 51 non-mad) -> ~+2.7 %. Bit test: identical (so the hardware executes the
 SIMD16 mixed-mode add correctly on this regioning). Kernel-only GFLOPS, alternating (gate/up, down):
   before 696 698 | 671 705 | 697 691      SIMD16 carry 710 704 | 698 696 | 704 711   -> ~+1.5 % (below the prediction)
+## Corrections after review (review, 2026-11-13 evening; numbers unchanged, wording fixed)
+- "99 non-mad (19 %)" is 99/512 relative to the mads; as a share of all instructions it is 99/611 = 16 %.
+- The instruction-count model (99 -> 67 of 611 -> 579 issue slots) predicts at most ~5.5 %; measured +8-11 %. The
+  "hit" was an under-estimate: something besides the issue count improved (not identified; send/header scheduling?).
+- The SIMD16 mixed-mode carry (9bec7e0) may be outside the Gen9 PRM mixed-mode rules (reported: no SIMD16 in mixed
+  mode with an f32 destination; not yet checked in the PRM). Bit-identical on UHD 620 only; asm/check_simd16_carry.sh
+  (added later) must pass on any other GPU before using this binary there.

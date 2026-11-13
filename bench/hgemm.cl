@@ -703,10 +703,11 @@ __kernel void gen9blas_dequant_b16(__global const uchar *W, ulong row_bytes, int
 }
 
 // v2 of the above (same arithmetic, bit-identical): work-group of 128 = 16 rows (one B16 row group g) x one 256-value
-// chunk j (Q8_0: 8 blocks; needs K % 256 == 0). Phase 1 copies the 16 rows' chunk bytes to SLM with consecutive lanes on
-// consecutive bytes; phase 2: lane t computes k = t and t + 128 for all 16 rows and writes them as one vstore_half16
-// (32 B), so the 8 KB output tile is written contiguously. No private arrays (kcl has no scratch space: see v1's Q4_K
-// note). Grid ((rows / 16) * 128, K / 256), local (128, 1); n0 = first row of the launch (multiple of 16).
+// chunk j (Q8_0: 8 blocks; needs K % 256 == 0, and W + n * row_bytes 16 B aligned for Q8_0 / Q4_K). Phase 1 copies the
+// 16 rows' chunk bytes to SLM (16 B loads; Q6_K 2 B); phase 2 computes the sub-block scales / mins once; phase 3: lane t
+// computes rows 2 (t % 8), + 1 at k = t / 8 + 16 i and stores them as one half2, so 8 lanes write one k (32 B) and the
+// 8 KB output tile is written contiguously. No private arrays (kcl has no scratch space: see v1's Q4_K note).
+// Grid ((rows / 16) * 128, K / 256), local (128, 1); n0 = first row of the launch (multiple of 16).
 __kernel __attribute__((reqd_work_group_size(128, 1, 1)))
 void gen9blas_dequant_b16s(__global const uchar *W, ulong row_bytes, int qtype, int N, int Kp, int n0,
                            __global half *Bp, __global int *oor) {
