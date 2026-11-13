@@ -594,6 +594,61 @@ __kernel void gen9blas_swiglu_pack_a3(__global const half *G, __global const hal
     vstore_half_rte(h, 0, Ap + PK_IDX_A3(m, k, Kp));
 }
 
+// ggml backend: quantized weights (ggml block layouts, row n at W + n * row_bytes) dequantized straight into the B16 packed
+// layout of the accurate FP16 GEMM (GEN9BLAS_HS, Kp = K). qtype 0 = Q8_0 (32-value blocks of 34 B), 1 = Q4_K, 2 = Q6_K
+// (256-value blocks of 144 / 210 B). Same arithmetic order as ggml's dequantize_row_* (no FMA contraction) and FP16
+// rounding to nearest even, so the result equals to_float + ggml_fp32_to_fp16_row bit for bit. Work-item = one block of
+// row n; neighbouring work-items = neighbouring rows, so a SIMD thread stores 32 contiguous bytes per k. Rows n >= N are
+// zeros. *oor |= 1 if any value is beyond the FP16 range or not finite. Grid (rows, K / block), global offset = first row.
+#pragma OPENCL FP_CONTRACT OFF
+#define DQ_PUT(k, v) do { const float v_ = (v); bad |= !(fabs(v_) <= 65504.0f); vstore_half_rte(v_, 0, d + (size_t)(k) * 16); } while (0)
+__kernel void gen9blas_dequant_b16(__global const uchar *W, ulong row_bytes, int qtype, int N, int Kp,
+                                   __global half *Bp, __global int *oor) {
+    const int n = get_global_id(0), j = get_global_id(1), QB = qtype == 0 ? 32 : 256;
+    __global half *d = Bp + ((size_t)(n / 16) * Kp + (size_t)j * QB) * 16 + n % 16;
+    if (n >= N) { for (int k = 0; k < QB; k++) d[(size_t)k * 16] = 0; return; }
+    __global const uchar *b = W + (size_t)n * row_bytes + (size_t)j * (qtype == 0 ? 34 : qtype == 1 ? 144 : 210);
+    int bad = 0;
+    if (qtype == 0) {
+        const float dd = vload_half(0, (__global const half *)b);
+        for (int k = 0; k < 32; k++) DQ_PUT(k, (float)((__global const char *)b)[2 + k] * dd);
+    } else if (qtype == 1) {
+        const float dd = vload_half(0, (__global const half *)b), mn = vload_half(1, (__global const half *)b);
+        __global const uchar *s = b + 4, *q = b + 16;
+        for (int jj = 0, is = 0; jj < 256; jj += 64, is += 2, q += 32) {
+            // ggml get_scale_min_k4 for is and is + 1, in scalars. A first version kept them in private arrays
+            // (uchar sc[2], m[2]): nondeterministic wrong values for N >= 1024 (not at 256-512), cause not found (no
+            // scratch / private memory in its ze_info; SIMD8 as compiled, but this version is exact at SIMD8 too).
+            const int i0 = is, i1 = is + 1;
+            const uint sc0 = i0 < 4 ? s[i0] & 63 : (s[i0 + 4] & 0xF) | ((s[i0 - 4] >> 6) << 4);
+            const uint mm0 = i0 < 4 ? s[i0 + 4] & 63 : (s[i0 + 4] >> 4) | ((s[i0] >> 6) << 4);
+            const uint sc1 = i1 < 4 ? s[i1] & 63 : (s[i1 + 4] & 0xF) | ((s[i1 - 4] >> 6) << 4);
+            const uint mm1 = i1 < 4 ? s[i1 + 4] & 63 : (s[i1 + 4] >> 4) | ((s[i1] >> 6) << 4);
+            const float d1 = dd * (float)sc0, m1 = mn * (float)mm0, d2 = dd * (float)sc1, m2 = mn * (float)mm1;
+            for (int l = 0; l < 32; l++) DQ_PUT(jj + l, d1 * (float)(q[l] & 0xF) - m1);
+            for (int l = 0; l < 32; l++) DQ_PUT(jj + 32 + l, d2 * (float)(q[l] >> 4) - m2);
+        }
+    } else {
+        const float dd = vload_half(0, (__global const half *)(b + 208));
+        __global const uchar *ql = b, *qh = b + 128;
+        __global const char *sc = (__global const char *)(b + 192);
+        for (int nn = 0; nn < 256; nn += 128, ql += 64, qh += 32, sc += 8)
+            for (int l = 0; l < 32; l++) {
+                const int is = l / 16;
+                const int q1 = (int)((ql[l] & 0xF) | (((qh[l] >> 0) & 3) << 4)) - 32;
+                const int q2 = (int)((ql[l + 32] & 0xF) | (((qh[l] >> 2) & 3) << 4)) - 32;
+                const int q3 = (int)((ql[l] >> 4) | (((qh[l] >> 4) & 3) << 4)) - 32;
+                const int q4 = (int)((ql[l + 32] >> 4) | (((qh[l] >> 6) & 3) << 4)) - 32;
+                DQ_PUT(nn + l, dd * (float)sc[is] * (float)q1);
+                DQ_PUT(nn + l + 32, dd * (float)sc[is + 2] * (float)q2);
+                DQ_PUT(nn + l + 64, dd * (float)sc[is + 4] * (float)q3);
+                DQ_PUT(nn + l + 96, dd * (float)sc[is + 6] * (float)q4);
+            }
+    }
+    if (bad) atomic_or(oor, 1);
+}
+#pragma OPENCL FP_CONTRACT ON
+
 // ---------- "v" versions: separate N (columns to compute), ldc (row stride of C), K (loop length) and Kfull
 // (stride of packed data panels). Allows computing a piece of packed data once (sub-buffers with offset).
 // Batched: matrix b starts at Ap + b·M·Kfull, Bp + b·N·Kfull, C + b·M·ldc.

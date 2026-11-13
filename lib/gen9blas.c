@@ -119,7 +119,7 @@ static int init_l12(const char *dir) {
 
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
-static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu;   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
+static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant;   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
 int gen9blas_init(const char *dir) {
     static int inited;
     if (inited) return 0;
@@ -143,6 +143,7 @@ int gen9blas_init(const char *dir) {
     if (!usm_alloc || !usm_free || !usm_info || !usm_arg) FAIL("missing cl_intel_unified_shared_memory extension");
     if (init_l12(dir)) return -1;
     KER(ph, "pk_a3_f32", k_pa3_f32); KER(ph, "gen9blas_epilog_hf", k_epi_hf); KER(ph, "gen9blas_swiglu_pack_a3", k_swiglu);   // F16 weights x F32 activations
+    { cl_int e4; k_dequant = clCreateKernel(ph, "gen9blas_dequant_b16", &e4); if (e4) k_dequant = NULL; }
     // "v" kernels: (Ap, Bp, C, M, N, ldc, K, Kfull) -- also for chunks of data packed once (sub-buffers)
     // bin = NULL: main kernel from source (FP64: dgemm.cl, OpenCL C), not from an asm binary
     struct { int r; const char *bin, *k, *pa, *pb, *epi, *tri; int es, tn, km; cl_program pr; } t[4] = {
@@ -552,6 +553,60 @@ gen9blas_packed *gen9blas_pack_b(int type, int tB, int K, int N, const void *B, 
         force_copy = 0;
         if (rc) { clReleaseMemObject(P->buf); free(P); return NULL; }
     }
+    return P;
+}
+
+// Quantized weights (ggml block layouts) dequantized on the GPU straight into a GEN9BLAS_HS packed B (see gen9blas.h).
+static int pack_b_q_bands(int qt, size_t rb, const void *W, gen9blas_packed *P, int *nf) {
+    size_t bW = (size_t)P->N * rb;
+    bf_t xW; int z;
+    if (get_obj(W, bW, &uB, 1, 0, &xW, &z)) return -1;
+    bf_t xnf = { NULL, nf };
+    cl_ulong rbl = rb;
+    ARGB(k_dequant, 0, xW); ARG(k_dequant, 1, rbl); ARG(k_dequant, 2, qt); ARG(k_dequant, 3, P->N); ARG(k_dequant, 4, P->Kp);
+    ARG(k_dequant, 5, P->buf); ARGB(k_dequant, 6, xnf);
+    size_t nb = pack_band_bytes() / ((size_t)P->Kp * 2) / 16 * 16;
+    if (nb < 16) nb = 16;
+    for (size_t n0 = 0; n0 < (size_t)P->Np; n0 += nb) {
+        size_t o[2] = { n0, 0 }, g[2] = { (size_t)P->Np - n0 < nb ? (size_t)P->Np - n0 : nb, (size_t)P->K / (qt == 0 ? 32 : 256) };
+        CHECK(clEnqueueNDRangeKernel(q, k_dequant, 2, o, g, NULL, 0, NULL, NULL));
+        CHECK(clFlush(q));
+    }
+    if (wait_gpu()) return -1;
+#ifndef GEN9BLAS_NEO
+    if (z) kcl_userptr_release(W, bW);
+#endif
+    return 0;
+}
+
+gen9blas_packed *gen9blas_pack_b_q(int qtype, int K, int N, const void *W, size_t row_bytes, int *out_of_range) {
+    static int *nf;
+    NEW_OPERATION();
+    *out_of_range = 0;
+    if (!k_dequant || !types[GEN9BLAS_HS].ready) { snprintf(errbuf, sizeof errbuf, "pack_b_q: dequant kernel unavailable"); return NULL; }
+    const int qb = qtype == GEN9BLAS_Q8_0 ? 32 : 256;
+    const size_t bb = qtype == GEN9BLAS_Q8_0 ? 34 : qtype == GEN9BLAS_Q4_K ? 144 : qtype == GEN9BLAS_Q6_K ? 210 : 0;
+    if (!bb || K <= 0 || N <= 0 || K % qb || row_bytes < (size_t)K / qb * bb) {
+        snprintf(errbuf, sizeof errbuf, "pack_b_q: qtype %d, K = %d, N = %d, row_bytes = %zu", qtype, K, N, row_bytes); return NULL;
+    }
+    if (!nf && !(nf = gen9blas_alloc(64))) return NULL;
+    type_t *r = &types[GEN9BLAS_HS];
+    gen9blas_packed *P = calloc(1, sizeof *P);
+    if (!P) return NULL;
+    P->type = GEN9BLAS_HS; P->K = K; P->N = N;
+    P->Np = (N + r->tn - 1) / r->tn * r->tn; P->Kp = (K + r->km - 1) / r->km * r->km;
+    if (P->Kp != K) { snprintf(errbuf, sizeof errbuf, "pack_b_q: K = %d not a multiple of %d", K, r->km); free(P); return NULL; }
+    cl_int err;
+    P->buf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, (size_t)P->Np * P->Kp * 2 + 4096, NULL, &err);
+    if (err != CL_SUCCESS) { snprintf(errbuf, sizeof errbuf, "pack_b_q: clCreateBuffer = %d", err); free(P); return NULL; }
+    *nf = 0;
+    if (pack_b_q_bands(qtype, row_bytes, W, P, nf)) {   // userptr failures show up late: retry with a copy
+        force_copy = 1; NEW_OPERATION(); *nf = 0;
+        int rc = pack_b_q_bands(qtype, row_bytes, W, P, nf);
+        force_copy = 0;
+        if (rc) { clReleaseMemObject(P->buf); free(P); return NULL; }
+    }
+    *out_of_range = *nf != 0;
     return P;
 }
 

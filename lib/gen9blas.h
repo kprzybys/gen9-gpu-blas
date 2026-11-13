@@ -50,6 +50,13 @@ int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed 
 // Pg, Pu: K -> N, Pd: N -> Nd, all packed as GEN9BLAS_HS. Intermediates stay FP16 on the GPU; *nonfinite as above.
 int gen9blas_ffn_f16w(int M, const float *X, int ldx, const gen9blas_packed *Pg, const gen9blas_packed *Pu,
                       const gen9blas_packed *Pd, float *Y, int ldy, int *nonfinite);
+// ggml backend, quantized weights: N rows of K values in ggml block layout (row n at W + n * row_bytes; qtype
+// GEN9BLAS_Q8_0: K % 32 == 0, GEN9BLAS_Q4_K / GEN9BLAS_Q6_K: K % 256 == 0) dequantized on the GPU into a packed B for
+// gen9blas_gemm_pb_f16w (GEN9BLAS_HS, as gen9blas_pack_b(GEN9BLAS_HS, 1, K, N, ...) of the FP16 values; bit-identical to
+// ggml's dequantize_row_* + round-to-nearest-even FP16). *out_of_range = 1 if any value does not fit FP16: the result
+// is then unusable (free it; use FP32). NULL on error or if the kernel is unavailable.
+enum { GEN9BLAS_Q8_0 = 0, GEN9BLAS_Q4_K = 1, GEN9BLAS_Q6_K = 2 };
+gen9blas_packed *gen9blas_pack_b_q(int qtype, int K, int N, const void *W, size_t row_bytes, int *out_of_range);
 // SYMM: C = alpha·A·B + beta·C (left, A: M×M symmetric) or alpha·B·A + beta·C (right, A: N×N). The uplo triangle is used.
 int gen9blas_symm(int type, int side, int uplo, int M, int N, double alpha, const void *A, int lda,
              const void *B, int ldb, double beta, void *C, int ldc);
