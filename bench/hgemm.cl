@@ -568,6 +568,59 @@ __kernel void gen9blas_epilog_b(__global const half *Cp, int ldp, int Mp, __glob
 __kernel void pk_a3_f32(__global const float *A, __global half *Ap, int M, int K, int lda, int Kp, long sA, int Mp) {
     const int k = get_global_id(0), m = get_global_id(1), b = get_global_id(2);
     vstore_half_rte((m < M && k < K) ? A[b * sA + (size_t)m * lda + k] : 0.0f, 0, Ap + (size_t)b * Mp * Kp + PK_IDX_A3(m, k, Kp)); }
+// pk_a3_f32 with 16 B per lane (same values, same RTE rounding): one 16-lane work-group per 16 x 16 tile of A3. Lane L
+// reads row m0 + L (4 x float4 when the 16 k are inside K, else element by element with zeros outside), the tile goes
+// through SLM, and lane L writes the 8-half chunks L and L + 16 of the tile's 256 contiguous halves (one vstore_half8).
+// Chunk c: kq = c / 8, h = c / 4 % 2, even = c / 2 % 2, mq = c % 2; element 2 i + t = (m = 8 h + 4 mq + i,
+// k = 4 kq + (even ? 0 : 1) + 2 t)  [PK_IDX_A3: ((k % 4) % 2 == 0) selects the second 16-run of the pair].
+// Grid (Kp / 16 * 16, Mp / 16, batch), local (16, 1, 1).
+__attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_size(16, 1, 1)))
+__kernel void pk_a3_f32v(__global const float *A, __global half *Ap, int M, int K, int lda, int Kp, long sA, int Mp) {
+    __local float tl[16][17];
+    const int L = get_local_id(0), k0 = get_group_id(0) * 16, m0 = get_global_id(1) * 16, b = get_global_id(2);
+    const int m = m0 + L;
+    __global const float *row = A + b * sA + (size_t)m * lda + k0;
+    if (m < M && k0 + 16 <= K) {
+        const float4 a = vload4(0, row), c = vload4(1, row), d = vload4(2, row), e = vload4(3, row);
+        tl[L][0] = a.s0; tl[L][1] = a.s1; tl[L][2] = a.s2; tl[L][3] = a.s3; tl[L][4] = c.s0; tl[L][5] = c.s1;
+        tl[L][6] = c.s2; tl[L][7] = c.s3; tl[L][8] = d.s0; tl[L][9] = d.s1; tl[L][10] = d.s2; tl[L][11] = d.s3;
+        tl[L][12] = e.s0; tl[L][13] = e.s1; tl[L][14] = e.s2; tl[L][15] = e.s3;
+    } else {
+        for (int kk = 0; kk < 16; kk++) tl[L][kk] = (m < M && k0 + kk < K) ? row[kk] : 0.0f;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    __global half *tile = Ap + (size_t)b * Mp * Kp + ((size_t)(m0 / 16) * (Kp / 16) + k0 / 16) * 256;
+    for (int cc = 0; cc < 2; cc++) {
+        const int c = L + 16 * cc, kq = c / 8, h = c / 4 % 2, ev = c / 2 % 2, mq = c % 2;   // ev: run of even k
+        const int mb = 8 * h + 4 * mq, kb = 4 * kq + (ev ? 0 : 1);
+        const float8 v = (float8)(tl[mb][kb], tl[mb][kb + 2], tl[mb + 1][kb], tl[mb + 1][kb + 2],
+                                  tl[mb + 2][kb], tl[mb + 2][kb + 2], tl[mb + 3][kb], tl[mb + 3][kb + 2]);
+        vstore4(as_uint4(convert_half8_rte(v)), 0, (__global uint *)(tile + c * 8));   // 16 B: one xyzw store
+    }
+}
+// gen9blas_epilog_hf with 4 consecutive j per work-item: 8 B FP16 read, 16 B F32 write, so a SIMD16 store covers
+// whole 64 B lines (8 per lane = 32 B split every line between two messages and was slower than 1 per lane, 2026-11-13).
+// The per-element expression is the same as in gen9blas_epilog_hf. Grid ((N + 3) / 4, rows, batch).
+__kernel void gen9blas_epilog_hf8(__global const half *Cp, int ldp, int Mp, __global float *C, int ldc, long sC,
+                                  float alpha, float beta, int N, __global int *nonfinite) {
+    const int j0 = get_global_id(0) * 4, i = get_global_id(1), b = get_global_id(2);
+    __global const half *cp = Cp + (size_t)b * Mp * ldp + (size_t)i * ldp + j0;
+    __global float *c = C + b * sC + (size_t)i * ldc + j0;
+    int bad = 0;
+    if (j0 + 4 <= N && beta == 0.0f) {
+        const float4 v = alpha * convert_float4(as_half4(vload2(0, (__global const uint *)cp)));
+        bad = any(!isfinite(v));
+        vstore4(v, 0, c);
+    } else {
+        for (int t = 0; t < 4 && j0 + t < N; t++) {
+            float v = alpha * vload_half(0, cp + t);
+            if (beta != 0.0f) v += beta * c[t];
+            bad |= !isfinite(v);
+            c[t] = v;
+        }
+    }
+    if (bad) atomic_or(nonfinite, 1);
+}
 // Epilogue FP16 work buffer -> F32 C; *nonfinite |= 1 if any result is inf or NaN (FP16 overflow: recompute in F32).
 __kernel void gen9blas_epilog_hf(__global const half *Cp, int ldp, int Mp, __global float *C, int ldc, long sC, float alpha,
                                  float beta, __global int *nonfinite) {
