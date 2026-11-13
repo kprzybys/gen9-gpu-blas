@@ -648,6 +648,74 @@ __kernel void gen9blas_dequant_b16(__global const uchar *W, ulong row_bytes, int
     }
     if (bad) atomic_or(oor, 1);
 }
+
+// v2 of the above (same arithmetic, bit-identical): work-group of 128 = 16 rows (one B16 row group g) x one 256-value
+// chunk j (Q8_0: 8 blocks; needs K % 256 == 0). Phase 1 copies the 16 rows' chunk bytes to SLM with consecutive lanes on
+// consecutive bytes; phase 2: lane t computes k = t and t + 128 for all 16 rows and writes them as one vstore_half16
+// (32 B), so the 8 KB output tile is written contiguously. No private arrays (kcl has no scratch space: see v1's Q4_K
+// note). Grid ((rows / 16) * 128, K / 256), local (128, 1); n0 = first row of the launch (multiple of 16).
+__kernel __attribute__((reqd_work_group_size(128, 1, 1)))
+void gen9blas_dequant_b16s(__global const uchar *W, ulong row_bytes, int qtype, int N, int Kp, int n0,
+                           __global half *Bp, __global int *oor) {
+    __local uchar sm[16 * 272];
+    __local float pd[16 * 16], pm[16 * 8];   // per row and sub-block: scale (Q4_K d1, Q6_K dd*sc, Q8_0 d), Q4_K min m1
+    const int t = get_local_id(0), g = n0 / 16 + get_group_id(0), j = get_global_id(1);
+    const int CB = qtype == 0 ? 272 : qtype == 1 ? 144 : 210;
+    for (int i = t; i < 16 * CB; i += 128) {
+        const int r = i / CB, n = g * 16 + r;
+        sm[i] = n < N ? W[(size_t)n * row_bytes + (size_t)j * CB + (i - r * CB)] : 0;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    {   // phase 2: sub-block parameters, same products as ggml (no FMA)
+        const int r = t / 8, sb = t % 8;
+        __local const uchar *b = sm + r * CB;
+        if (qtype == 0) {
+            pd[r * 16 + sb] = vload_half(0, (__local const half *)(b + sb * 34));
+        } else if (qtype == 1) {
+            const float dd = vload_half(0, (__local const half *)b), mn = vload_half(1, (__local const half *)b);
+            __local const uchar *sc = b + 4;
+            const int is = sb;
+            const uint scv = is < 4 ? sc[is] & 63 : (sc[is + 4] & 0xF) | ((sc[is - 4] >> 6) << 4);
+            const uint mv = is < 4 ? sc[is + 4] & 63 : (sc[is + 4] >> 4) | ((sc[is] >> 6) << 4);
+            pd[r * 16 + sb] = dd * (float)scv; pm[r * 8 + sb] = mn * (float)mv;
+        } else {
+            const float dd = vload_half(0, (__local const half *)(b + 208));
+            __local const char *sc = (__local const char *)(b + 192);
+            pd[r * 16 + sb] = dd * (float)sc[sb]; pd[r * 16 + 8 + sb] = dd * (float)sc[8 + sb];
+        }
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    // phase 3: lane t computes rows r0 = 2 (t % 8), r0 + 1 at k = t / 8 + 16 i and stores them as one half2, so 8 lanes
+    // write one k (32 B) and a SIMD32 thread two full 64 B lines per store.
+    int bad = 0;
+    const int r0 = 2 * (t % 8);
+    const bool z0 = g * 16 + r0 >= N, z1 = g * 16 + r0 + 1 >= N;   // rows n >= N: zeros (not -0)
+    __global half *dst = Bp + ((size_t)g * Kp + (size_t)j * 256) * 16 + r0;
+    for (int i = 0; i < 16; i++) {
+        const int k = t / 8 + 16 * i;
+        float2 v;
+        if (qtype == 0) {
+            const int o = (k / 32) * 34 + 2 + k % 32, p = k / 32;
+            v.x = (float)(char)sm[r0 * 272 + o] * pd[r0 * 16 + p];
+            v.y = (float)(char)sm[(r0 + 1) * 272 + o] * pd[(r0 + 1) * 16 + p];
+        } else if (qtype == 1) {
+            const int grp = k / 64, hi = (k % 64) >= 32, o = 16 + grp * 32 + k % 32, p = 2 * grp + hi, sh = hi ? 4 : 0;
+            v.x = pd[r0 * 16 + p] * (float)((sm[r0 * 144 + o] >> sh) & 0xF) - pm[r0 * 8 + p];
+            v.y = pd[(r0 + 1) * 16 + p] * (float)((sm[(r0 + 1) * 144 + o] >> sh) & 0xF) - pm[(r0 + 1) * 8 + p];
+        } else {
+            const int nn = k / 128, kr = k % 128, qu = kr / 32, l = kr % 32;
+            const int ol = nn * 64 + (qu & 1) * 32 + l, oh = 128 + nn * 32 + l, sl = qu >= 2 ? 4 : 0, shh = 2 * qu, p = k / 16;
+            v.x = pd[r0 * 16 + p] * (float)((int)(((sm[r0 * 210 + ol] >> sl) & 0xF) | (((sm[r0 * 210 + oh] >> shh) & 3) << 4)) - 32);
+            v.y = pd[(r0 + 1) * 16 + p] *
+                  (float)((int)(((sm[(r0 + 1) * 210 + ol] >> sl) & 0xF) | (((sm[(r0 + 1) * 210 + oh] >> shh) & 3) << 4)) - 32);
+        }
+        if (z0) v.x = 0;
+        if (z1) v.y = 0;
+        bad |= !(fabs(v.x) <= 65504.0f) | !(fabs(v.y) <= 65504.0f);
+        vstore_half2_rte(v, 0, dst + (size_t)k * 16);
+    }
+    if (bad) atomic_or(oor, 1);
+}
 #pragma OPENCL FP_CONTRACT ON
 
 // ---------- "v" versions: separate N (columns to compute), ldc (row stride of C), K (loop length) and Kfull

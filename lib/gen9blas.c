@@ -119,7 +119,7 @@ static int init_l12(const char *dir) {
 
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
-static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant;   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
+static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2;   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
 int gen9blas_init(const char *dir) {
     static int inited;
     if (inited) return 0;
@@ -144,6 +144,7 @@ int gen9blas_init(const char *dir) {
     if (init_l12(dir)) return -1;
     KER(ph, "pk_a3_f32", k_pa3_f32); KER(ph, "gen9blas_epilog_hf", k_epi_hf); KER(ph, "gen9blas_swiglu_pack_a3", k_swiglu);   // F16 weights x F32 activations
     { cl_int e4; k_dequant = clCreateKernel(ph, "gen9blas_dequant_b16", &e4); if (e4) k_dequant = NULL; }
+    { cl_int e5; k_dequant2 = clCreateKernel(ph, "gen9blas_dequant_b16s", &e5); if (e5) k_dequant2 = NULL; }
     // "v" kernels: (Ap, Bp, C, M, N, ldc, K, Kfull) -- also for chunks of data packed once (sub-buffers)
     // bin = NULL: main kernel from source (FP64: dgemm.cl, OpenCL C), not from an asm binary
     struct { int r; const char *bin, *k, *pa, *pb, *epi, *tri; int es, tn, km; cl_program pr; } t[4] = {
@@ -563,6 +564,25 @@ static int pack_b_q_bands(int qt, size_t rb, const void *W, gen9blas_packed *P, 
     if (get_obj(W, bW, &uB, 1, 0, &xW, &z)) return -1;
     bf_t xnf = { NULL, nf };
     cl_ulong rbl = rb;
+    // v2 (SLM staging, contiguous 32 B writes; needs K % 256 == 0); GEN9BLAS_DEQ=v1 keeps the first kernel for comparisons
+    static int v1 = -1;
+    if (v1 < 0) { const char *e = getenv("GEN9BLAS_DEQ"); v1 = e && !strcmp(e, "v1"); }
+    if (k_dequant2 && !v1 && P->K % 256 == 0) {
+        cl_kernel k2 = k_dequant2;
+        ARGB(k2, 0, xW); ARG(k2, 1, rbl); ARG(k2, 2, qt); ARG(k2, 3, P->N); ARG(k2, 4, P->Kp); ARGB(k2, 7, xnf);
+        ARG(k2, 6, P->buf);
+        size_t nb = pack_band_bytes() / ((size_t)P->Kp * 2) / 16 * 16;
+        if (nb < 16) nb = 16;
+        for (size_t n0 = 0; n0 < (size_t)P->Np; n0 += nb) {
+            const size_t rows = (size_t)P->Np - n0 < nb ? (size_t)P->Np - n0 : nb;
+            int n0i = (int)n0;
+            ARG(k2, 5, n0i);
+            size_t g[2] = { rows / 16 * 128, (size_t)P->K / 256 }, l[2] = { 128, 1 };
+            CHECK(clEnqueueNDRangeKernel(q, k2, 2, NULL, g, l, 0, NULL, NULL));
+            CHECK(clFlush(q));
+        }
+        goto done;
+    }
     ARGB(k_dequant, 0, xW); ARG(k_dequant, 1, rbl); ARG(k_dequant, 2, qt); ARG(k_dequant, 3, P->N); ARG(k_dequant, 4, P->Kp);
     ARG(k_dequant, 5, P->buf); ARGB(k_dequant, 6, xnf);
     size_t nb = pack_band_bytes() / ((size_t)P->Kp * 2) / 16 * 16;
@@ -572,6 +592,7 @@ static int pack_b_q_bands(int qt, size_t rb, const void *W, gen9blas_packed *P, 
         CHECK(clEnqueueNDRangeKernel(q, k_dequant, 2, o, g, NULL, 0, NULL, NULL));
         CHECK(clFlush(q));
     }
+done:
     if (wait_gpu()) return -1;
 #ifndef GEN9BLAS_NEO
     if (z) kcl_userptr_release(W, bW);
