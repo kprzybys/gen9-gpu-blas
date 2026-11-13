@@ -363,11 +363,12 @@ __kernel void sgemm8_v32(__global const uint *Ap, __global const uint *Bp, __glo
     const int group = pid / (GM * npn), m_first = group * GM;
     const int gsz = min(npm - m_first, GM);
     const int pm = m_first + (pid % (GM * npn)) % gsz, pn = (pid % (GM * npn)) / gsz;
-    Ap += (size_t)b * M * Kfull; Bp += (size_t)b * N * Kfull; C += (size_t)b * M * ldc;
+    // 32-bit offsets (a 4 GB address space): the 64-bit (size_t) products miscomputed the batch offset here [MEAS]
+    Ap += (uint)b * (uint)(M * Kfull); Bp += (uint)b * (uint)(N * Kfull); C += (uint)b * (uint)(M * ldc);
     float acc[16][4];
     for (int r = 0; r < 16; r++) for (int j = 0; j < 4; j++) acc[r][j] = 0;
-    __global const uint *pa = Ap + (size_t)pm * (Kfull / 16) * 256;
-    __global const uint *pb = Bp + (size_t)pn * Kfull * 32;
+    __global const uint *pa = Ap + (uint)pm * (uint)(Kfull / 16) * 256u;
+    __global const uint *pb = Bp + (uint)pn * (uint)Kfull * 32u;
     for (int k = 0; k < K; k += 4) {
         const uint8 a = intel_sub_group_block_read8(pa);   // 16 rows x 4 k
         pa += 64;
@@ -387,7 +388,7 @@ __kernel void sgemm8_v32(__global const uint *Ap, __global const uint *Bp, __glo
         }
     }
     for (int r = 0; r < 16; r++) {
-        __global uint *c = (__global uint *)(C + (size_t)(pm * 16 + r) * ldc + pn * 32);
+        __global uint *c = (__global uint *)(C + (uint)(pm * 16 + r) * (uint)ldc + (uint)pn * 32u);
         for (int j = 0; j < 4; j++) intel_sub_group_block_write(c + 8 * j, as_uint(acc[r][j]));
     }
 }
