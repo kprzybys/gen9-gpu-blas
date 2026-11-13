@@ -5,7 +5,8 @@ the instruction level. This file is the map; the details live in:
 
 - [performance-model.md](performance-model.md): hardware constants, software behaviour, formulas (the ceiling);
 - [isa-notes.md](isa-notes.md): the ISA level (workflow, 13 rules, verification checklist, OA counters);
-- [pitfalls.md](pitfalls.md): symptoms and fixes; [benchmarks.md](benchmarks.md): measurement rules.
+- [pitfalls.md](pitfalls.md): symptoms and fixes; [benchmarks.md](benchmarks.md): measurement rules;
+- [solvers.md](solvers.md): exact questions (register layout, feasibility proofs) with constraint solvers.
 
 Evidence tags as in performance-model.md: **[MEAS]** results file, **[SW]** behaviour of NEO 24.35 / IGC,
 **[SPEC]** PRM, **[EST]** Mesa heuristics, **[HYP]** unconfirmed. **[EXT]** marks a published external result that

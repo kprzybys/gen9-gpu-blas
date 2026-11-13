@@ -1,0 +1,133 @@
+# CP-SAT model of the register allocation in asm/attn_gen.py sched<NS>, and a single-thread loop-schedule model
+# 2026-11-13. Scripts: experiments/solver/ (extract.py on kp-laptop: ocloc 24.35.30872.36 offline, no GPU;
+# solve.py and sched_model.py on the 32-thread desktop: AMD Ryzen AI MAX+ 395, 32 threads, OR-Tools 9.15.6755, Python 3.12.13).
+# Instances: experiments/solver/instances.json (IGC's registers per category from attn_gen.igc_maps / live_in, attn.cl
+# template at the commit of asm/attn_gen.py b18e51a). Guide: docs/solvers.md.
+#
+# Register allocation: 5 shapes x NS 1..8 x PE_IN_S x COMPACT x (IGC registers fixed | Q/O/l relocatable with movs)
+# = 320 solves, 1.7 s wall in total. "greedy" = attn_gen.Alloc order (slots first, first fit), re-implemented.
+#
+# Summary
+# - solver vs greedy (IGC registers fixed): 0 disagreements -> the generator's allocator is optimal for these shapes.
+# - relocation of IGC's Q/O/l never turns an infeasible case feasible (count bound, not fragmentation).
+# - leanest configuration (PE_IN_S=1 COMPACT=1) needs 8*NS + c registers next to IGC's:
+#     qwen       free 50, c 14 -> NS <= 4      qwen_tokc  free 52, c 14 -> NS <= 4
+#     llama      free 45, c 21 -> NS <= 3      llama_tokc free 47, c 21 -> NS <= 3
+#     llama_nk1  free 45, c 12 -> NS <= 4
+#   Llama NS 4 is impossible without a design change (e.g. Q in FP16, smaller RQ).
+# - Q parity balance (zero conflicts needs as many even as odd Q registers): balanced for all shapes except
+#   llama NK=1 (17 even / 15 odd -> 8 unpaired elements = the "bank conflicts 8" seen in the review);
+#   with relocation the solver balances it with ONE mov (8) before the loop (assumes Q is not read after the loop;
+#   not verified, not measured).
+#
+# Loop-schedule model (sched_model.py calib): one thread, in-order issue, read latency Leff issue slots, 1229 slots
+# per Qwen block (= the measured C4 loop). Measured (results/attn-asm-hd530-2026-11-13.txt, HD 530, 1 GHz):
+# NS2 287.7, NS4 295.5 GFLOPS (ratio 1.027), i.e. 0.90 / 0.92 of the issue bound 320 GFLOPS.
+# The model gives a step function and reproduces neither the ratio nor the efficiencies for any Leff:
+#   Leff 0-40: NS2 1.000 NS4 1.000 | Leff 60: NS2 0.804 NS4 1.000 (ratio 1.244) | Leff 120: 0.505 / 0.956 (1.893)
+# -> MODEL REJECTED; the free-placement sweep was not run. Reading [HYP]: latency is hidden mainly by the other
+# hardware threads of the EU, not by the prefetch distance within a thread; a useful model must simulate several
+# threads and the shared send port / L3.
+#
+# Raw solver table (NS allowed by the generator only)
+== qwen (-DD=128 -DG=6 -DHKV=2 -DRQ=2 -DNK=2); free now 50; generator rules: NS <= 16, 32 % NS == 0
+ 1 | yes    | (0,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 1 | yes    | (0,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 1 | yes    | (1,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 1 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (0,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (0,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (1,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 4 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 4 | yes    | (0,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 4 | yes    | (1,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 4 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 8 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (0,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (1,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (1,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+== llama (-DD=64 -DG=4 -DHKV=8 -DRQ=4 -DNK=2); free now 45; generator rules: NS <= 8, 24 % NS == 0
+ 1 | yes    | (0,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 1 | yes    | (0,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 1 | yes    | (1,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 1 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 2 | yes    | (0,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (1,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 3 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 3 | yes    | (0,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 3 | yes    | (1,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 3 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 4 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 4 | yes    | (0,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 4 | yes    | (1,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 4 | yes    | (1,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 6 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 6 | yes    | (0,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 6 | yes    | (1,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 6 | yes    | (1,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (0,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (1,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (1,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+== qwen_tokc (-DD=128 -DG=6 -DHKV=2 -DRQ=2 -DNK=2 -DQTOK -DCAUSAL=1); free now 52; generator rules: NS <= 16, 32 % NS == 0
+ 1 | yes    | (0,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 1 | yes    | (0,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 1 | yes    | (1,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 1 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (0,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (0,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (1,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 4 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 4 | yes    | (0,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 4 | yes    | (1,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 4 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 8 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (0,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (1,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (1,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+== llama_tokc (-DD=64 -DG=4 -DHKV=8 -DRQ=4 -DNK=2 -DQTOK -DCAUSAL=1); free now 47; generator rules: NS <= 8, 24 % NS == 0
+ 1 | yes    | (0,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 1 | yes    | (0,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 1 | yes    | (1,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 1 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 2 | yes    | (0,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (1,0)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 2 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 3 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 3 | yes    | (0,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 3 | yes    | (1,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 3 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (0)
+ 4 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 4 | yes    | (0,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 4 | yes    | (1,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 4 | yes    | (1,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 6 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 6 | yes    | (0,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 6 | yes    | (1,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 6 | yes    | (1,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (0,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (1,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (1,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+== llama_nk1 (-DD=64 -DG=4 -DHKV=8 -DRQ=4 -DNK=1); free now 45; generator rules: NS <= 8, 16 % NS == 0
+ 1 | yes    | (0,0)                     | OPTIMAL / ok                 | OPTIMAL (1)
+ 1 | yes    | (0,1)                     | OPTIMAL / ok                 | OPTIMAL (1)
+ 1 | yes    | (1,0)                     | OPTIMAL / ok                 | OPTIMAL (1)
+ 1 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (1)
+ 2 | yes    | (0,0)                     | OPTIMAL / ok                 | OPTIMAL (1)
+ 2 | yes    | (0,1)                     | OPTIMAL / ok                 | OPTIMAL (1)
+ 2 | yes    | (1,0)                     | OPTIMAL / ok                 | OPTIMAL (1)
+ 2 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (1)
+ 4 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 4 | yes    | (0,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 4 | yes    | (1,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 4 | yes    | (1,1)                     | OPTIMAL / ok                 | OPTIMAL (1)
+ 8 | yes    | (0,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (0,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (1,0)                     | INFEASIBLE / FAIL            | INFEASIBLE
+ 8 | yes    | (1,1)                     | INFEASIBLE / FAIL            | INFEASIBLE
