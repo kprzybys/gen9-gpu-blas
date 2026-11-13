@@ -333,7 +333,8 @@ static int submit(void) {
         .rsvd1 = ctx_id };
     int r;
     PHASE_BEGIN;
-    while ((r = ioctl(fd, DRM_IOCTL_I915_GEM_EXECBUFFER2, &eb)) && errno == EINTR) {}
+    // EAGAIN: i915 could not bind userptr pages that were being invalidated (swap, compaction); libdrm drmIoctl retries it too.
+    while ((r = ioctl(fd, DRM_IOCTL_I915_GEM_EXECBUFFER2, &eb)) && (errno == EINTR || errno == EAGAIN)) {}
     PHASE_END(F_EXEC); if (phases) fz_objects += n;
     seq_sent = s->seq; cur = -1;
     if (r) {
