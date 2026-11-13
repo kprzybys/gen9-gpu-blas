@@ -9,11 +9,31 @@
 #ifdef GEN8_CHV
 #define RD(p, i) as_double(vload2((i), (const __global uint *)(p)))
 #define WR(p, i, v) vstore2(as_uint2((double)(v)), (i), (__global uint *)(p))
-inline double div_chv(double a, double b) {   // reciprocal from FP32 + 3 Newton steps + quotient correction (DF mul/fma)
-    double r = (double)native_recip((float)b);
-    r = fma(r, fma(-b, r, 1.0), r); r = fma(r, fma(-b, r, 1.0), r); r = fma(r, fma(-b, r, 1.0), r);
-    const double q = a * r;
-    return fma(r, fma(-b, q, a), q);
+inline double div_chv(double a, double b) {   // a / b with DF mul/fma and dword integer ops only (Gen8 Cherryview)
+    const uint2 ua = as_uint2(a), ub = as_uint2(b);
+    const uint ea = (ua.s1 >> 20) & 0x7ffu, eb = (ub.s1 >> 20) & 0x7ffu, sign = (ua.s1 ^ ub.s1) & 0x80000000u;
+    const int a_zero = ((ua.s1 & 0x7fffffffu) | ua.s0) == 0, b_zero = ((ub.s1 & 0x7fffffffu) | ub.s0) == 0;
+    const int a_inf = ea == 0x7ffu && ((ua.s1 & 0xfffffu) | ua.s0) == 0, b_inf = eb == 0x7ffu && ((ub.s1 & 0xfffffu) | ub.s0) == 0;
+    const int a_nan = ea == 0x7ffu && !a_inf, b_nan = eb == 0x7ffu && !b_inf;
+    // both operands brought into [1, 2) (a subnormal first scaled by 2^54), quotient in (0.5, 2), then scaled by 2^(ka - kb)
+    const uint2 na = as_uint2(ea == 0 ? a * 0x1p54 : a), nb = as_uint2(eb == 0 ? b * 0x1p54 : b);
+    int k = ((int)((na.s1 >> 20) & 0x7ffu) - (ea == 0 ? 54 : 0)) - ((int)((nb.s1 >> 20) & 0x7ffu) - (eb == 0 ? 54 : 0));
+    const double am = as_double((uint2)(na.s0, (na.s1 & 0x800fffffu) | 0x3ff00000u));
+    const double bm = as_double((uint2)(nb.s0, (nb.s1 & 0x800fffffu) | 0x3ff00000u));
+    double r = (double)native_recip((float)bm);
+    r = fma(r, fma(-bm, r, 1.0), r); r = fma(r, fma(-bm, r, 1.0), r); r = fma(r, fma(-bm, r, 1.0), r);
+    double q = am * r;
+    q = fma(r, fma(-bm, q, am), q);
+    for (int t = 0; t < 3; t++) {   // 2^k as up to three normal factors (a result beyond the range overflows / underflows here)
+        const int kt = clamp(k, -1022, 1023);
+        q *= as_double((uint2)(0u, (uint)(kt + 1023) << 20)); k -= kt;
+    }
+    const uint2 nan = (uint2)(0u, 0x7ff80000u), inf = (uint2)(0u, sign | 0x7ff00000u), zero = (uint2)(0u, sign);
+    uint2 res = as_uint2(q);
+    res = (b_inf || a_zero) ? zero : res;
+    res = (a_inf || b_zero) ? inf : res;
+    res = (a_nan || b_nan || (a_inf && b_inf) || (a_zero && b_zero)) ? nan : res;
+    return as_double(res);
 }
 #define DIVD(a, b) div_chv(a, b)
 #else

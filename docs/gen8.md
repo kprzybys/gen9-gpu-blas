@@ -36,7 +36,7 @@ All cited sources: `sh scripts/fetch_docs.sh`.
 - The bdw output is a patch-token binary (`PTM.txt`, `*_KernelHeap.asm`), not zebin, and `-internal_options
   -cl-intel-enable-zebin` does not change that [EXP]. `lib/gen_kernels.py` therefore has a patch-token reader (token
   layouts: IGC `patch_list.h`/`patch_shared.h`, mapping as in NEO `kernel_descriptor_from_patchtokens.cpp`);
-  `make -C lib kernels_gen8.c` builds the Gen8 table `kcl_programs_gen8` (the six `.cl` programs, `-noFP64bRegion`).
+  `make -C lib kernels_gen8.c` builds the Gen8 table `kcl_programs_gen8` (the six `.cl` programs of the library, `-noFP64bRegion`; kernels with A64 QWord messages are marked unsupported; the probes of `bench/gen8_probe.cl` go only into `kernels_gen8_probe.c` for `lib/test_gen8_probe`).
 - Check of the reader (`make -C lib check-patchtokens`): Gen9.5 compiled in both formats; of the kernels with identical
   ISA, 235 have identical descriptors and 8 differ only in accepted ways (both readers' rules in
   `lib/check_patchtokens.py`), 0 errors; 16 kernels get different code from the two compile paths and are not compared
@@ -110,6 +110,9 @@ changes the argument ABI), `mul24` in the source (still DW x DW), `IGC_ForceNoFP
 
 ## 4. Driver (i915, Linux v7.0)
 
+This section and section 5 describe the situation before the port; `lib/kcl.c` line numbers refer to the code on
+`main` before it. What was changed is in section 6.
+
 | Topic | Fact | Source |
 |---|---|---|
 | CPU/GPU coherency | A GEM_CREATE object on a non-LLC platform is `I915_CACHE_NONE` (not coherent); i915 clflushes it when pages are acquired, and in execbuffer only when `cache_dirty` is set, which plain stores through a WB mmap do not do. **kcl as written may hand the GPU stale data**: batch, ISA and constants (`lib/kcl.c:423-433`) and data buffers | [SW] `i915_gem_shmem.c:589-605`, `i915_gem_object.c:169`, `i915_gem_pages.c:37-42`, `i915_gem_execbuffer.c:2119` |
@@ -138,7 +141,7 @@ changes the argument ABI), `mul24` in the source (still DW x DW), `IGC_ForceNoFP
 | timestamps | 12.5 MHz: `lib/kcl.c:350, 591` hardcode 12 MHz; take I915_PARAM_CS_TIMESTAMP_FREQUENCY | section 1 |
 | unchanged | GPGPU_WALKER, MEDIA_STATE_FLUSH, MEDIA_INTERFACE_DESCRIPTOR_LOAD, MI_LOAD_REGISTER_IMM, MI_BATCH_BUFFER_END, RENDER_SURFACE_STATE (differs only in Gen9 fields kcl does not use) | [SPEC] genxml diff |
 
-## 6. Implementation (branch `gen8`; written, not yet run on Gen8 hardware)
+## 6. Implementation
 
 | Step | What | Where |
 |---|---|---|
@@ -160,7 +163,7 @@ matched `results/skylake-hd530-2026-11-12.txt` within 0.6 % (n >= 2048).
 | axpy (n = 64, 4096, 2^20) | `axpy_f` (+ 6 non-scalar DW x DW `mul`) | correct (error 0), 1.9 ms |
 | SGEMM n = 16 | `skinny_n4_f`, `skinny_n2_f` | correct |
 | SGEMM n = 64, 256 | `pkf_a`, `pkf_b`, `sgemm_v` | **wrong** (relative error ~1), no reset |
-| DGEMM n = 16 | `pkd_a` | **GPU hang, engine reset** (detected by kcl; machine and services unaffected) |
+| DGEMM n = 16 | `pkd_a` | **GPU hang, engine reset** (detected by kcl; system unaffected) |
 
 So kcl itself works on Gen8 (command stream, 4 GB address space, coherency, patch-token descriptors) and the width-1
 64-bit regions of `-noFP64bRegion` executed correctly in `copy16_f`.
@@ -185,13 +188,13 @@ Analysis (offline, 2026-11-12):
   `gen9blas_epilog_fb`, `skinny_*`), no reset. This confirms the layout diagnosis and that these kernels, including their
   DW x DW multiplies and the `mul`/`mach` sequence with non-zero batch index, execute correctly on the Cherryview.
 - FP64 copy n = 64 (`copy16_d`: A64 qword gather/scatter and `mov :df`, no multiplies), 2026-11-13 [MEAS]: **GPU hang,
-  engine reset** (detected by kcl; machine and services unaffected). So the DGEMM hang does not come from index
+  engine reset** (detected by kcl; system unaffected). So the DGEMM hang does not come from index
   arithmetic; the candidates left are the A64 qword scattered messages (most likely) and DF-typed moves [HYP].
   `-cl-intel-force-enable-a64WA` (internal option) does not change these messages [EXP].
 - **Root cause confirmed, 2026-11-13** (`lib/test_gen8_probe`, kernels in `bench/gen8_probe.cl`, compiled stateless) [MEAS]:
   `probe_df_dword` (DF multiply, A64 dword gather/scatter only) is correct (64 of 64); `probe_qword` (the A64 QWord
-  gathering read `0x042402FF` of the hanging kernels, integer data, no DF type) **hangs the GPU** (engine reset; machine
-  and services unaffected). So on the Cherryview the A64 QWord scattered *read* must not be used. The CHV PRM documents
+  gathering read `0x042402FF` of the hanging kernels, integer data, no DF type) **hangs the GPU** (engine reset; system
+  unaffected). So on the Cherryview the A64 QWord scattered *read* must not be used. The CHV PRM documents
   the message (vol07 p.193) but has no "A64 Qword Scattered Read" MSD page (vol02a lists Dword read/write and only the
   Qword *write*); Mesa never emits 64-bit memory messages on Gen8 (`elk_fs_nir.cpp`: 64-bit global loads are split into
   32-bit ones). Not tested on its own: the A64 QWord scattered write (the probe's compiler used dword scatter for it).
@@ -201,7 +204,11 @@ Analysis (offline, 2026-11-12):
   indexing (Gen9 `kernels.c` unchanged, md5 02e260eb); on Gen8 FP64 data moves as uint pairs (dword messages). The same
   build also avoids the other two FP64 forms CHV forbids: a `sub_group_broadcast` of a double with a variable lane (an
   indirect DF move, R2; now two dword broadcasts) and FP64 division (`math.invm`/`madm` with accumulators, R3; now an FP32
-  reciprocal refined by three Newton steps plus a quotient correction, DF mul/fma only; divisor in the FP32 range). Scan
+  reciprocal refined by three Newton steps plus a quotient correction, DF mul/fma only, both operands first scaled into
+  [1, 2) by their exponents; zero, infinity and NaN handled on the bit patterns as IEEE does). A CPU emulation with exact
+  FMA and a reciprocal error up to 1e-3 [EXP]: all 324 pairs of special and extreme values (signed zeros, inf, NaN,
+  subnormals, the largest number, 1e±300) equal IEEE `a / b`, 299 946 of 300 000 random pairs over the whole range are
+  correctly rounded and the other 54 are subnormal results off by 1 ulp (double rounding in the final scaling). Scan
   of the Gen8 build [SCAN]: no QWord messages and no R2/R3/R4 hits in any FP32 or FP64 kernel; only the FP16
   `trsm_inv*_h` kernels keep them (FP16 is not used on Gen8).
 
@@ -214,9 +221,8 @@ Analysis (offline, 2026-11-12):
 | DGEMM n = 16, 64, 256 | `pkd_a`, `pkd_b`, `dgemm_v` | max relative error 1e-16 .. 4e-16 |
 | DTRSM n = 64 | `trsm_inv0..3_d` (emulated division), `trsm_L/Y/store_d`, DGEMM, `gen9blas_epilog_trid` | relative residual 1.1e-16 |
 
-No reset, machine and services unaffected. With this, FP32 and FP64 run on the Cherryview through the whole
-GEMM/TRSM path and the level-1 kernels tried so far. Not yet run: the full test suites (`make check` assumes FP16), the
-remaining level-2 kernels, performance measurements.
+No reset, system unaffected. (The division used then was replaced later by the full-range version above; see
+section 6c for its hardware test.)
 
 ## 6c. Test suites on the Cherryview (2026-11-13) [MEAS]
 
@@ -239,12 +245,16 @@ SIMD8 and the A64 aligned OWord block read x4 (`intel_sub_group_block_read2`); w
 is not known [HYP]. They are only the faster variant, so on Gen8 `gen9blas.c` uses `skinny_k*` instead (as with
 `GEN9BLAS_SKINNY_R=0`).
 
-## 7. Open questions
+## 7. Open questions and known limitations
 
-- Does Cherryview accept the width-1 `<2;1,0>` 64-bit regions, and how does it behave on DW x DW `mul` with non-scalar
-  regions? (decides how much of section 3 must be rewritten)
-- Are `math.invm`/`madm` usable at all on Cherryview (R3 forbids ARF with 64-bit types)?
-- Is the snooped mapping coherent for command-streamer fetches of batch and state, or must those use Fix B/C?
-- Does the snoop in the page table win over MOCS "uncached"? Bandwidth cost of snooping vs uncached + clflush?
-- L3 bit 9: must kcl zero SLM/URB after an L3 reconfiguration, or use the values without bit 9 (0x60000121 / 0x80000140)?
-- Do Cherryview GPU resets ever freeze the whole system (not searched)?
+- Why `skinny_r4/r8` give wrong results (SIMD8? A64 OWord block read x4?); Gen8 uses `skinny_k*` instead (6c).
+- The A64 QWord scattered *write* was never tested on its own (no kernel of the Gen8 build uses it any more).
+- The accuracy of `native_recip` on the hardware is not measured; `div_chv` tolerates a 1e-3 error in emulation, and the
+  hardware test of the division (6c) is the check.
+- Snooping: coherent in all tests so far (including command-streamer fetches of the WC-mapped batch); its bandwidth cost
+  against uncached memory with clflush is not measured. No performance has been measured on Gen8 at all.
+- `est_ms` assumes 50 / 8 GFLOPS (FP32 / FP64) for band splitting, not measured; at the idle clock the peaks are lower.
+  With one request per kernel only a single launch has to fit the ~10 s heartbeat; only GEMM is band-split.
+- The 4 GB address space: when it is full, kcl waits for the GPU and retries, but does not evict cached userptr objects
+  (up to `KCL_USERPTR_MB`, default 1 GB); `KCL_ADDR` (2 MB alignment, colouring) is ignored on Gen8.
+- Five GPU hangs during the bring-up (2026-11-12/13) were all engine resets; the system kept running each time.

@@ -65,6 +65,7 @@ static uint64_t kbo_addr(uint64_t size);
 // a plain object is not coherent with CPU caches: KMAP_RW objects (the CPU reads them) are made snooped (SET_CACHING
 // CACHED), KMAP_WRITE objects (the CPU only writes them: batch, indirect data, ISA, constants) are mapped WC.
 enum { KMAP_NONE, KMAP_RW, KMAP_WRITE };
+static void kbo_release(kbo *b);
 static int kbo_new(uint64_t size, int map, kbo **out) {
     size = (size + 4095) & ~4095ull;
     kbo *b = calloc(1, sizeof *b);
@@ -74,14 +75,14 @@ static int kbo_new(uint64_t size, int map, kbo **out) {
     if (!b->addr) { struct drm_gem_close cl = { .handle = b->h }; ioctl(fd, DRM_IOCTL_GEM_CLOSE, &cl); free(b); return -1; }
     if (!dev.llc && map == KMAP_RW) {
         struct drm_i915_gem_caching ca = { .handle = b->h, .caching = I915_CACHING_CACHED };
-        if (ioctl(fd, DRM_IOCTL_I915_GEM_SET_CACHING, &ca)) return -1;
+        if (ioctl(fd, DRM_IOCTL_I915_GEM_SET_CACHING, &ca)) { kbo_release(b); return -1; }
     }
     if (map != KMAP_NONE) {
         struct drm_i915_gem_mmap_offset m = { .handle = b->h,
             .flags = !dev.llc && map == KMAP_WRITE ? I915_MMAP_OFFSET_WC : I915_MMAP_OFFSET_WB };
-        if (ioctl(fd, DRM_IOCTL_I915_GEM_MMAP_OFFSET, &m)) return -1;
+        if (ioctl(fd, DRM_IOCTL_I915_GEM_MMAP_OFFSET, &m)) { kbo_release(b); return -1; }
         b->map = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, m.offset);
-        if (b->map == MAP_FAILED) { b->map = NULL; return -1; }
+        if (b->map == MAP_FAILED) { b->map = NULL; kbo_release(b); return -1; }
     }
     *out = b; return 0;
 }

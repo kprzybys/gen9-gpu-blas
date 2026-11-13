@@ -31,8 +31,10 @@ unchanged: all 10 test suites pass and GEMM speed is 0.89-0.94 of the UHD 620, a
 **Gen8 (experimental):** Intel HD Graphics 400 (Braswell/Cherryview, Celeron N3010, 12 EU, Linux 7.0.0-43). One library
 binary selects the generation at start-up; the Gen8 kernels are compiled for Broadwell (`ocloc -device bdw`, the only
 Gen8 target of `ocloc`) with source changes for Cherryview's restrictions. FP32 and FP64 pass the GPU test suites
-(`test_basic`, `test_level3`, `test_level12`, `test_userptr`, `test_skinny`, `test_long_launch`); no FP16, no assembly
-kernels, the faster skinny-GEMM variant is off, and no performance has been measured yet. Details, sources and the
+(`test_basic`, `test_level3`, `test_level12` without the SciPy-referenced ROTG/ROTMG/ROTM cases, `test_userptr`,
+`test_skinny`, `test_long_launch`); the drop-in BLAS layer suites (`test_blas*`, which need OpenBLAS) were not run. No
+FP16, no assembly kernels, the faster skinny-GEMM variant is off, FP64 division is emulated (IEEE results except
+subnormal quotients, which may be off by 1 ulp), and no performance has been measured yet. Details, sources and the
 hardware findings (e.g. the A64 QWord scattered read hangs this GPU): [docs/gen8.md](docs/gen8.md).
 
 | Item | Value |
