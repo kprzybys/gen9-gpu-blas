@@ -710,31 +710,47 @@ __kernel void gen9blas_dequant_b16(__global const uchar *W, ulong row_bytes, int
 __kernel __attribute__((reqd_work_group_size(128, 1, 1)))
 void gen9blas_dequant_b16s(__global const uchar *W, ulong row_bytes, int qtype, int N, int Kp, int n0,
                            __global half *Bp, __global int *oor) {
-    __local uchar sm[16 * 272];
-    __local float pd[16 * 16], pm[16 * 8];   // per row and sub-block: scale (Q4_K d1, Q6_K dd*sc, Q8_0 d), Q4_K min m1
+    // SLM rows RS bytes apart: Q8_0 / Q4_K chunk + 4 B so that the 8 even rows read by 8 lanes in phase 3 fall in 8
+    // different banks (2 x 144 B = 72 dwords hit only banks 0 and 8: Q4_K was 1.6x slower than Q6_K with RS = 210)
+    __local uint sm1[16 * 276 / 4];
+    __local uchar *sm = (__local uchar *)sm1;
+    __local float pd[16 * 17], pm[16 * 9];   // per row (stride 17 / 9: no bank conflicts) and sub-block: scale
+                                             // (Q4_K d1, Q6_K dd*sc, Q8_0 d), Q4_K min m1
     const int t = get_local_id(0), g = n0 / 16 + get_group_id(0), j = get_global_id(1);
-    const int CB = qtype == 0 ? 272 : qtype == 1 ? 144 : 210;
-    for (int i = t; i < 16 * CB; i += 128) {
-        const int r = i / CB, n = g * 16 + r;
-        sm[i] = n < N ? W[(size_t)n * row_bytes + (size_t)j * CB + (i - r * CB)] : 0;
+    const int CB = qtype == 0 ? 272 : qtype == 1 ? 144 : 210, RS = qtype == 2 ? 210 : CB + 4;
+    if (qtype != 2) {   // Q8_0 / Q4_K: chunks of 272 / 144 B, rows and W 16 B aligned -> 16 B loads
+        const int C16 = CB / 16;
+        for (int i = t; i < 16 * C16; i += 128) {
+            const int r = i / C16, n = g * 16 + r;
+            const uint4 v = n < N ? *(__global const uint4 *)(W + (size_t)n * row_bytes + (size_t)j * CB + (i - r * C16) * 16)
+                                  : (uint4)(0);
+            __local uint *d = sm1 + (r * RS + (i - r * C16) * 16) / 4;
+            d[0] = v.s0; d[1] = v.s1; d[2] = v.s2; d[3] = v.s3;
+        }
+    } else {            // Q6_K: 210 B chunks, only 2 B alignment -> 2 B loads
+        __local ushort *sm2 = (__local ushort *)sm1;
+        for (int i = t; i < 16 * 105; i += 128) {
+            const int r = i / 105, n = g * 16 + r;
+            sm2[i] = n < N ? *(__global const ushort *)(W + (size_t)n * row_bytes + (size_t)j * 210 + (i - r * 105) * 2) : 0;
+        }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
     {   // phase 2: sub-block parameters, same products as ggml (no FMA)
         const int r = t / 8, sb = t % 8;
-        __local const uchar *b = sm + r * CB;
+        __local const uchar *b = sm + r * RS;
         if (qtype == 0) {
-            pd[r * 16 + sb] = vload_half(0, (__local const half *)(b + sb * 34));
+            pd[r * 17 + sb] = vload_half(0, (__local const half *)(b + sb * 34));
         } else if (qtype == 1) {
             const float dd = vload_half(0, (__local const half *)b), mn = vload_half(1, (__local const half *)b);
             __local const uchar *sc = b + 4;
             const int is = sb;
             const uint scv = is < 4 ? sc[is] & 63 : (sc[is + 4] & 0xF) | ((sc[is - 4] >> 6) << 4);
             const uint mv = is < 4 ? sc[is + 4] & 63 : (sc[is + 4] >> 4) | ((sc[is] >> 6) << 4);
-            pd[r * 16 + sb] = dd * (float)scv; pm[r * 8 + sb] = mn * (float)mv;
+            pd[r * 17 + sb] = dd * (float)scv; pm[r * 9 + sb] = mn * (float)mv;
         } else {
             const float dd = vload_half(0, (__local const half *)(b + 208));
             __local const char *sc = (__local const char *)(b + 192);
-            pd[r * 16 + sb] = dd * (float)sc[sb]; pd[r * 16 + 8 + sb] = dd * (float)sc[8 + sb];
+            pd[r * 17 + sb] = dd * (float)sc[sb]; pd[r * 17 + 8 + sb] = dd * (float)sc[8 + sb];
         }
     }
     barrier(CLK_LOCAL_MEM_FENCE);
@@ -749,18 +765,18 @@ void gen9blas_dequant_b16s(__global const uchar *W, ulong row_bytes, int qtype, 
         float2 v;
         if (qtype == 0) {
             const int o = (k / 32) * 34 + 2 + k % 32, p = k / 32;
-            v.x = (float)(char)sm[r0 * 272 + o] * pd[r0 * 16 + p];
-            v.y = (float)(char)sm[(r0 + 1) * 272 + o] * pd[(r0 + 1) * 16 + p];
+            v.x = (float)(char)sm[r0 * RS + o] * pd[r0 * 17 + p];
+            v.y = (float)(char)sm[(r0 + 1) * RS + o] * pd[(r0 + 1) * 17 + p];
         } else if (qtype == 1) {
             const int grp = k / 64, hi = (k % 64) >= 32, o = 16 + grp * 32 + k % 32, p = 2 * grp + hi, sh = hi ? 4 : 0;
-            v.x = pd[r0 * 16 + p] * (float)((sm[r0 * 144 + o] >> sh) & 0xF) - pm[r0 * 8 + p];
-            v.y = pd[(r0 + 1) * 16 + p] * (float)((sm[(r0 + 1) * 144 + o] >> sh) & 0xF) - pm[(r0 + 1) * 8 + p];
+            v.x = pd[r0 * 17 + p] * (float)((sm[r0 * RS + o] >> sh) & 0xF) - pm[r0 * 9 + p];
+            v.y = pd[(r0 + 1) * 17 + p] * (float)((sm[(r0 + 1) * RS + o] >> sh) & 0xF) - pm[(r0 + 1) * 9 + p];
         } else {
             const int nn = k / 128, kr = k % 128, qu = kr / 32, l = kr % 32;
             const int ol = nn * 64 + (qu & 1) * 32 + l, oh = 128 + nn * 32 + l, sl = qu >= 2 ? 4 : 0, shh = 2 * qu, p = k / 16;
-            v.x = pd[r0 * 16 + p] * (float)((int)(((sm[r0 * 210 + ol] >> sl) & 0xF) | (((sm[r0 * 210 + oh] >> shh) & 3) << 4)) - 32);
-            v.y = pd[(r0 + 1) * 16 + p] *
-                  (float)((int)(((sm[(r0 + 1) * 210 + ol] >> sl) & 0xF) | (((sm[(r0 + 1) * 210 + oh] >> shh) & 3) << 4)) - 32);
+            v.x = pd[r0 * 17 + p] * (float)((int)(((sm[r0 * RS + ol] >> sl) & 0xF) | (((sm[r0 * RS + oh] >> shh) & 3) << 4)) - 32);
+            v.y = pd[(r0 + 1) * 17 + p] *
+                  (float)((int)(((sm[(r0 + 1) * RS + ol] >> sl) & 0xF) | (((sm[(r0 + 1) * RS + oh] >> shh) & 3) << 4)) - 32);
         }
         if (z0) v.x = 0;
         if (z1) v.y = 0;
