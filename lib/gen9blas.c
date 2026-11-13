@@ -503,7 +503,39 @@ static int epilogue_host(type_t *r, cl_mem Cp, int ldp, void *C, int M, int N, i
 
 // ---------------- packed B kept between calls (constant weights; ggml backend, docs/ggml-backend-design.md) ----------------
 
-struct gen9blas_packed { int type, K, N, Np, Kp; cl_mem buf; };
+struct gen9blas_packed { int type, K, N, Np, Kp; cl_mem buf; size_t bufsize; };
+
+// Spare packed buffers: gen9blas_packed_free keeps up to SPARES freed buffers (GEN9BLAS_SPARE_MB in all, default 512)
+// and the next packing takes the smallest one that fits. A new buffer costs about as much as the dequantization
+// itself (i915 zeroes its pages: ~3.7 GB/s with userptr, 2026-11-13); this matters for weights packed on every use.
+#define SPARES 4
+static struct { cl_mem m; size_t sz; } spare[SPARES];
+static size_t spare_cap(void) {
+    static size_t v = (size_t)-1;
+    if (v == (size_t)-1) { const char *e = getenv("GEN9BLAS_SPARE_MB"); v = (size_t)(e ? atof(e) : 512) << 20; }
+    return v;
+}
+static cl_mem packed_buf(size_t need, size_t *got, cl_int *err) {
+    int best = -1;
+    for (int i = 0; i < SPARES; i++)
+        if (spare[i].m && spare[i].sz >= need && (best < 0 || spare[i].sz < spare[best].sz)) best = i;
+    if (best >= 0) { cl_mem m = spare[best].m; *got = spare[best].sz; spare[best].m = NULL; *err = CL_SUCCESS; return m; }
+    *got = need;
+    return clCreateBuffer(ctx, CL_MEM_READ_WRITE, need, NULL, err);
+}
+static void packed_buf_release(cl_mem m, size_t sz) {
+    size_t total = sz; int freei = -1, smallest = -1;
+    for (int i = 0; i < SPARES; i++) {
+        if (!spare[i].m) { if (freei < 0) freei = i; continue; }
+        total += spare[i].sz;
+        if (smallest < 0 || spare[i].sz < spare[smallest].sz) smallest = i;
+    }
+    if (freei < 0 && smallest >= 0 && spare[smallest].sz < sz) {   // full: replace the smallest by a larger one
+        total -= spare[smallest].sz; clReleaseMemObject(spare[smallest].m); spare[smallest].m = NULL; freei = smallest;
+    }
+    if (freei < 0 || total > spare_cap()) { clReleaseMemObject(m); return; }
+    spare[freei].m = m; spare[freei].sz = sz;
+}
 
 static size_t pack_band_bytes(void) {
     static size_t v = 0;
@@ -546,13 +578,13 @@ gen9blas_packed *gen9blas_pack_b(int type, int tB, int K, int N, const void *B, 
     P->type = type; P->K = K; P->N = N;
     P->Np = (N + r->tn - 1) / r->tn * r->tn; P->Kp = (K + r->km - 1) / r->km * r->km;
     cl_int err;
-    P->buf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, (size_t)P->Np * P->Kp * r->es + 4096, NULL, &err);
+    P->buf = packed_buf((size_t)P->Np * P->Kp * r->es + 4096, &P->bufsize, &err);
     if (err != CL_SUCCESS) { snprintf(errbuf, sizeof errbuf, "pack_b: clCreateBuffer = %d", err); free(P); return NULL; }
     if (pack_b_bands(r, tB, B, ldb, P)) {   // userptr failures show up late (argument / submission): retry with a copy
         force_copy = 1; NEW_OPERATION();
         int rc = pack_b_bands(r, tB, B, ldb, P);
         force_copy = 0;
-        if (rc) { clReleaseMemObject(P->buf); free(P); return NULL; }
+        if (rc) { packed_buf_release(P->buf, P->bufsize); free(P); return NULL; }
     }
     return P;
 }
@@ -618,14 +650,14 @@ gen9blas_packed *gen9blas_pack_b_q(int qtype, int K, int N, const void *W, size_
     P->Np = (N + r->tn - 1) / r->tn * r->tn; P->Kp = (K + r->km - 1) / r->km * r->km;
     if (P->Kp != K) { snprintf(errbuf, sizeof errbuf, "pack_b_q: K = %d not a multiple of %d", K, r->km); free(P); return NULL; }
     cl_int err;
-    P->buf = clCreateBuffer(ctx, CL_MEM_READ_WRITE, (size_t)P->Np * P->Kp * 2 + 4096, NULL, &err);
+    P->buf = packed_buf((size_t)P->Np * P->Kp * 2 + 4096, &P->bufsize, &err);
     if (err != CL_SUCCESS) { snprintf(errbuf, sizeof errbuf, "pack_b_q: clCreateBuffer = %d", err); free(P); return NULL; }
     *nf = 0;
     if (pack_b_q_bands(qtype, row_bytes, W, P, nf)) {   // userptr failures show up late: retry with a copy
         force_copy = 1; NEW_OPERATION(); *nf = 0;
         int rc = pack_b_q_bands(qtype, row_bytes, W, P, nf);
         force_copy = 0;
-        if (rc) { clReleaseMemObject(P->buf); free(P); return NULL; }
+        if (rc) { packed_buf_release(P->buf, P->bufsize); free(P); return NULL; }
     }
     *out_of_range = *nf != 0;
     return P;
@@ -634,7 +666,7 @@ gen9blas_packed *gen9blas_pack_b_q(int qtype, int K, int N, const void *W, size_
 void gen9blas_packed_free(gen9blas_packed *P) {
     if (!P) return;
     wait_gpu();
-    clReleaseMemObject(P->buf); free(P);
+    packed_buf_release(P->buf, P->bufsize); free(P);
 }
 
 int gen9blas_gemm_pb(int type, int tA, int M, double alpha, const void *A, int lda, const gen9blas_packed *P,
