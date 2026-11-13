@@ -617,8 +617,9 @@ __kernel void gen9blas_dequant_b16(__global const uchar *W, ulong row_bytes, int
         __global const uchar *s = b + 4, *q = b + 16;
         for (int jj = 0, is = 0; jj < 256; jj += 64, is += 2, q += 32) {
             // ggml get_scale_min_k4 for is and is + 1, in scalars. A first version kept them in private arrays
-            // (uchar sc[2], m[2]): nondeterministic wrong values for N >= 1024 (not at 256-512), cause not found (no
-            // scratch / private memory in its ze_info; SIMD8 as compiled, but this version is exact at SIMD8 too).
+            // (uchar sc[2], m[2]): IGC put them in a 1 KB scratch buffer addressed through r0.5, which kcl does not set
+            // up -> threads overwrote each other, wrong values from N ~ 1024 under kcl, exact through NEO (2026-11-13).
+            // lib/gen_kernels.py now rejects such kernels (per_thread_memory_buffers: scratch).
             const int i0 = is, i1 = is + 1;
             const uint sc0 = i0 < 4 ? s[i0] & 63 : (s[i0 + 4] & 0xF) | ((s[i0 - 4] >> 6) << 4);
             const uint mm0 = i0 < 4 ? s[i0 + 4] & 63 : (s[i0 + 4] >> 4) | ((s[i0] >> 6) << 4);

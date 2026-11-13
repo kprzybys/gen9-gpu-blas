@@ -1,6 +1,8 @@
 """Generates kernels.c: the ISA code and descriptors of all libgen9blas kernels for the kcl layer (no NEO, directly via i915).
 
 Run (the Makefile does it): python3 gen_kernels.py <bench dir> <work dir> > kernels.c
+Other tables (e.g. bench/attn_kcl, which links kcl.c without the library): python3 gen_kernels.py <dir> <work dir>
+<binary.bin> ... > table.c -- only the listed binaries from <dir> (whl binaries; kcl does no device check).
 Programs as in gen9blas.c: OpenCL C sources compiled with `ocloc -device whl` with the same options as NEO used to get
 (clBuildProgram) and binaries from our assembler (gen_*.bin). For each kernel in .ze_info: SIMD, sizes of cross-thread and
 per-thread data, argument offsets (value / stateless pointer / stateful from the binding table), SLM, barrier,
@@ -23,6 +25,8 @@ PROGRAMS = [
     ("level12.cl", "-cl-std=CL3.0 -DHALF"), ("level12.cl", "-cl-std=CL3.0"), ("level12.cl", "-cl-std=CL3.0 -DDBL"),
     ("gen_h.bin", None), ("gen_hd.bin", None), ("gen_s.bin", None),
 ]
+if len(sys.argv) > 3:   # an explicit list of assembler binaries instead of the library's programs
+    PROGRAMS = [(f, None) for f in sys.argv[3:]]
 VALUES = ("arg_byvalue",)
 SPECIAL = {"local_size": "ls", "enqueued_local_size": "els", "global_id_offset": "gid", "global_size": "gs",
              "num_work_groups": "ng"}
@@ -92,6 +96,16 @@ for pi, (file, options) in enumerate(PROGRAMS):
         for key in ("per_thread_scratch_size", "spill_size", "has_stack_calls", "inline_data_payload_size"):
             if env.get(key):
                 unsup.append(key)
+        # Private arrays that IGC places in scratch (addressed through the r0.5 scratch offset) are declared only here, not
+        # in execution_env: without a scratch space every thread hit the same addresses -> the Q4_K dequant kernel with
+        # uchar sc[2], m[2] was nondeterministically wrong from N ~ 1024 (2026-11-13; correct through NEO).
+        # The six GEMV-N kernels (level12.cl, private int a0[RW], a1[RW], R s[RW]) declare a scratch buffer too and also
+        # address it through r0.5, yet give exact results in test_level12.py and in a stress test (M up to 65533, odd sizes,
+        # all three GEMV_N modes, 2026-11-13). Why they are not hit is not understood; they are allowed by name only.
+        SCRATCH_OK = {"gemv_n_h", "gemv_n_f", "gemv_n_d", "gemv_nw_h", "gemv_nw_f", "gemv_nw_d"}
+        for b in k.get("per_thread_memory_buffers", []):
+            if b.get("type") == "scratch" and b.get("size") and n not in SCRATCH_OK:
+                unsup.append(f"scratch buffer {b['size']} B")
         bti = {b["arg_index"]: b["bti_value"] for b in k.get("binding_table_indices", [])}
         arg = {}   # indeks -> [off, size, wsk, bti, off_adr, off_boff]
         special = {v: [] for v in SPECIAL.values()}
