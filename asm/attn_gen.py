@@ -248,15 +248,19 @@ def igc_maps(pro, loop, epi, P):
         n = isa.exec_size(l)
         if op == "send":
             dst, src = isa.send_regs(l)
-            base, off = addr.get(src[0], (src[0], 0))
+            base, off = addr.get(src[0], ((src[0], 0), 0))
             for gi, r in enumerate(dst):
                 val[r] = ("mem", base, off, gi)
             continue
         ops = isa.operands(l)
         if op in ("add", "mov") and ops and ops[0][4] in ("q", "uq"):
             # addresses: kept apart from the data tags, since a (1|M0) :q write leaves the rest of the GRF intact
+            # base = (register, :q subregister) of the pointer IGC keeps across the loop: IGC may hold it in
+            # r6.1:q, not r6.0 (seen with -DHKV_INNER; ignoring the subregister gave a wrong binary, error 1.0)
             sr = int(ops[1][1][1:])
-            base, off = addr.get(sr, (sr, 0))
+            if sr not in addr:
+                assert ops[1][4] in ("q", "uq") or ops[1][2] == 0, ("address taken from a non-:q subregister", l)
+            base, off = addr.get(sr, ((sr, ops[1][2]), 0))
             off += (imm(l) or 0) if op == "add" else 0
             for r in isa.span(ops[0], n):
                 addr[r] = (base, off)
@@ -426,7 +430,7 @@ def sched(pro, loop, epi, P, NS):
     qregs, oregs = set(M["q"].values()), set(M["o"].values())
     kp, vp = M["kp"], M["vp"]
     cnt, lim = M["cnt"], M["lim"]
-    busy = {0} | qregs | oregs | set(M["l"]) | {kp, kp + 1, vp, vp + 1}
+    busy = {0} | qregs | oregs | set(M["l"]) | {kp[0], kp[0] + 1, vp[0], vp[0] + 1}
     busy |= {int(re.match(r"r(\d+)", x).group(1)) for x in (cnt, lim)}
     epi_live, epi_hdr = live_in(epi)
     busy |= epi_live - epi_hdr          # epilogue send headers: zeroed after the loop instead (see live_in)
@@ -456,7 +460,7 @@ def sched(pro, loop, epi, P, NS):
     hV = [A.one() for _ in range(nv)]
     rs = HKV * D * 2                                    # V row stride (bytes)
     out = [f"// --- attn_gen sched: NS={NS} slots={slots} S={S} Pe={Pe} Po={Po} L={L} M=r{Mx} headers K{hK} V{hV}; "
-           f"IGC: kp=r{kp} vp=r{vp} cnt={cnt} lim={lim} l={M['l']}; {nfree} free registers, {len(A.free)} left"]
+           f"IGC: kp=r{kp[0]}.{kp[1]}:q vp=r{vp[0]}.{vp[1]}:q cnt={cnt} lim={lim} l={M['l']}; {nfree} free registers, {len(A.free)} left"]
     # Q permutation: element (r, c, i) must sit in a register of parity 1 - (i // 2) % 2 (slot bases even).
     need = {(M["q"][(r, c)], i): 1 - (i // 2) % 2 for (r, c) in M["q"] for i in range(8)}
     mis = {0: [], 1: []}
@@ -478,9 +482,9 @@ def sched(pro, loop, epi, P, NS):
     for h in hK + hV:
         out.append(f"{W}mov (8|M0)  r{h}.0<1>:ud  0x0:ud")
     for k in range(NK):
-        out.append(f"{W}add (1|M0)  r{hK[k]}.0<1>:q  r{kp}.0<0;1,0>:q  {k * D * 16}:w")
+        out.append(f"{W}add (1|M0)  r{hK[k]}.0<1>:q  r{kp[0]}.{kp[1]}<0;1,0>:q  {k * D * 16}:w")
     for h in range(nv):
-        out.append(f"{W}add (1|M0)  r{hV[h]}.0<1>:q  r{vp}.0<0;1,0>:q  {h * 128}:w")
+        out.append(f"{W}add (1|M0)  r{hV[h]}.0<1>:q  r{vp[0]}.{vp[1]}<0;1,0>:q  {h * 128}:w")
     nks, nvs = D // 8, 8 * NK
     nsteps = nks + nvs
 

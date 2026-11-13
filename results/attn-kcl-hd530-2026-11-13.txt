@@ -1,0 +1,404 @@
+# Attention asm kernel through kcl on userptr memory in llama.cpp's KV layout (docs/attention-gpu.md section 10)
+# Desktop "tc": HD 530 (i5-6500; Gen9 GT2, 24 EU, max 1050 MHz), production server (TV streaming ~30 % of one core);
+# every command nice -n 19 + ionice idle + timeout; per launch <= ~90 ms. NEO 24.35.30872.36 for the NEO runs.
+# Host programs: bench/attn_kcl.c (kcl + userptr, llama.cpp layout), bench/attn.c (NEO, device buffers; QTOK=1 = Q in
+# llama.cpp's layout). Binaries: asm/Makefile attn, *_tok = template with -DQTOK (Q[t][h][d]); kcl table from the
+# whl binaries (lib/gen_kernels.py with an explicit binary list), NEO runs with the skl binaries.
+# Rates: 4 * n_q * n_k * H * d_head / time. Error: max |O - O_ref| / max |O_ref| vs FP64.
+
+## Binary choice (laptop, before any GPU run)
+skl and whl builds of attn_qwen / attn_llama (and *_tok) have byte-identical .text.k_attn, .text.k_kt, .ze_info,
+.symtab and build options; only .note.intelgt.compat (the device id NEO checks) differs. kcl ignores that note, so
+either runs on HD 530 through kcl; the kcl table uses the whl binaries (as lib/kernels.c does for the GEMMs).
+QTOK binaries: same generated loop (1494 / 1475 lines, 1024 mads, 0 conflicts), only IGC's prologue differs; the
+four existing hashes in asm/attn_sha256.txt unchanged.
+
+## Smoke test (16:10)
+# LAYERS=2 PASSES=2 STEP=1 ./attn_kcl 12 2 128 64 256 2 2
+layer 0: err 1.89e-06 (tokens 64/64, STEP 1)    layer 1: err 2.77e-06 (tokens 64/64, STEP 1)
+
+## Step 1 predictions (written 2026-11-13 16:10 before the runs)
+- Kernel-only rate through kcl + userptr: same ISA, V read from userptr in a sequential walk (~8 keys per 4 KB page
+  per KV head, all threads within a few hundred keys of each other, so tens of pages at once, not hundreds):
+  Qwen 285-296 GFLOPS, Llama 300-311 (0-4 % below NEO device buffers). QTOK vs the old Q layout under NEO: +-1 %.
+- k_kt through kcl (SIMD32, local 256, K from userptr): 0.25-0.35 ms per layer at n_k 4096 (NEO 0.28).
+- Incl. k_kt: -1 %; incl. submission + wait per layer (one execbuf + GEM_WAIT, ~50-150 us): another -0.1..-0.3 %.
+- Verdict: PASS (>= 270 on Qwen incl. pre-pass), expected ~285-292.
+- First use (pinning, 0.45 us CPU per 4 KB page): KV_SIZE 4096: 2 x 2 MB per layer = 1024 pages = ~0.5 ms per
+  layer, ~13 ms for 28 layers (+ ~0.7 ms for Q/O 6 MB once); KV_SIZE 8192: ~0.9 ms per layer, ~26 ms. Steady state:
+  no pinning (cache hits). REG=view (n_k rows) pins less the first time but re-pins whenever n_kv grows.
+- OA vs the NEO run: EuStall 2-4 %, idle ~20 %, L3 110-120 GB/s, GTI read higher by at most a few GB/s (userptr
+  pages are in the same LLC/RAM); no userptr page effect visible.
+
+## Step 2 predictions: work-group size (written 2026-11-13 16:16 before the runs)
+Model: a work-group's L/8 SIMD8 threads go to one subslice (8 EU x 7 threads = 56 slots), so the resident
+fraction is floor(56 / (L/8)) * (L/8) / 56: L 8, 16, 32, 64 -> 100 %; 24, 48 -> 96 %; 96, 128 -> 86 %.
+If the ~20 % idle EU time (Qwen) came only from this cap, 64 would beat 128 by up to 16 %; but the OpenCL C
+variant A was 10 % slower at 64 than at 128 and LOCAL=24 was +3.5 % in one run, so a second factor (L3 reuse of
+the K/V stream by the threads of a group, which run in lockstep over the keys) is expected to work against small
+groups.
+- Qwen (global 24576, valid L: 8 16 24 32 48 64 96 128): best at 24 or 48, +3..6 % over 128 (305-312 GFLOPS);
+  32 and 64 within +-3 % of 128; 8 and 16 worse (-5..-15 %) with GTI read up; idle down where the cap rises.
+- Llama (global 32768, valid L: 8 16 32 64 128): 128 best or 64 within 2 %; 8 and 16 worse.
+- Grid order (all query rows of KV head 0 before head 1 vs interleaved): not run unless the counters show the
+  work-group size is not the lever.
+
+## Grid order prediction (written 2026-11-13 16:20 before the run; work-group size results are already in)
+Variant HKV_INNER (template asm/attn.cl -DHKV_INNER): hkv = sg % HKV, so neighbouring subgroups (and the threads of
+one work-group) walk different KV heads; default: all rows of head 0 first. Prediction: no gain; Qwen equal or up to
+-3 % (two K/V streams per group instead of one, GTI read up), Llama (8 heads, 4 rows) -2..-6 %. Run with LOCAL 64
+and 128 on NEO, alternating with the default order.
+
+## Step 1 runs, raw output (16:10-16:16; LOCAL 128 everywhere in this section, the then default)
+attn_kcl lines: "pass 0" = first use (userptr pinning of every layer's K/V pages and of Q/O), "host part" = wall
+minus kernel times per layer, "steady" = median of the passes after pass 0; GFLOPS kernel-only, incl. k_kt, and incl.
+k_kt + submission + wait (wall). NEO lines: bench/attn (device buffers, best of 5).
+
+### Alternating rounds kcl / NEO, n_q 512, n_k 4096 (STEP 0/512: speed only)
+# 2026-11-13 16:10:39 round 1: kcl Qwen KV_SIZE 4096
+# attn_qwen_tok.bin H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | KV_SIZE=4096 LAYERS=28 REG=tensor local=128 kt_local=256 | KV buffer 117.4 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 1289.0 ms, CPU 38.4 ms, kernels attn 1235.9 + kt 7.86 ms -> first-use extra 43.5 ms wall over the steady pass (1.55 ms per layer)
+first layer of pass 0: wall 63.77 ms (kt 0.272 attn 47.835) vs steady median layer wall 44.48 ms
+steady (median of 5 passes x 28 layers): attn 43.96 ms/layer, kt 0.277 ms/layer, wall 44.48 ms/layer, pass CPU 57.6 ms | attn 293.1 GFLOPS, incl. kt 291.3, incl. kt + submit/wait 289.7 | best layer attn 43.604 ms = 295.5 GFLOPS (kt 0.272) | GPU~1000 MHz
+# 2026-11-13 16:10:50 round 1: NEO QTOK Qwen
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 QTOK | sg=8 local=128 spill=0 private=0 ktpad=4096 | kt 0.284 ms attn 43.815 ms | attn 294.1 GFLOPS, incl. kt 292.2 | err 1.67e-06 (tokens 2/512, STEP 512) | GPU~1000 MHz
+# 2026-11-13 16:10:50 round 1: NEO old layout Qwen
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | sg=8 local=128 spill=0 private=0 ktpad=4096 | kt 0.278 ms attn 43.713 ms | attn 294.8 GFLOPS, incl. kt 292.9 | err 2.15e-06 (tokens 2/512, STEP 512) | GPU~1000 MHz
+# 2026-11-13 16:10:51 round 1: kcl Llama KV_SIZE 4096 LAYERS 16
+# attn_llama_tok.bin H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 | KV_SIZE=4096 LAYERS=16 REG=tensor local=128 kt_local=256 | KV buffer 134.2 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 934.9 ms, CPU 36.3 ms, kernels attn 897.1 + kt 9.50 ms -> first-use extra 32.9 ms wall over the steady pass (2.05 ms per layer)
+steady (median of 5 passes x 16 layers): attn 55.58 ms/layer, kt 0.567 ms/layer, wall 56.38 ms/layer, pass CPU 41.1 ms | attn 309.1 GFLOPS, incl. kt 306.0, incl. kt + submit/wait 304.7 | best layer attn 55.103 ms = 311.8 GFLOPS (kt 0.551) | GPU~1000 MHz
+# 2026-11-13 16:10:59 round 1: NEO QTOK Llama
+H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 QTOK | sg=8 local=128 spill=0 private=0 ktpad=2048 | kt 0.608 ms attn 55.341 ms | attn 310.4 GFLOPS, incl. kt 307.1 | err 2.56e-06 (tokens 2/512, STEP 512) | GPU~1000 MHz
+# round 2 (16:11:00-16:11:21)
+steady (median of 5 passes x 28 layers): attn 43.91 ms/layer, kt 0.277 ms/layer, wall 44.40 ms/layer, pass CPU 57.5 ms | attn 293.4 GFLOPS, incl. kt 291.6, incl. kt + submit/wait 290.2 | best layer attn 43.413 ms = 296.8 GFLOPS (kt 0.273) | GPU~1000 MHz
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 QTOK | sg=8 local=128 spill=0 private=0 ktpad=4096 | kt 0.286 ms attn 43.736 ms | attn 294.6 GFLOPS, incl. kt 292.7 | err 1.67e-06 (tokens 2/512, STEP 512) | GPU~1000 MHz
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | sg=8 local=128 spill=0 private=0 ktpad=4096 | kt 0.278 ms attn 43.690 ms | attn 294.9 GFLOPS, incl. kt 293.0 | err 2.15e-06 (tokens 2/512, STEP 512) | GPU~1000 MHz
+steady (median of 5 passes x 16 layers): attn 55.57 ms/layer, kt 0.566 ms/layer, wall 56.34 ms/layer, pass CPU 39.6 ms | attn 309.1 GFLOPS, incl. kt 306.0, incl. kt + submit/wait 304.9 | best layer attn 55.106 ms = 311.8 GFLOPS (kt 0.550) | GPU~1000 MHz
+H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 QTOK | sg=8 local=128 spill=0 private=0 ktpad=2048 | kt 0.563 ms attn 55.190 ms | attn 311.3 GFLOPS, incl. kt 308.1 | err 2.56e-06 (tokens 2/512, STEP 512) | GPU~1000 MHz
+# round 3 (16:11:21-16:11:42)
+steady (median of 5 passes x 28 layers): attn 43.92 ms/layer, kt 0.277 ms/layer, wall 44.40 ms/layer, pass CPU 56.6 ms | attn 293.4 GFLOPS, incl. kt 291.5, incl. kt + submit/wait 290.2 | best layer attn 43.428 ms = 296.7 GFLOPS (kt 0.272) | GPU~1000 MHz
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 QTOK | sg=8 local=128 spill=0 private=0 ktpad=4096 | kt 0.283 ms attn 43.830 ms | attn 294.0 GFLOPS, incl. kt 292.1 | err 1.67e-06 (tokens 2/512, STEP 512) | GPU~1000 MHz
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | sg=8 local=128 spill=0 private=0 ktpad=4096 | kt 0.282 ms attn 43.731 ms | attn 294.6 GFLOPS, incl. kt 292.8 | err 2.15e-06 (tokens 2/512, STEP 512) | GPU~1000 MHz
+steady (median of 5 passes x 16 layers): attn 55.62 ms/layer, kt 0.563 ms/layer, wall 56.39 ms/layer, pass CPU 40.3 ms | attn 308.9 GFLOPS, incl. kt 305.8, incl. kt + submit/wait 304.7 | best layer attn 55.202 ms = 311.2 GFLOPS (kt 0.548) | GPU~1000 MHz
+H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 QTOK | sg=8 local=128 spill=0 private=0 ktpad=2048 | kt 0.579 ms attn 55.129 ms | attn 311.6 GFLOPS, incl. kt 308.4 | err 2.56e-06 (tokens 2/512, STEP 512) | GPU~1000 MHz
+(The "pass CPU" of these first runs was process CPU incl. the clock-sampler thread; later runs print the main
+thread only: 2-3.5 ms per 28-layer pass.)
+Medians: Qwen kcl 293.4 (293.1-293.4) kernel, 291.5 incl. kt, 290.2 incl. submit/wait; NEO QTOK 294.1 (294.0-294.6),
+old layout 294.8 (294.6-294.9). Llama kcl 309.1 (308.9-309.1), 306.0, 304.7; NEO QTOK 311.3 (310.4-311.6).
+
+### Acceptance and variants (16:12-16:15)
+# 2026-11-13 16:12:24 STEP=1 nice -n 19 ionice -c3 timeout 150 ./attn_kcl 12 2 128 512 4096 2 2
+# attn_qwen_tok.bin H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | KV_SIZE=4096 LAYERS=28 REG=tensor local=128 kt_local=256 | KV buffer 117.4 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 1286.8 ms, CPU (main thread) 25.4 ms, kernels attn 1231.5 + kt 7.89 ms -> first-use extra 40.4 ms wall over the steady pass (1.44 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.693 ms, steady 0.202 ms -> first use 1.490 ms per layer; pass 0 layers 0-3: wall/attn 60.29/44.17 46.11/44.02 45.90/43.85 45.77/44.02 ms; steady median layer wall 44.51 ms
+steady (median of 5 passes x 28 layers): attn 44.01 ms/layer, kt 0.278 ms/layer, wall 44.51 ms/layer, pass CPU (main thread) 3.0 ms | attn 292.8 GFLOPS, incl. kt 290.9, incl. kt + submit/wait 289.5 | best layer attn 43.617 ms = 295.4 GFLOPS (kt 0.273) | GPU~1000 MHz
+layer 0: err 3.76e-06 (tokens 512/512, STEP 1)
+layer 27: err 3.68e-06 (tokens 512/512, STEP 1)
+# 2026-11-13 16:12:50 STEP=1 LAYERS=16 nice -n 19 ionice -c3 timeout 150 ./attn_kcl 32 8 64 512 4096 4 2
+# attn_llama_tok.bin H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 | KV_SIZE=4096 LAYERS=16 REG=tensor local=128 kt_local=256 | KV buffer 134.2 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 932.2 ms, CPU (main thread) 21.5 ms, kernels attn 895.7 + kt 9.36 ms -> first-use extra 30.0 ms wall over the steady pass (1.87 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.694 ms, steady 0.205 ms -> first use 1.489 ms per layer; pass 0 layers 0-3: wall/attn 63.83/60.69 58.31/56.48 58.24/55.45 58.46/55.67 ms; steady median layer wall 56.39 ms
+steady (median of 5 passes x 16 layers): attn 55.61 ms/layer, kt 0.569 ms/layer, wall 56.39 ms/layer, pass CPU (main thread) 1.7 ms | attn 308.9 GFLOPS, incl. kt 305.8, incl. kt + submit/wait 304.7 | best layer attn 55.142 ms = 311.6 GFLOPS (kt 0.550) | GPU~1000 MHz
+layer 0: err 2.54e-06 (tokens 512/512, STEP 1)
+layer 15: err 3.30e-06 (tokens 512/512, STEP 1)
+# 2026-11-13 16:13:35 KV_SIZE=8192 nice -n 19 ionice -c3 timeout 150 ./attn_kcl 12 2 128 512 4096 2 2
+# attn_qwen_tok.bin H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | KV_SIZE=8192 LAYERS=28 REG=tensor local=128 kt_local=256 | KV buffer 234.9 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 1297.6 ms, CPU (main thread) 35.3 ms, kernels attn 1231.1 + kt 7.93 ms -> first-use extra 54.2 ms wall over the steady pass (1.93 ms per layer)
+host part (wall - kernels) per layer: pass 0 2.089 ms, steady 0.209 ms -> first use 1.880 ms per layer; pass 0 layers 0-3: wall/attn 63.32/43.93 46.60/44.07 46.58/44.03 46.52/44.01 ms; steady median layer wall 44.41 ms
+steady (median of 5 passes x 28 layers): attn 43.93 ms/layer, kt 0.277 ms/layer, wall 44.41 ms/layer, pass CPU (main thread) 2.9 ms | attn 293.3 GFLOPS, incl. kt 291.5, incl. kt + submit/wait 290.2 | best layer attn 43.421 ms = 296.7 GFLOPS (kt 0.271) | GPU~1000 MHz
+layer 0: err 3.42e-06 (tokens 74/512, STEP 7)
+layer 27: err 3.77e-06 (tokens 74/512, STEP 7)
+# 2026-11-13 16:13:48 KV_SIZE=8192 REG=view nice -n 19 ionice -c3 timeout 150 ./attn_kcl 12 2 128 512 4096 2 2
+# attn_qwen_tok.bin H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | KV_SIZE=8192 LAYERS=28 REG=view local=128 kt_local=256 | KV buffer 234.9 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 1277.4 ms, CPU (main thread) 23.4 ms, kernels attn 1236.9 + kt 8.01 ms -> first-use extra 32.2 ms wall over the steady pass (1.15 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.157 ms, steady 0.223 ms -> first use 0.933 ms per layer; pass 0 layers 0-3: wall/attn 51.90/49.08 45.85/44.59 46.36/44.26 46.17/43.96 ms; steady median layer wall 44.47 ms
+steady (median of 5 passes x 28 layers): attn 43.98 ms/layer, kt 0.277 ms/layer, wall 44.47 ms/layer, pass CPU (main thread) 3.1 ms | attn 293.0 GFLOPS, incl. kt 291.1, incl. kt + submit/wait 289.8 | best layer attn 43.539 ms = 295.9 GFLOPS (kt 0.271) | GPU~1000 MHz
+layer 0: err 3.42e-06 (tokens 74/512, STEP 7)
+layer 27: err 3.77e-06 (tokens 74/512, STEP 7)
+# 2026-11-13 16:14:01 KV_SIZE=8192 PASSES=3 nice -n 19 ionice -c3 timeout 150 ./attn_kcl 12 2 128 512 8192 2 2
+# attn_qwen_tok.bin H=12 HKV=2 D=128 nq=512 nk=8192 RQ=2 NK=2 | KV_SIZE=8192 LAYERS=28 REG=tensor local=128 kt_local=256 | KV buffer 234.9 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 2595.2 ms, CPU (main thread) 33.5 ms, kernels attn 2535.2 + kt 16.67 ms -> first-use extra 43.4 ms wall over the steady pass (1.55 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.543 ms, steady 0.224 ms -> first use 1.319 ms per layer; pass 0 layers 0-3: wall/attn 94.59/91.33 93.03/90.02 95.91/92.46 92.65/89.58 ms; steady median layer wall 91.13 ms
+steady (median of 3 passes x 28 layers): attn 90.35 ms/layer, kt 0.582 ms/layer, wall 91.13 ms/layer, pass CPU (main thread) 3.1 ms | attn 285.2 GFLOPS, incl. kt 283.4, incl. kt + submit/wait 282.8 | best layer attn 88.462 ms = 291.3 GFLOPS (kt 0.569) | GPU~1000 MHz
+layer 0: err 4.06e-06 (tokens 74/512, STEP 7)
+layer 27: err 3.74e-06 (tokens 74/512, STEP 7)
+# 2026-11-13 16:14:23 KV_SIZE=8192 LAYERS=16 PASSES=3 nice -n 19 ionice -c3 timeout 150 ./attn_kcl 32 8 64 512 8192 4 2
+# attn_llama_tok.bin H=32 HKV=8 D=64 nq=512 nk=8192 RQ=4 NK=2 | KV_SIZE=8192 LAYERS=16 REG=tensor local=128 kt_local=256 | KV buffer 268.4 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 1841.6 ms, CPU (main thread) 34.7 ms, kernels attn 1781.8 + kt 19.19 ms -> first-use extra 41.2 ms wall over the steady pass (2.58 ms per layer)
+host part (wall - kernels) per layer: pass 0 2.539 ms, steady 0.210 ms -> first use 2.329 ms per layer; pass 0 layers 0-3: wall/attn 121.10/115.46 114.76/110.82 116.08/111.45 114.94/110.88 ms; steady median layer wall 112.52 ms
+steady (median of 3 passes x 16 layers): attn 111.10 ms/layer, kt 1.177 ms/layer, wall 112.52 ms/layer, pass CPU (main thread) 1.7 ms | attn 309.3 GFLOPS, incl. kt 306.0, incl. kt + submit/wait 305.4 | best layer attn 110.712 ms = 310.4 GFLOPS (kt 1.135) | GPU~1000 MHz
+layer 0: err 3.36e-06 (tokens 74/512, STEP 7)
+layer 15: err 2.91e-06 (tokens 74/512, STEP 7)
+# 2026-11-13 16:14:48 KCL_PHASES=1 PASSES=1 STEP=0 nice -n 19 ionice -c3 timeout 150 ./attn_kcl 12 2 128 512 4096 2 2
+kcl phase EnqueueNDRange          112 x  wall    59.63 us  CPU    59.66 us (per call)
+kcl phase execbuf (ioctl)          56 x  wall   281.60 us  CPU   281.88 us (per call)
+kcl phase GEM_WAIT (ioctl)         56 x  wall 44556.37 us  CPU    35.44 us (per call)
+kcl phase userptr                 224 x  wall     0.95 us  CPU     0.95 us (per call)
+kcl phase objects per execbuf: 7.0
+# attn_qwen_tok.bin H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | KV_SIZE=4096 LAYERS=28 REG=tensor local=128 kt_local=256 | KV buffer 117.4 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 1275.6 ms, CPU (main thread) 22.9 ms, kernels attn 1235.5 + kt 7.96 ms -> first-use extra 31.7 ms wall over the steady pass (1.13 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.146 ms, steady 0.223 ms -> first use 0.923 ms per layer; pass 0 layers 0-3: wall/attn 50.92/48.61 45.62/44.38 45.92/43.76 45.85/43.72 ms; steady median layer wall 44.42 ms
+steady (median of 1 passes x 28 layers): attn 43.92 ms/layer, kt 0.277 ms/layer, wall 44.42 ms/layer, pass CPU (main thread) 3.4 ms | attn 293.3 GFLOPS, incl. kt 291.5, incl. kt + submit/wait 290.0 | best layer attn 43.707 ms = 294.8 GFLOPS (kt 0.273) | GPU~1000 MHz
+Reading (step 1, LOCAL 128):
+- Whole output (STEP=1) through kcl: Qwen layers 0 and 27: 3.76e-06 / 3.68e-06; Llama layers 0 and 15: 2.54e-06 /
+  3.30e-06 (bound 2e-3). Rate unchanged from NEO device buffers: Qwen 293 kcl vs 294-295 NEO (-0.5 %), Llama 309 vs
+  311 (-0.7 %). Q in llama.cpp's layout (QTOK) costs nothing (294.1 vs 294.8 old layout, within noise).
+- KV_SIZE 8192 with n_k 4096 (half the cache in use): same 293.3. REG=view: same steady rate.
+- n_k 8192 (one launch 88-90 ms Qwen, 111 ms Llama): Qwen 285.2 (best layer 291), Llama 309.3. The Qwen drop is not
+  userptr: NEO gives 285 too (OA section). Llama n_k 8192 = 3.4e10 FLOP per launch, above the 2e10 rule of section 5.
+- k_kt through kcl (SIMD32, local 256, K from userptr): 0.277 ms per layer at n_k 4096 (NEO 0.28), 0.58 at 8192.
+- First use: the host part of a layer (wall - kernels) is 0.9-1.9 ms in pass 0 vs 0.20-0.24 ms steady, i.e.
+  0.9-1.5 ms per layer at KV_SIZE 4096 (K + V = 1024 pages of 4 KB) and 1.3-1.9 ms at 8192 (2048 pages); REG=view
+  at 8192 (n_k rows only) 0.9 ms. That is ~0.9 us per pinned 4 KB page on this desktop (laptop: 0.45 us), and
+  26-54 ms once per model at these sizes (pass 0 wall extra over a steady pass: 29-54 ms). KCL_PHASES: execbuf
+  282 us per call on average over pass 0 + 1 (56 calls), userptr registration 0.95 us per call, enqueue 60 us.
+- Steady host cost per layer: 0.20-0.24 ms (2 enqueues, one execbuf, GEM_WAIT wake-up) = 0.5 % of a 44 ms layer.
+- The first layer of a fresh process was sometimes 5-10 % slower on the GPU side as well (attn 47-49 ms vs 44 ms;
+  not in every run) [HYP: GPU clock/cache warm-up after idle]; the graph runs MUL_MATs before attention, so a real
+  run starts warm.
+
+### OA comparison kcl + userptr vs NEO device buffers (bench/oa.sh -n 3, LOCAL 128; kcl: 8 layers x 4 passes)
+kcl Qwen  (292.6-293.6)  EU active 73.3 / 72.9 %  stall 2.0 / 2.0 %  idle 24.7 / 25.1 %  occ 69.0 / 68.5 %  FPU both 63.5 / 63.1 % (87 / 86 % of active)  L3 112.3 / 111.8 GB/s  GTI read 10.43 / 10.48 GB/s
+NEO Qwen  (293.9-295.7)  EU active 74.0 / 75.4 %  stall 2.3 / 2.3 %  idle 23.7 / 22.3 %  occ 70.4 / 71.3 %  FPU both 64.0 / 65.2 % (87 / 86 %)            L3 112.7 / 115.1 GB/s  GTI read 12.68 / 12.87 GB/s
+kcl Llama (308.7-309.2)  EU active 85.1 / 84.4 %  stall 2.1 / 2.1 %  idle 12.8 / 13.5 %  occ 79.9 / 79.1 %  FPU both 75.3 / 74.7 % (89 / 88 %)            L3 67.7 / 67.2 GB/s    GTI read 2.71 / 2.58 GB/s
+NEO Llama (310.4-312.1)  EU active 83.9 / 84.5 %  stall 2.4 / 2.9 %  idle 13.7 / 12.5 %  occ 79.2 / 79.8 %  FPU both 74.3 / 74.4 % (88 / 88 %)            L3 66.8 / 67.1 GB/s    GTI read 4.69 / 4.98 GB/s
+(two recordings each, 16:15:19-16:16:16; raw summary lines as printed by bench/oa_sum.py, e.g.
+ "EU active 73.3 %  stall 2.0 %  idle 24.7 %  occupancy 69.0 %" / "L3ShaderThroughput 112.32 GB/s  GtiReadThroughput 10.43 GB/s")
+n_k 8192, Qwen: kcl 285.5-285.8 GFLOPS: "EU active 55.3 %  stall 3.1 %  idle 41.5 %", L3 80.5, GTI 18.0 GB/s;
+NEO 284.7-286.2: "EU active 51.0 %  stall 4.4 %  idle 44.6 %", L3 71.1, GTI 18.3 GB/s.
+Reading: no userptr page effect: stall, idle, FPU issue and L3 traffic match within the ~3-point repeatability;
+GTI read (memory side) is even slightly lower through kcl. The n_k 8192 rows are not consistent with the rate
+(55 % EU active at 285 GFLOPS) and are not interpreted [HYP: with 90 ms launches the report interval exceeds
+~180 ms, where a 32-bit EU-cycle counter of 24 EU at 1 GHz wraps]; only GTI read (18 vs 10-13 GB/s) is used:
+at n_k 8192 the K/V working set (8 MB per layer) no longer fits the 6 MB LLC.
+
+Verdict step 1: PASS. Qwen through kcl on userptr in llama.cpp's layout, incl. the k_kt pre-pass and submission +
+wait: 290 GFLOPS at LOCAL 128 (criterion ~270), 301-302 at LOCAL 64 (step 2); error 3.8e-6 over the whole output.
+
+## Step 2: work-group size, raw output
+### NEO, alternating rounds (16:16:56-16:18), Qwen QTOK n_k 4096 and Llama QTOK, best of 5 per run
+(lines: shape Q/L, round, LOCAL; bench/attn output after "| kt"; err with STEP 512 = speed runs)
+Q r1 L128 kt 0.283 ms attn 43.708 ms | attn 294.8 GFLOPS, incl. kt 292.9 | GPU~1000 MHz
+Q r1 L8   kt 0.280 ms attn 41.788 ms | attn 308.3 GFLOPS, incl. kt 306.3 | GPU~1000 MHz
+Q r1 L16  kt 0.292 ms attn 41.808 ms | attn 308.2 GFLOPS, incl. kt 306.1 | GPU~1000 MHz
+Q r1 L24  kt 0.282 ms attn 41.785 ms | attn 308.4 GFLOPS, incl. kt 306.3 | GPU~1000 MHz
+Q r1 L32  kt 0.281 ms attn 41.775 ms | attn 308.4 GFLOPS, incl. kt 306.4 | GPU~1000 MHz
+Q r1 L48  kt 0.283 ms attn 42.088 ms | attn 306.1 GFLOPS, incl. kt 304.1 | GPU~1000 MHz
+Q r1 L64  kt 0.287 ms attn 42.091 ms | attn 306.1 GFLOPS, incl. kt 304.0 | GPU~1000 MHz
+Q r1 L96  kt 0.283 ms attn 41.862 ms | attn 307.8 GFLOPS, incl. kt 305.7 | GPU~1000 MHz
+L r1 L128 kt 0.587 ms attn 55.247 ms | attn 311.0 GFLOPS, incl. kt 307.7 | GPU~1000 MHz
+L r1 L8   kt 0.571 ms attn 54.443 ms | attn 315.6 GFLOPS, incl. kt 312.3 | GPU~1000 MHz
+L r1 L16  kt 0.580 ms attn 54.417 ms | attn 315.7 GFLOPS, incl. kt 312.4 | GPU~1000 MHz
+L r1 L32  kt 0.564 ms attn 54.425 ms | attn 315.7 GFLOPS, incl. kt 312.4 | GPU~1000 MHz
+L r1 L64  kt 0.600 ms attn 54.413 ms | attn 315.7 GFLOPS, incl. kt 312.3 | GPU~1000 MHz
+Q r2 L128 kt 0.281 ms attn 43.866 ms | attn 293.7 GFLOPS, incl. kt 291.9 | GPU~1000 MHz
+Q r2 L8   kt 0.280 ms attn 42.106 ms | attn 306.0 GFLOPS, incl. kt 304.0 | GPU~1000 MHz
+Q r2 L16  kt 0.283 ms attn 41.993 ms | attn 306.8 GFLOPS, incl. kt 304.8 | GPU~1000 MHz
+Q r2 L24  kt 0.277 ms attn 42.055 ms | attn 306.4 GFLOPS, incl. kt 304.4 | GPU~1000 MHz
+Q r2 L32  kt 0.287 ms attn 41.994 ms | attn 306.8 GFLOPS, incl. kt 304.7 | GPU~1000 MHz
+Q r2 L48  kt 0.275 ms attn 42.062 ms | attn 306.3 GFLOPS, incl. kt 304.3 | GPU~1000 MHz
+Q r2 L64  kt 0.281 ms attn 41.817 ms | attn 308.1 GFLOPS, incl. kt 306.1 | GPU~1000 MHz
+Q r2 L96  kt 0.278 ms attn 41.838 ms | attn 308.0 GFLOPS, incl. kt 305.9 | GPU~1000 MHz
+L r2 L128 kt 0.574 ms attn 55.087 ms | attn 311.9 GFLOPS, incl. kt 308.7 | GPU~1000 MHz
+L r2 L8   kt 0.573 ms attn 54.474 ms | attn 315.4 GFLOPS, incl. kt 312.1 | GPU~1000 MHz
+L r2 L16  kt 0.592 ms attn 54.473 ms | attn 315.4 GFLOPS, incl. kt 312.0 | GPU~1000 MHz
+L r2 L32  kt 0.567 ms attn 54.821 ms | attn 313.4 GFLOPS, incl. kt 310.2 | GPU~1000 MHz
+L r2 L64  kt 0.584 ms attn 54.086 ms | attn 317.6 GFLOPS, incl. kt 314.2 | GPU~1000 MHz
+Q r3 L128 kt 0.281 ms attn 43.539 ms | attn 295.9 GFLOPS, incl. kt 294.0 | GPU~1000 MHz
+Q r3 L8   kt 0.282 ms attn 42.082 ms | attn 306.2 GFLOPS, incl. kt 304.1 | GPU~1000 MHz
+Q r3 L16  kt 0.278 ms attn 41.832 ms | attn 308.0 GFLOPS, incl. kt 306.0 | GPU~1000 MHz
+Q r3 L24  kt 0.290 ms attn 41.990 ms | attn 306.9 GFLOPS, incl. kt 304.7 | GPU~1000 MHz
+Q r3 L32  kt 0.279 ms attn 41.700 ms | attn 309.0 GFLOPS, incl. kt 306.9 | GPU~1000 MHz
+Q r3 L48  kt 0.292 ms attn 41.792 ms | attn 308.3 GFLOPS, incl. kt 306.2 | GPU~1000 MHz
+Q r3 L64  kt 0.283 ms attn 42.074 ms | attn 306.2 GFLOPS, incl. kt 304.2 | GPU~1000 MHz
+Q r3 L96  kt 0.287 ms attn 42.073 ms | attn 306.3 GFLOPS, incl. kt 304.2 | GPU~1000 MHz
+L r3 L128 kt 0.587 ms attn 55.291 ms | attn 310.7 GFLOPS, incl. kt 307.5 | GPU~1000 MHz
+L r3 L8   kt 0.594 ms attn 54.179 ms | attn 317.1 GFLOPS, incl. kt 313.7 | GPU~1000 MHz
+L r3 L16  kt 0.582 ms attn 54.404 ms | attn 315.8 GFLOPS, incl. kt 312.4 | GPU~1000 MHz
+L r3 L32  kt 0.599 ms attn 54.367 ms | attn 316.0 GFLOPS, incl. kt 312.6 | GPU~1000 MHz
+L r3 L64  kt 0.575 ms attn 54.415 ms | attn 315.7 GFLOPS, incl. kt 312.4 | GPU~1000 MHz
+(every line ended "| err 1.67e-06 (tokens 2/512, STEP 512)" (Qwen) or "| err 2.56e-06 ..." (Llama); cut here)
+Median (range) GFLOPS, NEO: Qwen L128 294.8 (293.7-295.9); L8 306.2 (306.0-308.3); L16 308.0 (306.8-308.2);
+L24 306.9 (306.4-308.4); L32 308.4 (306.8-309.0); L48 306.3 (306.1-308.3); L64 306.2 (306.1-308.1);
+L96 307.8 (306.3-308.0). Llama L128 311.0 (310.7-311.9); L8 315.6 (315.4-317.1); L16 315.7 (315.4-315.8);
+L32 315.7 (313.4-316.0); L64 315.7 (315.7-317.6).
+
+### kcl path, alternating rounds (16:19-16:21), 8 layers x 2 timed passes per run; GFLOPS = steady kernel-only,
+### incl. k_kt, incl. k_kt + submit/wait; best layer
+Q r1 L128 attn 292.4 GFLOPS, incl. kt 290.6, incl. kt + submit/wait 288.9 | best layer attn 43.792 ms = 294.2 GFLOPS
+Q r1 L8   attn 304.4 GFLOPS, incl. kt 302.5, incl. kt + submit/wait 301.0 | best layer attn 41.865 ms = 307.8 GFLOPS
+Q r1 L16  attn 303.7 GFLOPS, incl. kt 301.7, incl. kt + submit/wait 300.2 | best layer attn 41.976 ms = 307.0 GFLOPS
+Q r1 L24  attn 303.2 GFLOPS, incl. kt 301.2, incl. kt + submit/wait 299.5 | best layer attn 42.139 ms = 305.8 GFLOPS
+Q r1 L32  attn 304.7 GFLOPS, incl. kt 302.7, incl. kt + submit/wait 301.3 | best layer attn 42.013 ms = 306.7 GFLOPS
+Q r1 L64  attn 305.6 GFLOPS, incl. kt 303.6, incl. kt + submit/wait 301.9 | best layer attn 41.810 ms = 308.2 GFLOPS
+Q r1 L96  attn 305.8 GFLOPS, incl. kt 303.8, incl. kt + submit/wait 302.3 | best layer attn 41.926 ms = 307.3 GFLOPS
+L r1 L128 attn 309.1 GFLOPS, incl. kt 306.0, incl. kt + submit/wait 304.8 | best layer attn 55.322 ms = 310.5 GFLOPS
+L r1 L8   attn 313.5 GFLOPS, incl. kt 310.3, incl. kt + submit/wait 309.1 | best layer attn 54.480 ms = 315.3 GFLOPS
+L r1 L16  attn 312.6 GFLOPS, incl. kt 309.5, incl. kt + submit/wait 308.4 | best layer attn 54.658 ms = 314.3 GFLOPS
+L r1 L32  attn 312.9 GFLOPS, incl. kt 309.7, incl. kt + submit/wait 308.3 | best layer attn 54.501 ms = 315.2 GFLOPS
+L r1 L64  attn 312.9 GFLOPS, incl. kt 309.7, incl. kt + submit/wait 308.2 | best layer attn 54.487 ms = 315.3 GFLOPS
+Q r2 L128 attn 293.3 GFLOPS, incl. kt 291.5, incl. kt + submit/wait 289.9 | best layer attn 43.680 ms = 295.0 GFLOPS
+Q r2 L8   attn 303.9 GFLOPS, incl. kt 301.9, incl. kt + submit/wait 300.5 | best layer attn 42.080 ms = 306.2 GFLOPS
+Q r2 L16  attn 304.8 GFLOPS, incl. kt 302.8, incl. kt + submit/wait 301.4 | best layer attn 41.810 ms = 308.2 GFLOPS
+Q r2 L24  attn 304.3 GFLOPS, incl. kt 302.3, incl. kt + submit/wait 300.8 | best layer attn 42.060 ms = 306.3 GFLOPS
+Q r2 L32  attn 304.8 GFLOPS, incl. kt 302.8, incl. kt + submit/wait 301.3 | best layer attn 41.993 ms = 306.8 GFLOPS
+Q r2 L64  attn 305.1 GFLOPS, incl. kt 303.1, incl. kt + submit/wait 301.6 | best layer attn 41.929 ms = 307.3 GFLOPS
+Q r2 L96  attn 305.8 GFLOPS, incl. kt 303.8, incl. kt + submit/wait 302.4 | best layer attn 41.878 ms = 307.7 GFLOPS
+L r2 L128 attn 308.3 GFLOPS, incl. kt 305.1, incl. kt + submit/wait 303.9 | best layer attn 55.321 ms = 310.5 GFLOPS
+L r2 L8   attn 314.1 GFLOPS, incl. kt 310.9, incl. kt + submit/wait 309.8 | best layer attn 54.391 ms = 315.9 GFLOPS
+L r2 L16  attn 313.8 GFLOPS, incl. kt 310.6, incl. kt + submit/wait 309.5 | best layer attn 54.168 ms = 317.2 GFLOPS
+L r2 L32  attn 312.9 GFLOPS, incl. kt 309.8, incl. kt + submit/wait 308.7 | best layer attn 54.377 ms = 315.9 GFLOPS
+L r2 L64  attn 313.3 GFLOPS, incl. kt 310.1, incl. kt + submit/wait 308.8 | best layer attn 54.529 ms = 315.1 GFLOPS
+Q r3 L128 attn 292.5 GFLOPS, incl. kt 290.7, incl. kt + submit/wait 289.3 | best layer attn 43.776 ms = 294.3 GFLOPS
+Q r3 L8   attn 303.5 GFLOPS, incl. kt 301.6, incl. kt + submit/wait 300.1 | best layer attn 41.985 ms = 306.9 GFLOPS
+Q r3 L16  attn 304.0 GFLOPS, incl. kt 302.0, incl. kt + submit/wait 300.7 | best layer attn 41.864 ms = 307.8 GFLOPS
+Q r3 L24  attn 304.1 GFLOPS, incl. kt 302.1, incl. kt + submit/wait 300.7 | best layer attn 41.920 ms = 307.4 GFLOPS
+Q r3 L32  attn 304.4 GFLOPS, incl. kt 302.4, incl. kt + submit/wait 300.9 | best layer attn 41.892 ms = 307.6 GFLOPS
+Q r3 L64  attn 305.2 GFLOPS, incl. kt 303.2, incl. kt + submit/wait 301.8 | best layer attn 41.929 ms = 307.3 GFLOPS
+Q r3 L96  attn 305.9 GFLOPS, incl. kt 303.9, incl. kt + submit/wait 301.8 | best layer attn 41.849 ms = 307.9 GFLOPS
+L r3 L128 attn 308.8 GFLOPS, incl. kt 305.7, incl. kt + submit/wait 304.5 | best layer attn 55.252 ms = 310.9 GFLOPS
+L r3 L8   attn 313.5 GFLOPS, incl. kt 310.3, incl. kt + submit/wait 309.2 | best layer attn 54.253 ms = 316.7 GFLOPS
+L r3 L16  attn 313.0 GFLOPS, incl. kt 309.8, incl. kt + submit/wait 308.7 | best layer attn 54.361 ms = 316.0 GFLOPS
+L r3 L32  attn 313.4 GFLOPS, incl. kt 310.2, incl. kt + submit/wait 309.1 | best layer attn 54.190 ms = 317.0 GFLOPS
+L r3 L64  attn 313.7 GFLOPS, incl. kt 310.5, incl. kt + submit/wait 309.1 | best layer attn 54.359 ms = 316.0 GFLOPS
+Thread arbitration (gap in docs/isa-notes.md section 7), kcl, one run each:
+Q ARB=age L64  attn 275.3 GFLOPS, incl. kt 273.7, incl. kt + submit/wait 272.6 | best layer attn 46.312 ms = 278.2 GFLOPS
+Q ARB=age L128 attn 274.8 GFLOPS, incl. kt 273.2, incl. kt + submit/wait 271.8 | best layer attn 46.193 ms = 278.9 GFLOPS
+Q ARB=rr L64  attn 304.9 GFLOPS, incl. kt 302.9, incl. kt + submit/wait 301.5 | best layer attn 41.923 ms = 307.3 GFLOPS
+Q ARB=rr L128 attn 293.1 GFLOPS, incl. kt 291.2, incl. kt + submit/wait 289.8 | best layer attn 43.645 ms = 295.2 GFLOPS
+Median (range) kernel-only GFLOPS, kcl: Qwen L128 292.5 (292.4-293.3); L8 303.9 (303.5-304.4); L16 304.0
+(303.7-304.8); L24 304.1 (303.2-304.3); L32 304.7 (304.4-304.8); L64 305.2 (305.1-305.6); L96 305.8 (305.8-305.9).
+Llama L128 308.8 (308.3-309.1); L8 313.5 (313.5-314.1); L16 313.0 (312.6-313.8); L32 312.9 (312.9-313.4);
+L64 313.3 (312.9-313.7). KCL_ARB=age (hardware default arbitration): -10 % (275 vs 305): kcl's round-robin is
+right for this kernel too.
+
+### OA per work-group size, NEO (bench/oa.sh -n 3, 16:18-16:19)
+LOCAL  GFLOPS        EU active  stall  idle   occupancy  FPU both (of active)  send  L3 GB/s  GTI read GB/s
+Qwen
+128    293.8-296.5   68.0       3.0    29.1   63.7       57.8 (85 %)           3.4   101.8    12.23
+96     306.7-308.5   88.1       5.0     7.0   80.9       73.6 (84 %)           4.4   132.0     1.40
+64     306.8-308.6   80.8       7.1    12.1   69.6       63.4 (78 %)           3.9   117.5     1.59
+32     306.5-308.1   79.3       6.6    14.1   69.9       63.9 (81 %)           3.9   116.7     1.70
+16     305.9-308.6   84.6       4.0    11.5   78.3       71.8 (85 %)           4.2   128.0     1.51
+8      305.6-307.9   83.2       5.3    11.5   76.9       69.8 (84 %)           4.1   124.0     1.49
+Llama
+128    310.8-311.8   83.3       3.6    13.1   79.2       73.1 (88 %)           2.3    65.7     4.79
+64     314.7-315.9   81.2       5.8    13.1   77.6       70.1 (86 %)           2.2    63.2     0.89
+8      315.2-316.2   82.8       4.9    12.2   77.8       71.8 (87 %)           2.2    64.8     0.75
+kcl, LOCAL 64 (16:28): Qwen 305.2-305.6: EU active 86.5 %  stall 5.1 %  idle 8.4 %  occupancy 78.3 %  FPU both
+71.5 % (83 % of active)  L3 129.5 GB/s  GTI read 1.34 GB/s; Llama 313.2-313.6: EU active 81.3 %  stall 5.2 %
+idle 13.5 %  occupancy 74.8 %  FPU both 69.6 % (86 %)  L3 63.6 GB/s  GTI read 0.63 GB/s.
+Reading: the prediction (occupancy cap) was wrong: 96 has the same cap as 128 (86 %) and is as fast as 8-64; every
+size except 128 gives the same rate (Qwen +4 %, Llama +1.5 %). What singles out 128 is the memory side: GTI read
+12.2 GB/s vs 1.3-1.7 for all other sizes (Llama 4.8 vs 0.6-0.9), i.e. 8x more L3 misses, together with more EU time
+without a thread (29 vs 7-14 %). At n_k 8192 the gap widens: Qwen 285 at 128 vs 305-308 at 64 (final section).
+[HYP, not tested] 16-thread groups are placed so that threads at different key positions share a subslice's L3
+less well. Where the EU active share is noisy (64-88 % for the same rate), the OA window (18 busy reports) is the
+limit, not the kernel. Choice: LOCAL 64 for both shapes (valid for Qwen 24576 and Llama 32768 global sizes,
+middle of the flat region); 24/48/96 are not valid for Llama.
+
+### Grid order: KV heads interleaved (HKV_INNER), NEO, alternating with the default (16:22-16:24)
+First attempt (16:21): the generator produced WRONG binaries for this template (err 1.00e+00, speed normal): IGC
+kept the V base pointer in r6.1:q (bytes 8-15), and attn_gen.py tracked pointer registers by number only and
+emitted r6.0:q. Fixed in asm/attn_gen.py (the base is now (register, :q subregister)); all 8 existing binaries
+rebuild bit-identically (make -C asm attn-check: OK); the fixed HKV_INNER binaries then gave the right result:
+Q r1 L64  tok    attn 308.3 | tok_hi 307.4     L r1 L64  tok 317.8 | tok_hi 297.6
+Q r1 L128 tok    attn 294.9 | tok_hi 280.9     L r1 L128 tok 311.5 | tok_hi 309.8
+Q r2 L64  tok    attn 308.5 | tok_hi 307.3     L r2 L64  tok 315.6 | tok_hi 297.2
+Q r2 L128 tok    attn 295.4 | tok_hi 279.5     L r2 L128 tok 310.5 | tok_hi 310.4
+Q r3 L64  tok    attn 308.6 | tok_hi 307.8     L r3 L64  tok 315.8 | tok_hi 297.5
+Q r3 L128 tok    attn 294.6 | tok_hi 282.2     L r3 L128 tok 311.1 | tok_hi 310.5
+(GFLOPS from lines like "Q r1 L64  tok_hi kt 0.271 ms attn 41.914 ms | attn 307.4 GFLOPS, incl. kt 305.4 | err
+3.33e-06 (tokens 74/512, STEP 7) | GPU~1000 MHz"; every run err 3.33e-06 (Qwen) / 2.58e-06 (Llama), 1000 MHz)
+OA HKV_INNER LOCAL 64: Qwen EU active 76.4 % stall 8.1 % idle 15.5 %, FPU both 77 % of active, GTI 4.19 GB/s;
+Llama EU active 83.7 % stall 7.4 % idle 9.0 %, FPU both 76 % of active, GTI 5.28 GB/s.
+In OpenCL C (template, plain IGC code, LOCAL 64) HKV_INNER was faster: 255.9 vs 234.3 GFLOPS, err 2.96e-06 both.
+Reading: prediction met (no gain; Qwen equal at 64 and -5 % at 128, Llama -6 % at 64): interleaving the KV heads
+raises stalls and memory traffic. The default order stays; HKV_INNER is kept as a template option only.
+Persistent threads / split n_k: not tried. After LOCAL 64 the counters show idle 8-14 %, stall 5-7 %, both FPU pipes
+busy 83-86 % of active time; the grid is 3072 (Qwen) / 4096 (Llama) threads = 18-24 waves of 168 slots, so a
+persistent-thread variant could recover at most the tail (~4 % by the wave count) [EST], below the cost of a new
+generator mode now.
+
+## Final runs with LOCAL 64 (new default of bench/attn for .bin and of bench/attn_kcl), 16:26-16:28
+# 2026-11-13 16:26:14 STEP=1 nice -n 19 ionice -c3 timeout 150 ./attn_kcl 12 2 128 512 4096 2 2
+# attn_qwen_tok.bin H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | KV_SIZE=4096 LAYERS=28 REG=tensor local=64 kt_local=256 | KV buffer 117.4 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 1242.4 ms, CPU (main thread) 25.1 ms, kernels attn 1186.8 + kt 7.93 ms -> first-use extra 45.1 ms wall over the steady pass (1.61 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.699 ms, steady 0.211 ms -> first use 1.488 ms per layer; pass 0 layers 0-3: wall/attn 60.67/43.97 44.11/42.05 44.15/42.02 44.83/42.67 ms; steady median layer wall 42.76 ms
+steady (median of 5 passes x 28 layers): attn 42.27 ms/layer, kt 0.277 ms/layer, wall 42.76 ms/layer, pass CPU (main thread) 2.9 ms | attn 304.8 GFLOPS, incl. kt 302.8, incl. kt + submit/wait 301.3 | best layer attn 41.917 ms = 307.4 GFLOPS (kt 0.272) | GPU~1000 MHz
+layer 0: err 3.76e-06 (tokens 512/512, STEP 1)
+layer 27: err 3.68e-06 (tokens 512/512, STEP 1)
+# 2026-11-13 16:26:41 STEP=1 LAYERS=16 nice -n 19 ionice -c3 timeout 150 ./attn_kcl 32 8 64 512 4096 4 2
+# attn_llama_tok.bin H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 | KV_SIZE=4096 LAYERS=16 REG=tensor local=64 kt_local=256 | KV buffer 134.2 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 914.7 ms, CPU (main thread) 22.8 ms, kernels attn 876.6 + kt 9.40 ms -> first-use extra 23.1 ms wall over the steady pass (1.44 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.791 ms, steady 0.219 ms -> first use 1.572 ms per layer; pass 0 layers 0-3: wall/attn 59.84/56.08 57.46/54.67 57.60/54.81 57.42/54.59 ms; steady median layer wall 55.73 ms
+steady (median of 5 passes x 16 layers): attn 54.93 ms/layer, kt 0.563 ms/layer, wall 55.73 ms/layer, pass CPU (main thread) 1.7 ms | attn 312.8 GFLOPS, incl. kt 309.6, incl. kt + submit/wait 308.3 | best layer attn 54.143 ms = 317.3 GFLOPS (kt 0.548) | GPU~1000 MHz
+layer 0: err 2.54e-06 (tokens 512/512, STEP 1)
+layer 15: err 3.30e-06 (tokens 512/512, STEP 1)
+# 2026-11-13 16:27:25 STEP=1 QTOK=1 CL=../skl/attn_qwen_tok.bin nice -n 19 ionice -c3 timeout 150 ./attn 12 2 128 512 4096 2 2
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 QTOK  | sg=8 local=64 spill=0 private=0 ktpad=4096 | kt 0.287 ms attn 41.866 ms | attn 307.8 GFLOPS, incl. kt 305.7 | err 4.06e-06 (tokens 512/512, STEP 1) | GPU~1000 MHz
+# 2026-11-13 16:27:33 STEP=1 QTOK=1 CL=../skl/attn_llama_tok.bin nice -n 19 ionice -c3 timeout 150 ./attn 32 8 64 512 4096 4 2
+H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 QTOK  | sg=8 local=64 spill=0 private=0 ktpad=2048 | kt 0.581 ms attn 54.420 ms | attn 315.7 GFLOPS, incl. kt 312.4 | err 2.71e-06 (tokens 512/512, STEP 1) | GPU~1000 MHz
+# 2026-11-13 16:27:50 KV_SIZE=8192 PASSES=3 nice -n 19 ionice -c3 timeout 150 ./attn_kcl 12 2 128 512 8192 2 2
+# attn_qwen_tok.bin H=12 HKV=2 D=128 nq=512 nk=8192 RQ=2 NK=2 | KV_SIZE=8192 LAYERS=28 REG=tensor local=64 kt_local=256 | KV buffer 234.9 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 2435.8 ms, CPU (main thread) 35.9 ms, kernels attn 2360.1 + kt 16.77 ms -> first-use extra 48.7 ms wall over the steady pass (1.74 ms per layer)
+host part (wall - kernels) per layer: pass 0 2.101 ms, steady 0.241 ms -> first use 1.860 ms per layer; pass 0 layers 0-3: wall/attn 105.98/88.28 86.53/83.75 86.47/83.63 86.86/83.98 ms; steady median layer wall 85.25 ms
+steady (median of 3 passes x 28 layers): attn 84.43 ms/layer, kt 0.583 ms/layer, wall 85.25 ms/layer, pass CPU (main thread) 3.5 ms | attn 305.2 GFLOPS, incl. kt 303.1, incl. kt + submit/wait 302.3 | best layer attn 83.582 ms = 308.3 GFLOPS (kt 0.568) | GPU~1000 MHz
+layer 0: err 4.06e-06 (tokens 74/512, STEP 7)
+layer 27: err 3.74e-06 (tokens 74/512, STEP 7)
+# 2026-11-13 16:28:11 STEP=7 QTOK=1 CL=../skl/attn_qwen_tok.bin nice -n 19 ionice -c3 timeout 150 ./attn 12 2 128 512 8192 2 2
+H=12 HKV=2 D=128 nq=512 nk=8192 RQ=2 NK=2 QTOK  | sg=8 local=64 spill=0 private=0 ktpad=4096 | kt 0.581 ms attn 83.623 ms | attn 308.2 GFLOPS, incl. kt 306.0 | err 3.63e-06 (tokens 74/512, STEP 7) | GPU~1000 MHz
+# 2026-11-13 16:28:14 STEP=0 LAYERS=8 PASSES=3 nice -n 19 ionice -c3 timeout 150 ./oa.sh -n 3 ./attn_kcl 12 2 128 512 4096 2 2
+# attn_qwen_tok.bin H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | KV_SIZE=4096 LAYERS=8 REG=tensor local=64 kt_local=256 | KV buffer 33.6 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 358.6 ms, CPU (main thread) 11.3 ms, kernels attn 343.7 + kt 2.64 ms -> first-use extra 17.1 ms wall over the steady pass (2.13 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.520 ms, steady 0.218 ms -> first use 1.302 ms per layer; pass 0 layers 0-3: wall/attn 49.53/47.26 44.06/42.97 44.35/42.61 44.23/42.11 ms; steady median layer wall 42.69 ms
+steady (median of 3 passes x 8 layers): attn 42.20 ms/layer, kt 0.278 ms/layer, wall 42.69 ms/layer, pass CPU (main thread) 0.9 ms | attn 305.3 GFLOPS, incl. kt 303.3, incl. kt + submit/wait 301.9 | best layer attn 41.832 ms = 308.0 GFLOPS (kt 0.274) | GPU~1000 MHz
+# attn_qwen_tok.bin H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | KV_SIZE=4096 LAYERS=8 REG=tensor local=64 kt_local=256 | KV buffer 33.6 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 356.6 ms, CPU (main thread) 10.3 ms, kernels attn 343.0 + kt 2.45 ms -> first-use extra 15.5 ms wall over the steady pass (1.93 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.386 ms, steady 0.201 ms -> first use 1.185 ms per layer; pass 0 layers 0-3: wall/attn 49.09/46.90 43.40/42.36 43.84/42.15 43.67/41.99 ms; steady median layer wall 42.63 ms
+steady (median of 3 passes x 8 layers): attn 42.16 ms/layer, kt 0.277 ms/layer, wall 42.63 ms/layer, pass CPU (main thread) 0.8 ms | attn 305.6 GFLOPS, incl. kt 303.6, incl. kt + submit/wait 302.2 | best layer attn 41.870 ms = 307.7 GFLOPS (kt 0.273) | GPU~1000 MHz
+# attn_qwen_tok.bin H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | KV_SIZE=4096 LAYERS=8 REG=tensor local=64 kt_local=256 | KV buffer 33.6 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 356.3 ms, CPU (main thread) 10.2 ms, kernels attn 342.9 + kt 2.39 ms -> first-use extra 14.7 ms wall over the steady pass (1.84 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.373 ms, steady 0.209 ms -> first use 1.165 ms per layer; pass 0 layers 0-3: wall/attn 48.90/47.09 43.84/42.83 43.92/42.17 43.93/42.20 ms; steady median layer wall 42.70 ms
+steady (median of 3 passes x 8 layers): attn 42.22 ms/layer, kt 0.277 ms/layer, wall 42.70 ms/layer, pass CPU (main thread) 0.8 ms | attn 305.2 GFLOPS, incl. kt 303.2, incl. kt + submit/wait 301.7 | best layer attn 41.865 ms = 307.8 GFLOPS (kt 0.272) | GPU~1000 MHz
+# 2026-11-13 16:28:23 STEP=0 LAYERS=8 PASSES=3 nice -n 19 ionice -c3 timeout 150 ./oa.sh -n 3 ./attn_kcl 32 8 64 512 4096 4 2
+# attn_llama_tok.bin H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 | KV_SIZE=4096 LAYERS=8 REG=tensor local=64 kt_local=256 | KV buffer 67.1 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 460.5 ms, CPU (main thread) 12.6 ms, kernels attn 442.1 + kt 4.83 ms -> first-use extra 15.7 ms wall over the steady pass (1.97 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.686 ms, steady 0.244 ms -> first use 1.442 ms per layer; pass 0 layers 0-3: wall/attn 62.31/59.55 56.63/54.84 56.53/54.16 56.64/54.34 ms; steady median layer wall 55.59 ms
+steady (median of 3 passes x 8 layers): attn 54.82 ms/layer, kt 0.565 ms/layer, wall 55.59 ms/layer, pass CPU (main thread) 0.8 ms | attn 313.4 GFLOPS, incl. kt 310.2, incl. kt + submit/wait 309.0 | best layer attn 54.232 ms = 316.8 GFLOPS (kt 0.550) | GPU~1000 MHz
+# attn_llama_tok.bin H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 | KV_SIZE=4096 LAYERS=8 REG=tensor local=64 kt_local=256 | KV buffer 67.1 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 464.5 ms, CPU (main thread) 14.1 ms, kernels attn 444.8 + kt 4.79 ms -> first-use extra 20.0 ms wall over the steady pass (2.51 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.860 ms, steady 0.245 ms -> first use 1.615 ms per layer; pass 0 layers 0-3: wall/attn 63.80/60.95 56.69/54.96 57.93/55.15 57.73/54.97 ms; steady median layer wall 55.56 ms
+steady (median of 3 passes x 8 layers): attn 54.78 ms/layer, kt 0.562 ms/layer, wall 55.56 ms/layer, pass CPU (main thread) 0.9 ms | attn 313.6 GFLOPS, incl. kt 310.4, incl. kt + submit/wait 309.2 | best layer attn 54.296 ms = 316.4 GFLOPS (kt 0.549) | GPU~1000 MHz
+# attn_llama_tok.bin H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 | KV_SIZE=4096 LAYERS=8 REG=tensor local=64 kt_local=256 | KV buffer 67.1 MB at page offset 64, Q/O page offset 64
+pass 0 (first use): wall 462.7 ms, CPU (main thread) 13.6 ms, kernels attn 443.5 + kt 4.84 ms -> first-use extra 17.8 ms wall over the steady pass (2.22 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.802 ms, steady 0.214 ms -> first use 1.588 ms per layer; pass 0 layers 0-3: wall/attn 62.95/59.49 56.50/54.80 56.87/54.56 57.36/54.98 ms; steady median layer wall 55.62 ms
+steady (median of 3 passes x 8 layers): attn 54.85 ms/layer, kt 0.564 ms/layer, wall 55.62 ms/layer, pass CPU (main thread) 0.8 ms | attn 313.2 GFLOPS, incl. kt 310.1, incl. kt + submit/wait 308.9 | best layer attn 54.354 ms = 316.1 GFLOPS (kt 0.548) | GPU~1000 MHz
+Summary (LOCAL 64): Qwen through kcl + userptr, 28 layers, n_k 4096: 304.8 GFLOPS kernel-only, 302.8 incl. k_kt,
+301.3 incl. submission + wait; error 3.8e-6 (STEP 1); NEO device buffers 307.8 / 305.7, error 4.1e-6. Llama: kcl
+312.8 / 309.6 / 308.3, error 3.3e-6; NEO 315.7 / 312.4. n_k 8192 Qwen: kcl 305.2 / 303.1 / 302.3, NEO 308.2 (LOCAL
+128 had 285 for both). First use 1.2-1.9 ms per layer as before.
+
+## Laptop UHD 620 confirmation (whl *_tok binaries, nice 19; no other llama/bench process, but load 2.3 from a browser
+## and swap I/O, intel_gpu_top of another user running; GPU clock 1011-1100 MHz, max 1100)
+# 2026-11-13 16:35:05 laptop UHD 620
+2.33 2.58 2.16 2/1583 856825
+1100
+pass 0 (first use): wall 344.9 ms, CPU (main thread) 10.6 ms, kernels attn 328.8 + kt 2.74 ms -> first-use extra 14.3 ms wall over the steady pass (1.79 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.675 ms, steady 0.237 ms -> first use 1.438 ms per layer; pass 0 layers 0-3: wall/attn 43.34/41.31 48.21/46.69 42.51/40.09 42.04/39.67 ms; steady median layer wall 41.33 ms
+steady (median of 3 passes x 8 layers): attn 40.82 ms/layer, kt 0.269 ms/layer, wall 41.33 ms/layer, pass CPU (main thread) 0.9 ms | attn 315.7 GFLOPS, incl. kt 313.6, incl. kt + submit/wait 311.8 | best layer attn 40.038 ms = 321.8 GFLOPS (kt 0.250) | GPU~1011 MHz
+layer 0: err 2.65e-06 (tokens 74/512, STEP 7)
+layer 7: err 2.62e-06 (tokens 74/512, STEP 7)
+pass 0 (first use): wall 470.2 ms, CPU (main thread) 8.8 ms, kernels attn 453.7 + kt 5.49 ms -> first-use extra 59.0 ms wall over the steady pass (7.37 ms per layer)
+host part (wall - kernels) per layer: pass 0 1.372 ms, steady 0.194 ms -> first use 1.178 ms per layer; pass 0 layers 0-3: wall/attn 55.46/52.62 55.61/53.78 61.02/58.70 60.40/58.38 ms; steady median layer wall 51.41 ms
+steady (median of 3 passes x 8 layers): attn 50.58 ms/layer, kt 0.649 ms/layer, wall 51.41 ms/layer, pass CPU (main thread) 0.8 ms | attn 339.7 GFLOPS, incl. kt 335.4, incl. kt + submit/wait 334.2 | best layer attn 49.999 ms = 343.6 GFLOPS (kt 0.508) | GPU~1088 MHz
+layer 0: err 2.83e-06 (tokens 74/512, STEP 7)
+layer 7: err 2.15e-06 (tokens 74/512, STEP 7)
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 QTOK  | sg=8 local=64 spill=0 private=0 ktpad=4096 | kt 0.293 ms attn 39.781 ms | attn 323.9 GFLOPS, incl. kt 321.5 | err 3.33e-06 (tokens 74/512, STEP 7) | GPU~1059 MHz
+H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 QTOK  | sg=8 local=64 spill=0 private=0 ktpad=2048 | kt 0.780 ms attn 49.776 ms | attn 345.1 GFLOPS, incl. kt 339.8 | err 2.58e-06 (tokens 74/512, STEP 7) | GPU~1100 MHz
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 QTOK  | sg=8 local=128 spill=0 private=0 ktpad=4096 | kt 0.269 ms attn 41.686 ms | attn 309.1 GFLOPS, incl. kt 307.1 | err 3.33e-06 (tokens 74/512, STEP 7) | GPU~1076 MHz
+H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 QTOK  | sg=8 local=128 spill=0 private=0 ktpad=2048 | kt 0.547 ms attn 50.293 ms | attn 341.6 GFLOPS, incl. kt 337.9 | err 2.58e-06 (tokens 74/512, STEP 7) | GPU~1100 MHz
+Reading: kcl + userptr on the laptop: Qwen 315.7 GFLOPS kernel-only (~1011 MHz), 311.8 incl. k_kt + submit/wait;
+Llama 339.7 / 334.2 (~1088 MHz). NEO: work-group 64 vs 128: Qwen 323.9 vs 309.1 (+5 %), Llama 345.1 vs 341.6 (+1 %),
+the same direction as on HD 530 (one run each, clock differs between runs).

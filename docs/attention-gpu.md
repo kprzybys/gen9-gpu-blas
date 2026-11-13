@@ -1,7 +1,9 @@
 # Attention on the Gen9 GPU: performance model (stage 1)
 
-Status: model (sections 1-7), stage 2 result (section 8: criterion not met in OpenCL C) and stage 2b result
-(section 9: criterion met by a hand-scheduled assembly kernel, 296 GFLOPS = 2.8x the CPU). Evidence tags as in [performance-model.md](performance-model.md)
+Status: model (sections 1-7), stage 2 result (section 8: criterion not met in OpenCL C), stage 2b result
+(section 9: criterion met by a hand-scheduled assembly kernel, 296 GFLOPS = 2.8x the CPU) and the pre-integration
+check (section 10: the same kernel through kcl on userptr memory in llama.cpp's layout, 301 GFLOPS incl. pre-pass
+and submission, work-group size 64). Evidence tags as in [performance-model.md](performance-model.md)
 ([SPEC], [MEAS], [SW], [EST], [HYP]). Stage 2 (a standalone kernel in `bench/`) starts only from this prediction,
 and its result is judged against the stop criterion in section 6.
 
@@ -213,3 +215,88 @@ the GPU. Open points that the standalone kernel does not cover:
 - Llama and Gemma shapes need their own row count and ring depth (Llama: 4 rows, ring 2; Gemma d_head 256 does not
   fit 2 FP32 rows and needs a different split).
 
+Added by section 10 (measured through kcl on userptr memory):
+- **Q layout**: llama.cpp hands flash attention a permuted view of Qcur, memory Q[t][h][d]; the `*_tok` binaries
+  (template option `-DQTOK`) read it directly, at no cost. O[t][h][d] is already what the kernel writes.
+- **Alignment**: nothing beyond ggml's own (CPU buffers from `posix_memalign` 64 B, tensors 32 B apart): kcl_userptr
+  covers whole pages and passes the in-page offset (the KV buffer started 64 B into a page); the kernel's OWord
+  block reads need 16 B per row, which 32 B tensors with 256/128 B rows give.
+- **Pinning**: register each layer's whole K and V tensor (kv_size rows), not the n_kv view: the view's range
+  changes every time n_kv grows by 256, and each new range is pinned again (~0.9 us per 4 KB page on HD 530, 2x the
+  laptop) while the old objects stay in the LRU cache. Whole tensors are pinned once: 0.9-1.9 ms per layer, 26-54 ms
+  per model at kv_size 4096-8192. kcl's pinned-memory limit (`KCL_USERPTR_MB`, 1 GB) holds the 1.5B/1B caches
+  (117-268 MB) but not Qwen2.5-7B at 32k context (28 x 2 x 32 MB = 1.8 GB): raise it or pin per layer group.
+- **Binary**: skl and whl builds differ only in the device-compat note (same `.text`, `.ze_info`); kcl has no
+  device check, so the library table carries the whl binaries for both GPUs.
+- **Launch**: work-group size 64 (not 128); one submission per layer (k_kt + k_attn) costs 0.2 ms of host time
+  (0.5 %); n_k 8192 is 84 ms (Qwen) / 111 ms (Llama) per launch, so the 2e10-FLOP rule of section 5 already bites
+  for Llama at 8k context (3.4e10): split the launch by query blocks there.
+- **Kt buffer**: an own GEM buffer of kv_size * H_kv * d_head * 2 B + NK*D*16 B, reused by every layer.
+
+
+## 10. kcl + userptr and work distribution
+
+Measured on HD 530 (desktop "tc", 1.0 GHz in every run) on 2026-11-13; host `bench/attn_kcl.c` (kcl + userptr,
+llama.cpp layout), `bench/attn.c` for the NEO comparison; raw output, predictions with timestamps and OA tables in
+`results/attn-kcl-hd530-2026-11-13.txt` [MEAS].
+
+**Setup.** The layout was checked in llama.cpp 2cbe0ec (`src/llama-kv-cache.cpp`, `src/llama-graph.cpp`
+`build_attn_mha`): one host buffer for all layers with per-layer tensors K and V of kv_size rows x H_kv*d_head F16
+(V not transposed under flash attention), the attention reading the view of the first n_kv rows (n_kv padded to
+256, so a multiple of 8*NK: no key tail); Q is the permuted view of Qcur, memory Q[t][h][d] (the stage-2 bench used
+Q[h][t][d]: new template option `-DQTOK`, binaries `asm/*_tok.bin`); O is [t][h][d]. `bench/attn_kcl` allocates the
+cache like ggml's CPU buffer (`posix_memalign` 64 B, cleared, 28 layers Qwen / 16 Llama, kv_size 4096 or 8192) and
+runs one layer at a time like the graph: `kcl_new_operation`, userptr regions K, V, Q, O, `k_kt` (K -> own Kt
+buffer) and `k_attn` in one submission, wait. The kernel table comes from `lib/gen_kernels.py` with an explicit
+binary list (no other change in `lib/`; `lib/kernels.c` regenerates byte-identical).
+
+**Step 1: the asm kernel through kcl on userptr memory.** Pass condition >= ~270 GFLOPS on Qwen incl. the pre-pass,
+error <= 2e-3 over the whole output.
+
+| Path (n_q 512, n_k 4096) | Qwen kernel / incl. k_kt / incl. submit + wait | Llama | Error (STEP=1) |
+|---|---|---|---|
+| NEO, device buffers, work-group 128 | 294-295 / 292-293 / - | 310-312 / 307-308 / - | |
+| kcl + userptr, llama.cpp layout, 128 | 293.4 / 291.5 / 290.2 | 309.1 / 306.0 / 304.7 | 3.8e-6 / 3.3e-6 |
+| NEO, device buffers, **64** | 307.8 / 305.7 / - | 315.7 / 312.4 / - | 4.1e-6 / 2.7e-6 |
+| **kcl + userptr, 64** | **304.8 / 302.8 / 301.3** | **312.8 / 309.6 / 308.3** | **3.8e-6 / 3.3e-6** |
+| kcl + userptr, 64, n_k 8192 (kv_size 8192) | 305.2 / 303.1 / 302.3 | (128: 309.3 / 306.0 / 305.4) | 4.1e-6 (STEP 7) |
+
+**Verdict: pass.** The kernel keeps its rate through kcl on host memory (-0.5 % vs NEO device buffers), the
+pre-pass costs 0.6 %, submission and wait per layer 0.5 % (0.2 ms of host time per layer). OA counters of the kcl
+and NEO runs agree within the ~3-point repeatability (Qwen: EU active 73 vs 74-75 %, stall 2.0 vs 2.3 %, L3 112 vs
+113-115 GB/s, GTI read 10.4 vs 12.7 GB/s): there is no userptr page effect, as expected for a sequential K/V walk.
+First use (pinning every layer's K/V pages) adds 0.9-1.9 ms per layer once, ~0.9 us per 4 KB page on this desktop.
+`KCL_ARB=age` costs 10 % (275 vs 305), so kcl's round-robin arbitration is right here too.
+
+Laptop UHD 620 (one run each, 1011-1100 MHz): kcl + userptr Qwen 315.7 GFLOPS kernel-only / 311.8 incl. pre-pass
+and submission, Llama 339.7 / 334.2; NEO with work-group 64 vs 128: Qwen 323.9 vs 309.1, Llama 345.1 vs 341.6.
+
+**Step 2: work distribution.** Work-group size (NEO and kcl, three alternating rounds each, OA per size):
+
+| Work-group | Qwen NEO | Qwen kcl | Llama NEO | Llama kcl | OA (Qwen, NEO): idle / stall / GTI read |
+|---|---|---|---|---|---|
+| 128 (old default) | 294.8 (293.7-295.9) | 292.5 | 311.0 | 308.8 | 29 % / 3.0 % / 12.2 GB/s |
+| 96 | 307.8 | 305.8 | (invalid) | | 7 % / 5.0 % / 1.4 GB/s |
+| **64** | 306.2 (306.1-308.1) | **305.2** | 315.7 (315.7-317.6) | **313.3** | 12 % / 7.1 % / 1.6 GB/s |
+| 32 | 308.4 | 304.7 | 315.7 | 312.9 | 14 % / 6.6 % / 1.7 GB/s |
+| 8, 16, 24, 48 | 306-308 | 304 | 315.6-315.7 (8, 16) | 313-313.5 | 11-12 % / 4-5 % / 1.5 GB/s |
+
+Every size except 128 is equally good (Qwen +4 %, Llama +1.5 %; at n_k 8192 Qwen +7 %: 305 vs 285). The prediction
+from the thread-slot cap (56 slots per subslice, 16-thread groups use 48) was wrong: 96 has the same cap and is as
+fast as the rest. What singles out 128 is memory traffic: 8x more GTI reads (L3 misses), with more EU time without a
+thread [HYP: how 16-thread groups are placed, not tested]. Chosen: **64** for both shapes (valid for both grids,
+middle of the flat region); now the default of `bench/attn` (for `.bin`) and `bench/attn_kcl`.
+Grid order (KV heads interleaved between subgroups, `-DHKV_INNER`): no gain (Qwen equal at 64, -5 % at 128; Llama
+-6 % at 64); the default order stays. Persistent threads / split n_k were not tried: after the change the counters
+show 8-14 % idle and 5-7 % stall with both FPU pipes busy 83-86 % of active time, and the grid of 18-24 waves leaves
+at most ~4 % in the tail [EST].
+
+A generator bug surfaced on the way: with `-DHKV_INNER` IGC kept the V pointer in `r6.1:q` and `asm/attn_gen.py`,
+which tracked pointers by register number only, emitted `r6.0:q`: a binary with error 1.0 at full speed, no assert
+fired. Fixed (pointer = register + :q subregister); the eight tracked binaries rebuild bit-identically. Only the
+FP64 reference caught it, which is why checklist item 1 of [isa-notes.md](isa-notes.md) comes first.
+
+What limits now (Qwen, kcl, 64): ~305 GFLOPS = 79 % of the 384 GFLOPS FP32 peak at 1.0 GHz; OA: EU active 86 %,
+stall 5 %, idle 8 %, both FPU pipes 83 % of active time (the non-`mad` instructions of the loop, ~17 % of issue
+slots, section 9). The remaining levers are inside the loop (fewer non-`mad` instructions) or in the work itself
+(the causal mask skips about half the in-ubatch key blocks), not in the launch.

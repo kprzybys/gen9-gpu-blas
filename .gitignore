@@ -30,3 +30,10 @@ experiments/no-neo/*
 experiments/isa/out/
 asm/out/
 asm/*.d/
+# attention: generated binaries (asm/Makefile attn), bench/attn_kcl and its kernel table
+bench/attn
+bench/attn_*.bin
+bench/.attn-device
+bench/attn_kcl
+bench/attn_kernels.c
+bench/.attn_kernels/

@@ -1,5 +1,6 @@
 // attn: standalone test of the fused attention kernel in attn.cl (docs/attention-gpu.md, stage 2).
 // Usage: attn <H> <HKV> <D> <n_q> <n_k> <RQ> <NK> [extra build options]   (env CL=<source.cl or binary.bin>)
+// QTOK=1: Q in llama.cpp's layout Q[t][h][d] (binaries asm/*_tok.bin, built with -DQTOK); default Q[h][t][d].
 // Random Q (float), K, V (half) as llama.cpp flash_attn_ext gives them; one layer, non-causal.
 // Prints: build parameters, SIMD width, spill / private bytes, best time of the K transpose and of the attention
 // kernel (REPS runs after a warm-up), effective rate 4 * n_q * n_k * H * D / time, GPU clock during the best run,
@@ -7,7 +8,8 @@
 // and the last one, all heads (default STEP 7: coprime with the 16/32/64 query rows of a work-group, so every
 // subgroup position is visited; STEP=1 checks the whole output, use it for acceptance).
 // Requirements of the kernels (also of the hand-assembled binaries, asm/attn_gen.py), checked here:
-//   n_k > 0 and divisible by 8*NK; n_q*G divisible by RQ; work-group size (LOCAL, default 128) divisible by 8
+//   n_k > 0 and divisible by 8*NK; n_q*G divisible by RQ; work-group size (LOCAL, default 64 for .bin, 128 for
+//   OpenCL C) divisible by 8
 //   (full SIMD8 subgroups) and dividing the global size; the K-transposed buffer Kt allocated with KT_PAD extra
 //   bytes, default NK*D*16 = one block of 8*NK keys: the sched binaries prefetch the next key block also after the
 //   last one (attn_gen.py header, docs/attention-gpu.md section 9).
@@ -76,7 +78,8 @@ int main(int argc, char **argv) {
         return 2;
     }
 
-    // Data: Q[h][t][d] float, K/V[t][hkv][d] half, O[t][h][d] float.
+    // Data: Q[h][t][d] (QTOK=1: Q[t][h][d]) float, K/V[t][hkv][d] half, O[t][h][d] float.
+    int qtok = getenv("QTOK") && atoi(getenv("QTOK"));
     size_t nQ = (size_t)H * nq * D, nKV = (size_t)nk * HKV * D, nO = (size_t)nq * H * D;
     float *Q = malloc(nQ * 4), *O = malloc(nO * 4);
     uint16_t *K = malloc(nKV * 2), *V = malloc(nKV * 2);
@@ -113,14 +116,17 @@ int main(int argc, char **argv) {
     cl_kernel kkt = clCreateKernel(prog, "k_kt", &err); CHECK(err);
     cl_kernel ka = clCreateKernel(prog, "k_attn", &err); CHECK(err);
 
-    size_t local = getenv("LOCAL") ? strtoull(getenv("LOCAL"), 0, 0) : 128;   // 128 > 64 by 10 % (Qwen)
+    // default work-group size: 64 for the asm binaries (+4 % Qwen, +1.5 % Llama over 128, any size 8..96 is as
+    // good; docs/attention-gpu.md section 10), 128 for OpenCL C sources (stage 2: 128 > 64 by 10 % for variant A)
+    size_t dflt = is_bin ? 64 : 128;
+    size_t local = getenv("LOCAL") ? strtoull(getenv("LOCAL"), 0, 0) : dflt;
     size_t global = (size_t)HKV * (nq * G / RQ) * 8;
     if (local == 0 || local % 8 || global % local) {
         if (getenv("LOCAL")) {
             fprintf(stderr, "LOCAL=%zu: must be a multiple of 8 (full subgroups) dividing the global size %zu\n", local, global);
             return 2;
         }
-        size_t l = 128; while (global % l) l -= 8;          // global is a multiple of 8, so this ends at >= 8
+        size_t l = dflt; while (global % l) l -= 8;          // global is a multiple of 8, so this ends at >= 8
         fprintf(stderr, "warning: global size %zu not divisible by 128, work-group size %zu\n", global, l);
         local = l;
     }
@@ -176,7 +182,7 @@ int main(int argc, char **argv) {
     int nan = 0;
     for (int t = 0; t < nq; t = (t + step < nq || t == nq - 1) ? t + step : nq - 1) {
         for (int h = 0; h < H; h++) {
-            const float *qr = Q + ((size_t)h * nq + t) * D; int hkv = h / G; double mx = -1e300, l = 0;
+            const float *qr = Q + (qtok ? (size_t)t * H + h : (size_t)h * nq + t) * D; int hkv = h / G; double mx = -1e300, l = 0;
             for (int j = 0; j < nk; j++) {
                 const double *kr = Kd + ((size_t)j * HKV + hkv) * D; double a = 0;
                 for (int d = 0; d < D; d++) a += (double)qr[d] * kr[d];
@@ -200,9 +206,9 @@ int main(int argc, char **argv) {
     }
 
     double flop = 4.0 * nq * nk * H * D;
-    printf("H=%d HKV=%d D=%d nq=%d nk=%d RQ=%d NK=%d %s| sg=%zu local=%zu spill=%llu private=%llu ktpad=%zu | kt %.3f ms"
+    printf("H=%d HKV=%d D=%d nq=%d nk=%d RQ=%d NK=%d %s%s | sg=%zu local=%zu spill=%llu private=%llu ktpad=%zu | kt %.3f ms"
            " attn %.3f ms | attn %.1f GFLOPS, incl. kt %.1f | err %.2e%s (tokens %d/%d, STEP %d) | GPU~%d MHz\n",
-           H, HKV, D, nq, nk, RQ, NK, extra, sg, local, (unsigned long long)spill, (unsigned long long)priv, ktpad, best_kt,
+           H, HKV, D, nq, nk, RQ, NK, qtok ? "QTOK " : "", extra, sg, local, (unsigned long long)spill, (unsigned long long)priv, ktpad, best_kt,
            best_a, flop / (best_a * 1e-3) / 1e9, flop / ((best_a + best_kt) * 1e-3) / 1e9, maxerr / maxref,
            nan ? " NaN" : "", nrows, nq, step, best_freq);
     return 0;

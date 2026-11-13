@@ -149,6 +149,12 @@ scratch; kcl does not configure scratch, so results are **silently wrong** (corr
 (`spill_size`, `private_size`, `per_thread_scratch_size`) or `CL_KERNEL_SPILL_MEM_SIZE_INTEL` /
 `CL_KERNEL_PRIVATE_MEM_SIZE` (printed by `bench/attn`). `lib/gen_kernels.py` rejects `spill_size` and scratch but
 not `private_size` alone. A spilling template is useless: its prologue/epilogue would carry scratch traffic.
+**Scratch can hide outside `execution_env`** [MEAS] (commit e228aef): the old Q4_K dequant kernel showed only
+`private_size: 128` and no spill, but declared `per_thread_memory_buffers: type scratch, size 1024`, addressed it
+from `r0.5 & -1024` and wrote through BTI 0xFF; under kcl 198-335 thousand of 6.3 M values were wrong at N = 4096,
+through NEO none. Always grep the whole `.ze_info` for `per_thread_memory_buffers` (the attention binaries have
+none); `lib/gen_kernels.py` now rejects it. Open: `gemv_n_*` / `gemv_nw_*` (`level12.cl`) also declare scratch
+and read `r0.5`, yet pass all tests (allowed by name; cause not explained).
 
 ### 4.6 Addresses
 64-bit multiply is emulated (73 instructions; INT64 mul 12-15 Gop/s, add 50) [MEAS/SW]
@@ -209,6 +215,11 @@ no acc, known regions, sends with `rd:`/`wr:`). Generated loops end with `(W) ad
 (the GEMM generators omit `(W)` on `cmp`; harmless with all channels enabled, but per Vol. 7 p. 766 a disabled
 channel 0 would leave its flag bit stale). Host preconditions the loop does not check: no tail (n_k multiple of 8*NK).
 
+Pointer registers kept across the loop may sit in any :q subregister (`r6.1:q` = bytes 8-15), not only `.0`:
+a generator that tracks registers by number alone emits the wrong half of the register and the binary runs at full
+speed with error 1.0 (seen in `asm/attn_gen.py` with `-DHKV_INNER`, fixed) [MEAS]
+`results/attn-kcl-hd530-2026-11-13.txt`. Track (register, subregister) for every value taken from IGC's code.
+
 ### 4.13 Launch length and memory kind
 A launch that keeps the GPU longer than ~640 ms while the desktop wants it is reset and kcl's wait still returns
 success: silent zeros [MEAS] [pitfalls.md](pitfalls.md) §4, [no-neo.md](no-neo.md) §6a; keep launches far below
@@ -258,13 +269,17 @@ should come with this breakdown next to its GFLOPS.
   IPC, L3 shader / GTI / SLM bytes per second of busy GPU time. Counter symbols for `i915-perf-reader -c`:
   `i915-perf-reader -c list <record>` (e.g. `EuActive`, `EuStall`, `EuFpuBothActive`, `L3ShaderThroughput`).
 - **Limits** [MEAS]: on the desktop HD 530 the reports arrive only at context switches, so each number averages
-  whole launches (no start/tail split); repeated recordings agree within ~3 points. `GtiReadThroughput` varied
+  whole launches (no start/tail split); repeated recordings agree within ~3 points. With launches of ~90 ms the
+  summary became inconsistent with the rate (EU active 55 % at the same GFLOPS as a 75 % run) [HYP: report
+  intervals above ~180 ms wrap a 32-bit EU-cycle counter, 24 EU x 1 GHz]: keep launches under OA <= ~50 ms. `GtiReadThroughput` varied
   0.8-12.9 GB/s between similar kernels and is not interpreted until its semantics are checked. Counters say
   nothing about correctness.
 - **First use** (`results/oa-attention-hd530-2026-11-13.txt`): the asm attention kernel is not memory-bound
   (stall 2-3 %, both FPU pipes busy 86-88 % of active time); its loss is ~20 % (Qwen) / 13 % (Llama) of EU time
   without a thread, which overturned the L3-bandwidth explanation and points at work distribution [HYP:
-  work-group granularity, 3 groups of 16 threads in 56 slots per subslice].
+  work-group granularity, 3 groups of 16 threads in 56 slots per subslice]. Follow-up
+  (`results/attn-kcl-hd530-2026-11-13.txt`): not the slot cap; work-group 128 alone has 8x the GTI reads and
+  29 % idle, every size from 8 to 96 gives 7-14 % idle and +4 % (Qwen); 64 is now the default.
 
 ## 7. Open gaps and how to measure them
 
@@ -274,8 +289,8 @@ should come with this breakdown next to its GFLOPS.
 | Write bandwidth per message (OWord/media block writes) | epilogues, packing | `bench/memory.cl` write variants ([performance-model.md](performance-model.md) §5) |
 | Co-issue of `mad` with `send`/`add`/`math` (FPU vs EM pipe) | Llama attention at 81 % of peak is held by ~15 % non-`mad` instructions [EST] | `micro.py`: fixed `mad` stream plus k interleaved `add (1) :q` / `send`; watch whether time grows |
 | Bank rules beyond `mad` (2-source ops, `math`, sends reading GRF) | softmax and header code | `micro.py` variants of the `bank_*` tests |
-| Thread arbitration (round-robin `0xE404` vs age) on ISA loops | SGEMM K 8192 lost 1.7x without round-robin [MEAS] | rerun attention with `KCL_ARB=age` once it runs through kcl |
-| Why exp in place costs 5 %; why `LOCAL=24` beat 128 (one run) | attention tuning | instruction-order variants; repeated alternating runs |
-| EU idle time in the asm attention kernel (~20 % Qwen, 13 % Llama, OA) | the next lever for Qwen; the L3-bound [EST] is contradicted by OA (stall 2-3 %, L3 112-118 GB/s) | work-group size / grid shape / persistent threads under `bench/oa.sh` |
+| ~~Thread arbitration (round-robin `0xE404` vs age) on ISA loops~~ | measured: the attention kernel loses 10 % with `KCL_ARB=age` (275 vs 305 GFLOPS) [MEAS] `results/attn-kcl-hd530-2026-11-13.txt` | done |
+| Why exp in place costs 5 % | attention tuning | instruction-order variants; repeated alternating runs (the `LOCAL=24` question is answered: every work-group size except 128 is equally fast, [attention-gpu.md](attention-gpu.md) section 10) |
+| Why work-group 128 has 8x the GTI reads and ~2x the idle time of 8-96 in the attention kernel | the cause is open; 64 is used (+4 % Qwen) | thread placement per subslice (e.g. a counter of dispatched groups per subslice, or 2D grids) |
 | Preemption granularity under kcl (no mid-thread preemption) | safe launch length | [HYP] work-group boundary; test with a long single group while the desktop draws |
 | TLB reach | page-heavy access patterns | [performance-model.md](performance-model.md) §5 |

@@ -44,8 +44,15 @@ __kernel void k_kt(__global const ushort *K, __global ushort *Kt, int nk) {
 }
 
 #define DECL(r) OV q##r; OV o##r = 0; float m##r = -1e30f; float l##r = 0.f; SV s##r;
+// Q layout: default Q[h][t][d] (bench/attn.c); QTOK: Q[t][h][d], what llama.cpp's flash_attn_ext gets (the
+// permuted view of Qcur [d_head, n_head, n_tokens]: nb1 = token stride H*D*4, nb2 = head stride D*4), same as O.
+#ifdef QTOK
+#define QOFF(t, hh) ((t) * (HKV * G) + hkv * G + (hh))
+#else
+#define QOFF(t, hh) ((hkv * G + (hh)) * nq + (t))
+#endif
 #define LOADQ(r) { int row = row0 + r, t = row / G, hh = row - t * G; \
-    q##r = BR((const __global uint *)(Q + ((hkv * G + hh) * nq + t) * D)) * qscale; }
+    q##r = BR((const __global uint *)(Q + QOFF(t, hh) * D)) * qscale; }
 #define ZS(r) s##r = 0;
 #define FMAK(r, k, kvk) SK(s##r, k) = fma(sub_group_broadcast(q##r[c], i), (float)as_half(kvk[i]), SK(s##r, k));
 #define FMA0(r) FMAK(r, 0, kv0)
@@ -72,7 +79,11 @@ __kernel void k_attn(__global const float *Q, __global const ushort *Kt, __globa
                      int nq, int nk, float qscale) {
     int sg = get_group_id(0) * get_num_sub_groups() + get_sub_group_id(), lane = get_sub_group_local_id();
     int per_head = nq * G / RQ;
+#ifdef HKV_INNER   // grid order experiment (docs/attention-gpu.md section 10): KV heads alternate between subgroups
+    int hkv = sg % HKV, row0 = (sg / HKV) * RQ;
+#else               // default: all query rows of KV head 0, then of head 1, ...
     int hkv = sg / per_head, row0 = (sg - hkv * per_head) * RQ;
+#endif
     ROWS(DECL)
     ROWS(LOADQ)
     const __global ushort *kp = Kt + (size_t)hkv * nk * D;
