@@ -74,6 +74,18 @@ Also check the platform settings that act like a kernel change: EU thread arbitr
    38 % of FP32 peak (decode, broadcasts and activation loads are 45 % of its instructions; FP32 needs one SIMD8 mad
    per weight at k = 8), only at parity with the FP16 path [MEAS, `results/skinny-q4k-model-2026-11-13.txt`].
 
+### Lessons of 2026-11-13 from parallel work (attention, backend, engines)
+- Issue-bound loop: the schedule counts, not the instruction count. Pairing two send headers into one 64-bit add
+  removed 32 instructions per block and made attention 5 % slower (a 64-bit add runs on FPU0 only and ties two sends
+  together). Check every slimming change with OA (FPU0/FPU1 split), not by counting instructions
+  [MEAS, `results/attn-slim-hd530-2026-11-13.txt`].
+- Model bytes with the bandwidth of the target machine. On gp (one DIMM) the GPU reads F16 at 13.0 GB/s and the CPU
+  at ~14.7: a memory-bound M = 1 workload (whisper decoder) loses on the GPU before any wait is counted (0.56x)
+  [MEAS, `results/whisper-decoder-gpu-ab-gp-2026-11-13.txt`].
+- A cheap op moved to the GPU pays only when it rides in the same submission as a call that waits anyway (GEMM,
+  attention); alone it pays ~0.2 ms of wait. Within one submission without waits, all host buffers must sit in one
+  userptr object (span), or writes get lost [MEAS, `results/ggml-backend-gpu-ops-2026-11-13.txt`].
+
 ## 2. Rules at the OpenCL C level
 
 Rules confirmed in this project (NEO 24.35, IGC from `ocloc` 24.35). Each links to its evidence.
