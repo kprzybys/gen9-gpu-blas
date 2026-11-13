@@ -27,7 +27,7 @@ PROGRAMS = [
 ]
 # attention for the ggml backend (gen9blas_attn.c): whl binaries from `make -C asm attn`, embedded only when built
 # (without them the library declines attention; gen9blas_attn_supported() returns 0)
-for _f in ("attn_qwen_tokc.bin", "attn_llama_tokc.bin", "attn_whisper_tokc.bin"):
+for _f in ("attn_qwen_tokc.bin", "attn_llama_tokc.bin", "attn_whisper_tokc.bin", "attn_qwen7b_tokc.bin"):
     if os.path.exists(os.path.join(BENCH, _f)):
         PROGRAMS.append((_f, None))
     else:

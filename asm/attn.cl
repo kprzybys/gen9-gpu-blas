@@ -51,7 +51,12 @@ __kernel void k_kt(__global const ushort *K, __global ushort *Kt, int nk) {
 #else
 #define QOFF(t, hh) ((hkv * G + (hh)) * nq + (t))
 #endif
-#define LOADQ(r) { int row = row0 + r, t = row / G, hh = row - t * G; \
+#ifdef ROWVIS   // rows clamped to the last one: with n_q*G odd the last subgroup computes that row twice (same store)
+#define ROWOF(r) min(row0 + r, nq * G - 1)
+#else
+#define ROWOF(r) (row0 + r)
+#endif
+#define LOADQ(r) { int row = ROWOF(r), t = row / G, hh = row - t * G; \
     q##r = BR((const __global uint *)(Q + QOFF(t, hh) * D)) * qscale; }
 #define ZS(r) s##r = 0;
 #define FMAK(r, k, kvk) SK(s##r, k) = fma(sub_group_broadcast(q##r[c], i), (float)as_half(kvk[i]), SK(s##r, k));
@@ -65,7 +70,7 @@ __kernel void k_kt(__global const ushort *K, __global ushort *Kt, int nk) {
     if (D == 128) { _Pragma("unroll") for (int c = 0; c < 8; c++) o##r[8 + c] = fma(p, (float)as_half(v1[c]), o##r[8 + c]); } }
 #define PV0(r) PVK(r, 0)
 #define PV1(r) PVK(r, 1)
-#define STORE(r) { float il = 1.f / sub_group_reduce_add(l##r); int row = row0 + r, t = row / G, hh = row - t * G; \
+#define STORE(r) { float il = 1.f / sub_group_reduce_add(l##r); int row = ROWOF(r), t = row / G, hh = row - t * G; \
     __global uint *op = (__global uint *)(O + (t * (HKV * G) + hkv * G + hh) * D); BW(op, o##r * il) }
 #if D == 128
 #define READV ushort8 v0 = intel_sub_group_block_read_us8(vp), v1 = intel_sub_group_block_read_us8(vp + 64);
@@ -78,6 +83,12 @@ __kernel void k_kt(__global const ushort *K, __global ushort *Kt, int nk) {
 // nv = min(nk, vis0 + dvis * t) keys (dvis 1: causal, 0: the same count for every token); the loop runs over the
 // ceil(nv / (8*NK)) key blocks only (fully masked blocks are skipped), and attn_gen.py masks the keys >= nv of the
 // one partial block in its generated loop (lim = nv). All RQ rows of a subgroup belong to one token (G % RQ == 0).
+// ROWVIS (docs/attention-gpu.md section 13, Qwen2.5-7B G 7 with RQ 2): the rows of a subgroup may belong to two
+// consecutive tokens. The loop runs to the last row's count nv; each row r has its own limit lim_r, handed to
+// attn_gen.py through IGC's l register of that row: l##r starts at (float) lim_r (the generated loop zeroes its l sums
+// itself and reads lim_r first; it ties the register to its row by data flow, the l += sum(p) of that row's scores).
+// The generated mask then masks each row against its own limit in the last block (lim_r >= nv - dvis*(RQ-1) lies in
+// it). per_head rounds up and row indices are clamped (ROWOF), so n_q*G need not be a multiple of RQ.
 __attribute__((intel_reqd_sub_group_size(8)))
 __kernel void k_attn(__global const float *Q, __global const ushort *Kt, __global const ushort *V, __global float *O,
                      int nq, int nk, float qscale
@@ -86,7 +97,11 @@ __kernel void k_attn(__global const float *Q, __global const ushort *Kt, __globa
 #endif
                      ) {
     int sg = get_group_id(0) * get_num_sub_groups() + get_sub_group_id(), lane = get_sub_group_local_id();
+#ifdef ROWVIS
+    int per_head = (nq * G + RQ - 1) / RQ;
+#else
     int per_head = nq * G / RQ;
+#endif
 #ifdef HKV_INNER   // grid order experiment (docs/attention-gpu.md section 10): KV heads alternate between subgroups
     int hkv = sg % HKV, row0 = (sg / HKV) * RQ;
 #else               // default: all query rows of KV head 0, then of head 1, ...
@@ -96,7 +111,11 @@ __kernel void k_attn(__global const float *Q, __global const ushort *Kt, __globa
     ROWS(LOADQ)
     const __global ushort *kp = Kt + (size_t)hkv * nk * D;
     const __global ushort *vp = V + hkv * D;
-#ifdef CAUSAL
+#if defined(CAUSAL) && defined(ROWVIS)
+#define LIMR(r) l##r = (float)min(nk, vis0 + dvis * (ROWOF(r) / G));
+    ROWS(LIMR)
+    const int nv = sub_group_broadcast(min(nk, vis0 + dvis * (ROWOF(RQ - 1) / G)), 0);   // the last row's (largest) count
+#elif defined(CAUSAL)
     const int nv = sub_group_broadcast(min(nk, vis0 + dvis * (row0 / G)), 0);   // uniform for IGC: scalar loop limit
 #else
     const int nv = nk;

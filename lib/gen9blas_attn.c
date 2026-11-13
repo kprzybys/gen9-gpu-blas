@@ -16,11 +16,14 @@
 #include <stdlib.h>
 #include <string.h>
 
-typedef struct { int D, G, HKV, RQ, NK; const char *bin; cl_kernel kt, attn; int state; } attn_bin_t;   // state: 0 untried, 1 ok, -1 failed
+// rowvis: binary built with -DROWVIS=1 (asm/attn.cl): per-row visible key counts (the RQ rows of a subgroup may span two
+// consecutive tokens, so dvis 1 is right for any G when RQ <= 2) and clamped row indices (n_q*G need not divide by RQ)
+typedef struct { int D, G, HKV, RQ, NK, rowvis; const char *bin; cl_kernel kt, attn; int state; } attn_bin_t;   // state: 0 untried, 1 ok, -1 failed
 static attn_bin_t bins[] = {
-    { 128, 6, 2, 2, 2, "attn_qwen_tokc.bin", NULL, NULL, 0 },    // Qwen2.5-1.5B (sched4)
-    { 64, 4, 8, 4, 2, "attn_llama_tokc.bin", NULL, NULL, 0 },    // Llama-3.2-1B (sched2)
-    { 64, 1, 20, 4, 2, "attn_whisper_tokc.bin", NULL, NULL, 0 }, // whisper large-v3(-turbo) encoder (sched2); G < RQ: dvis 0 only
+    { 128, 6, 2, 2, 2, 0, "attn_qwen_tokc.bin", NULL, NULL, 0 },    // Qwen2.5-1.5B (sched4)
+    { 64, 4, 8, 4, 2, 0, "attn_llama_tokc.bin", NULL, NULL, 0 },    // Llama-3.2-1B (sched2)
+    { 64, 1, 20, 4, 2, 0, "attn_whisper_tokc.bin", NULL, NULL, 0 }, // whisper large-v3(-turbo) encoder (sched2); G < RQ: dvis 0 only
+    { 128, 7, 4, 2, 2, 1, "attn_qwen7b_tokc.bin", NULL, NULL, 0 },  // Qwen2.5-7B (sched4, ROWVIS; docs/attention-gpu.md section 13)
 };
 static cl_mem dKt; static size_t sKt;
 static char aerr[512];
@@ -69,11 +72,14 @@ int gen9blas_attn_f16kv(int D, int H, int HKV, int nq, int nk, const float *Q, c
     const int G = H / HKV, NK = b->NK;
     // rows (token-major, row = t * G + head) split into whole RQ-row subgroups: every launch slice is a multiple of 8
     // tokens except the last, so 8 * G and nq * G must divide by RQ (G % RQ for the GQA shapes; whisper G 1, RQ 4)
+    // (rowvis binaries: the last slice may have n_q*G odd; the kernel rounds the subgroup count up and clamps rows)
     if (nq <= 0 || nk <= 0 || nk % (8 * NK) || vis0 < 1 || (dvis != 0 && dvis != 1) || (8 * G) % b->RQ ||
-        ((long)nq * G) % b->RQ) return 1;
-    // asm/attn.cl computes the visible key count once per subgroup, from the token of its first row: right only when
-    // all RQ rows are one token (G % RQ == 0) or every token sees the same count (dvis 0). G 1 with causal: unsupported.
-    if (G % b->RQ && dvis != 0) return 1;
+        (!b->rowvis && ((long)nq * G) % b->RQ)) return 1;
+    // asm/attn.cl without ROWVIS computes the visible key count once per subgroup, from the token of its first row:
+    // right only when all RQ rows are one token (G % RQ == 0) or every token sees the same count (dvis 0); G 1 with
+    // causal: unsupported. ROWVIS binaries take each row's own count (rows differ by at most dvis * (RQ - 1) keys,
+    // all in the last block: RQ <= 2 asserted by attn_gen.py).
+    if (G % b->RQ && dvis != 0 && !b->rowvis) return 1;
     const size_t row = (size_t)HKV * D * 2;
     if (k_bytes < (size_t)nk * row || v_bytes < (size_t)nk * row) return 1;
     if (((uintptr_t)Q | (uintptr_t)K | (uintptr_t)V | (uintptr_t)O) & 15) return 1;   // OWord block reads / writes
@@ -112,7 +118,7 @@ int gen9blas_attn_f16kv(int D, int H, int HKV, int nq, int nk, const float *Q, c
             cQ = kcl_userptr(Q + t0 * qrow, nc * qrow * 4, 0); cO = kcl_userptr(O + t0 * qrow, nc * qrow * 4, 1);
             if (!cQ || !cO) AFAIL("kcl_userptr of a Q/O slice failed");
         }
-        size_t global = (size_t)HKV * (nc * G / b->RQ) * 8, local = local_size(global);
+        size_t global = (size_t)HKV * ((nc * G + b->RQ - 1) / b->RQ) * 8, local = local_size(global);
         if (!local) AFAIL("grid %zu", global);
         ACHECK(clSetKernelArg(b->attn, 0, sizeof cQ, &cQ)); ACHECK(clSetKernelArg(b->attn, 1, sizeof dKt, &dKt));
         ACHECK(clSetKernelArg(b->attn, 2, sizeof mV, &mV)); ACHECK(clSetKernelArg(b->attn, 3, sizeof cO, &cO));

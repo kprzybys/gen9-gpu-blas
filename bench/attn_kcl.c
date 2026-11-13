@@ -24,6 +24,9 @@
 //             maximum is in the first block, the rescale never runs after it), Q dim 0 = 1; use with QSIGMA=0.1
 //   VIS0      causal binaries (*_tokc, docs/attention-gpu.md section 11): token t sees min(n_k, VIS0 + DVIS*t) keys
 //             (DVIS default 1); default binary attn_*_tokc.bin; FLOP and the FP64 reference count visible keys only
+//   ROWVIS    1: binary built with -DROWVIS=1 (per-row visible counts, rows clamped; docs/attention-gpu.md section 13):
+//             n_q*G need not divide by RQ, the grid rounds up. Default 1 for attn_qwen7b_tokc.bin (default binary for
+//             D 128, G 7 with VIS0), else 0
 // Output: pass 0 (first use: userptr pinning of every layer's pages) separately from the steady state; kernel time
 // from GPU timestamps (PIPE_CONTROL, 12 MHz), wall time per layer incl. submission and wait, CPU time, GPU clock
 // sampled every 2 ms by a helper thread, error vs FP64.
@@ -97,19 +100,20 @@ int main(int argc, char **argv) {
     int H = atoi(argv[1]), HKV = atoi(argv[2]), D = atoi(argv[3]), nq = atoi(argv[4]), nk = atoi(argv[5]);
     int RQ = atoi(argv[6]), NK = atoi(argv[7]), G = H / HKV;
     int vis0 = getenv("VIS0") ? atoi(getenv("VIS0")) : 0, dvis = getenv("DVIS") ? atoi(getenv("DVIS")) : 1;
-    const char *bin = getenv("BIN") ? getenv("BIN") : D == 128 ? (vis0 ? "attn_qwen_tokc.bin" : "attn_qwen_tok.bin")
+    const char *bin = getenv("BIN") ? getenv("BIN") : D == 128 ? (vis0 ? (G == 7 ? "attn_qwen7b_tokc.bin" : "attn_qwen_tokc.bin") : "attn_qwen_tok.bin")
                                                               : (vis0 ? "attn_llama_tokc.bin" : "attn_llama_tok.bin");
+    int rowvis = getenv("ROWVIS") ? atoi(getenv("ROWVIS")) : strstr(bin, "qwen7b") != NULL;
     int kv_size = getenv("KV_SIZE") ? atoi(getenv("KV_SIZE")) : nk;
     int L = getenv("LAYERS") ? atoi(getenv("LAYERS")) : 28, passes = getenv("PASSES") ? atoi(getenv("PASSES")) : 5;
     int reg_view = getenv("REG") && !strcmp(getenv("REG"), "view");
     int step = getenv("STEP") ? atoi(getenv("STEP")) : 7;
     double qsigma = getenv("QSIGMA") ? atof(getenv("QSIGMA")) : 5.0;
     double ramp = getenv("RAMP") ? atof(getenv("RAMP")) : 0.0;
-    if (nk <= 0 || nq <= 0 || (nq * G) % RQ || nk % (8 * NK) || kv_size < nk || L < 1 || passes < 1) {
+    if (nk <= 0 || nq <= 0 || (!rowvis && (nq * G) % RQ) || nk % (8 * NK) || kv_size < nk || L < 1 || passes < 1) {
         fprintf(stderr, "need n_q > 0, n_k > 0, n_q*G divisible by RQ (%d), n_k divisible by 8*NK (%d), KV_SIZE >= n_k\n", RQ, 8 * NK);
         return 2;
     }
-    size_t global = (size_t)HKV * (nq * G / RQ) * 8;
+    size_t global = (size_t)HKV * ((nq * G + RQ - 1) / RQ) * 8;
     size_t local = getenv("LOCAL") ? strtoull(getenv("LOCAL"), 0, 0) : 64;   // section 10: 64 > 128 by 4 % (Qwen)
     if (!getenv("LOCAL")) while (local > 8 && global % local) local /= 2;     // as lib/gen9blas_attn.c
     if (local == 0 || local % 8 || global % local) {
@@ -154,9 +158,9 @@ int main(int argc, char **argv) {
     float qscale = (float)(1.0 / sqrt((double)D) * 1.4426950408889634);
 
     printf("# %s H=%d HKV=%d D=%d nq=%d nk=%d RQ=%d NK=%d | KV_SIZE=%d LAYERS=%d REG=%s local=%zu kt_local=%zu | KV buffer %.1f MB"
-           " at page offset %lu, Q/O page offset %lu | VIS0=%d DVIS=%d\n", bin, H, HKV, D, nq, nk, RQ, NK, kv_size, L,
+           " at page offset %lu, Q/O page offset %lu | VIS0=%d DVIS=%d ROWVIS=%d\n", bin, H, HKV, D, nq, nk, RQ, NK, kv_size, L,
            reg_view ? "view" : "tensor", local, lkt, 2.0 * L * S / 1e6, (unsigned long)((uintptr_t)kv & 4095),
-           (unsigned long)((uintptr_t)QO & 4095), vis0, dvis);
+           (unsigned long)((uintptr_t)QO & 4095), vis0, dvis, rowvis);
 
     pthread_t th; pthread_create(&th, NULL, sampler, NULL);
     double flop = 4.0 * nq * nk * H * D;

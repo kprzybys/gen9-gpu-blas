@@ -33,8 +33,12 @@ Every line of the regions the generator analyses (IGC's loop and epilogue) must 
 
 Requirements on the host (bench/attn.c checks them; the generated loop does not):
   - n_k > 0 and n_k divisible by 8*NK (one loop iteration = 8*NK keys, no tail handling);
-  - n_q * G divisible by RQ, full SIMD8 subgroups: work-group size divisible by 8 and global size by the
-    work-group size (the analysis assumes all 8 lanes enabled);
+  - n_q * G divisible by RQ (not needed with -DROWVIS=1: rows clamped, grid rounded up), full SIMD8 subgroups:
+    work-group size divisible by 8 and global size by the work-group size (the analysis assumes all 8 lanes enabled);
+  - ROWVIS=1 (template option, docs/attention-gpu.md section 13): per-row visible key counts. IGC's l register of each
+    row enters the loop holding (float) lim_r; igc_maps ties every l register to one row by data flow (the l += sum of
+    that row's exp'd scores) and sched() copies lim_r to T2.6.. before zeroing l; the mask of the last block compares
+    each row against its own limit (RQ <= 2: rows differ by at most one key, both limits in the last block);
   - K PADDING (sched modes): the ring prefetches the first NS steps of the next key block, also after the last
     block, so the K-transposed buffer Kt is read past the end of the last KV head by up to
     (NS-1)*128 + (NK-1)*D*16 + 128 bytes (Qwen sched4 NK 2 D 128: 2560 B; Llama sched2 NK 2 D 64: 1280 B).
@@ -254,6 +258,7 @@ def igc_maps(pro, loop, epi, P):
     chains, schain_q, sinfo = 0, {}, {}
     qmap, omap, kbase, vbase = {}, {}, set(), set()
     lregs = {}                                          # l candidate -> accumulating adds per iteration
+    ltag = {}                                           # l candidate -> tags of what it accumulates (ROWVIS: its row)
     pend_pv = []
     for l in loop:
         op = isa.opcode(l)
@@ -324,9 +329,15 @@ def igc_maps(pro, loop, epi, P):
             if a[0] == "S" and ops[2][3].startswith("<0"):
                 val[int(ops[0][1][1:])] = ("Sm", a[1])
                 continue
+            b = get(int(ops[2][1][1:])) if len(ops) > 2 and ops[2][1].startswith("r") else ("imm",)
+            if a[0] in ("P", "Psum") and b[0] in ("P", "Psum") and not ops[1][0] and not ops[2][0]:
+                cids = lambda x: x[1] if x[0] == "Psum" else frozenset([x[1]])    # noqa: E731
+                val[int(ops[0][1][1:])] = ("Psum", cids(a) | cids(b))   # sum of exp'd score chains (NK 2: p.s0 + p.s1)
+                continue
             if ops[0][1] == ops[1][1] and get(int(ops[1][1][1:]))[0] == "entry":
                 lr = int(ops[0][1][1:])
                 lregs[lr] = lregs.get(lr, 0) + 1
+                ltag.setdefault(lr, set()).add(b[:2] if b[0] in ("P", "Psum") else b[:1])
         if op == "math.exp" and n == 8:
             a = get(int(ops[1][1][1:]))
             if a[0] == "Sm":
@@ -356,6 +367,18 @@ def igc_maps(pro, loop, epi, P):
     assert len(lr) == len(rows), ("l registers: expected one per row", lr, len(rows))
     assert all(lregs[r] == 1 for r in lr), ("l register accumulated more than once per iteration", lregs)
     assert set(lr) <= live_in(epi)[0], ("l register not read by the epilogue", lr)
+    # row of each l register (data flow: the l += sum(p) of exactly one row's scores); used by ROWVIS, checked always
+    lrow = {}
+    for r in lr:
+        t = ltag[r]
+        if len(t) == 1 and next(iter(t))[0] in ("P", "Psum"):
+            x = next(iter(t))
+            rs_ = {row_of[c] for c in (x[1] if x[0] == "Psum" else [x[1]])}
+            if len(rs_) == 1:
+                lrow[r] = rs_.pop()
+    if P.get("ROWVIS"):
+        assert len(lrow) == len(rows) and sorted(lrow.values()) == list(range(len(rows))), \
+            ("ROWVIS: l registers not tied one-to-one to rows", ltag, lrow)
     # loop counter: the only `cmp (lt)` of the loop, `cmp cnt < lim` on two scalar :d registers, after the only
     # write of cnt (`add (1) cnt = cnt + 8*NK`); lim not written in the loop; the loop exits on the negated flag.
     heads = [i for i, l in enumerate(loop) if re.search(r"cmp \(\d+\|M0\)\s+\(lt\)", l)]
@@ -389,7 +412,7 @@ def igc_maps(pro, loop, epi, P):
     exits = [l for l in loop if re.search(rf"\(~{re.escape(flag)}\)\s+break", l)]
     assert len(exits) == 1, ("loop exit is not `(~flag) break` on the cmp flag", flag)
     assert len(kbase) == 1 and len(vbase) == 1, (kbase, vbase)
-    return dict(q=qmap, o=omap, l=lr, kp=kbase.pop(), vp=vbase.pop(),
+    return dict(q=qmap, o=omap, l=lr, lrow=lrow, kp=kbase.pop(), vp=vbase.pop(),
                 cnt=cnt, lim=lim, rows=len(rows))
 
 
@@ -509,6 +532,14 @@ def sched(pro, loop, epi, P, NS):
                 f"{W}mov (1|M0)  r{a[0]}.{a[1]}<1>:f  r{b[0]}.{b[1]}<0;1,0>:f",
                 f"{W}mov (1|M0)  r{b[0]}.{b[1]}<1>:f  r{T1}.0<0;1,0>:f"]
     left = abs(len(mis[0]) - len(mis[1]))
+    # ROWVIS (asm/attn.cl): IGC's l register of row r enters the loop holding (float) lim_r; copy it as an integer into
+    # T2.(LV + r) before the l sums are zeroed (T2 dwords: 0-1 reductions, 2 rem, MO.. row maxima, LV.. limits)
+    rowvis = P.get("ROWVIS", 0) == 1
+    LV = 6
+    if rowvis:
+        assert P.get("CAUSAL", 0) == 1 and RQ <= 2 and (Mx != T2 or MO + RQ <= LV), ("ROWVIS needs CAUSAL, RQ <= 2", RQ, MO)
+        lof = {row: reg for reg, row in M["lrow"].items()}
+        out += [f"{W}mov (1|M0)  r{T2}.{LV + r}<1>:d  r{lof[r]}.0<0;1,0>:f" for r in range(RQ)]
     for r in range(RQ):
         out += [f"{W}mov (1|M0)  r{Mx}.{MO + r}<1>:f  -1e+30:f", f"        mov (8|M0)  r{L[r]}.0<1>:f  0.0:f"]
     # Send headers: the A64 oword block read uses only the address in DW0-1 (IGC's own headers set only .0:uq
@@ -667,15 +698,28 @@ def sched(pro, loop, epi, P, NS):
         ids, :w) and T2.2 (rem, :d; read as T2.4:w), both free here (the softmax rewrites them; Mx sits in T2.4:f+ as
         dwords 4..7, not dword 2); flag f1.0 (the softmax sets it again before each use)."""
         if SLIM_CNT:    # cnt already advanced, f1.1 = (cnt < lim) = another block follows -> this one is full
-            o = ["(W&f1.1) jmpi  LATT_NOMASK",
-                 f"{W}add (1|M0)  r{T2}.2<1>:d  {lim}<0;1,0>:d  -{cnt}<0;1,0>:d",
-                 f"{W}add (1|M0)  r{T2}.2<1>:d  r{T2}.2<0;1,0>:d  {8 * NK}:w",
-                 f"{W}mov (8|M0)  r{T1}.0<1>:w  0x76543210:v"]
+            o = ["(W&f1.1) jmpi  LATT_NOMASK"]
+            if not rowvis:  # (rowvis: rem per row below)
+                o += [f"{W}add (1|M0)  r{T2}.2<1>:d  {lim}<0;1,0>:d  -{cnt}<0;1,0>:d",
+                      f"{W}add (1|M0)  r{T2}.2<1>:d  r{T2}.2<0;1,0>:d  {8 * NK}:w"]
+            o.append(f"{W}mov (8|M0)  r{T1}.0<1>:w  0x76543210:v")
         else:
             o = [f"{W}add (1|M0)  r{T2}.2<1>:d  {lim}<0;1,0>:d  -{cnt}<0;1,0>:d",
                  f"{W}cmp (1|M0)  (lt)f1.0  null<1>:d  r{T2}.2<0;1,0>:d  {8 * NK}:w",
                  "(W&~f1.0) jmpi  LATT_NOMASK",
                  f"{W}mov (8|M0)  r{T1}.0<1>:w  0x76543210:v"]
+        if rowvis:      # each row against its own limit: rem_r = lim_r - (first key of this block), as above
+            for r in range(RQ):
+                o.append(f"{W}add (1|M0)  r{T2}.2<1>:d  r{T2}.{LV + r}<0;1,0>:d  -{cnt}<0;1,0>:d")
+                if SLIM_CNT:
+                    o.append(f"{W}add (1|M0)  r{T2}.2<1>:d  r{T2}.2<0;1,0>:d  {8 * NK}:w")
+                for k in range(NK):
+                    if k:
+                        o.append(f"{W}add (1|M0)  r{T2}.2<1>:d  r{T2}.2<0;1,0>:d  -8:w")
+                    o += [f"{W}cmp (8|M0)  (ge)f1.0  null<1>:w  r{T1}.0<8;8,1>:w  r{T2}.4<0;1,0>:w",
+                          f"(W&f1.0) mov (8|M0)  r{S[(r, k)]}.0<1>:f  -1e+30:f"]
+            o.append("LATT_NOMASK:")
+            return o
         for k in range(NK):
             if k:
                 o.append(f"{W}add (1|M0)  r{T2}.2<1>:d  r{T2}.2<0;1,0>:d  -8:w")
