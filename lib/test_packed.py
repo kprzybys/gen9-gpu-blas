@@ -146,6 +146,50 @@ f16w("33x100x2051 (padding)", 33, 100, 2051)
 f16w("overflow: x=1000, w=1, K=256 -> C=256000", 64, 64, 256, a_scale=1000.0, w_ones=True, expect_flag=True)
 f16w("no overflow: x=200, w=1, K=256 -> C=51200", 64, 64, 256, a_scale=200.0, w_ones=True)
 
+# fused gated FFN (gen9blas_ffn_f16w): Y = (silu(X Wg) * (X Wu)) Wd, FP16 weights, intermediates on the GPU
+L.gen9blas_ffn_f16w.argtypes = [_i, _p, _i, _p, _p, _p, _p, _i, ctypes.POINTER(_i)]
+
+
+def ffn(name, M, K, N, Nd, x_scale=1.0, expect_flag=False):
+    global errors
+    X = (rng.uniform(-1, 1, (M, K)) * x_scale).astype(np.float32)
+    Wg, Wu = (rng.uniform(-1, 1, (N, K)) / np.sqrt(K)).astype(np.float16), (rng.uniform(-1, 1, (N, K)) / np.sqrt(K)).astype(np.float16)
+    Wd = (rng.uniform(-1, 1, (Nd, N)) / np.sqrt(N)).astype(np.float16)
+    Pg, Pu, Pd = pack(HS, Wg, 1)[0], pack(HS, Wu, 1)[0], pack(HS, Wd, 1)[0]
+    Y = np.zeros((M, Nd), np.float32)
+    nf = _i(0)
+    if L.gen9blas_ffn_f16w(M, X.ctypes.data, K, Pg, Pu, Pd, Y.ctypes.data, Nd, ctypes.byref(nf)) != 0:
+        raise RuntimeError(L.gen9blas_error().decode())
+    if expect_flag:
+        ok = nf.value == 1
+        print(f"{'OK ' if ok else 'ERR'} FFN  {name:40s} nonfinite flag {nf.value} (expected 1)")
+    else:
+        # unfused reference with the same library: gate, up via gemm_pb_f16w, SWIGLU in float32, down via gemm_pb_f16w
+        G, U, Y2 = np.zeros((M, N), np.float32), np.zeros((M, N), np.float32), np.zeros((M, Nd), np.float32)
+        f = _i(0)
+        L.gen9blas_gemm_pb_f16w(M, X.ctypes.data, K, Pg, G.ctypes.data, N, ctypes.byref(f))
+        L.gen9blas_gemm_pb_f16w(M, X.ctypes.data, K, Pu, U.ctypes.data, N, ctypes.byref(f))
+        H = (G / (1 + np.exp(-G)) * U).astype(np.float32)
+        L.gen9blas_gemm_pb_f16w(M, H.ctypes.data, N, Pd, Y2.ctypes.data, Nd, ctypes.byref(f))
+        # float64 reference on sampled rows
+        rows = sorted({0, M // 2, M - 1})
+        g = X[rows].astype(np.float64) @ Wg.T.astype(np.float64); u = X[rows].astype(np.float64) @ Wu.T.astype(np.float64)
+        h = g / (1 + np.exp(-g)) * u
+        ref = h @ Wd.T.astype(np.float64)
+        mag = np.abs(h) @ np.abs(Wd.T.astype(np.float64))
+        e = float(np.max(np.abs(Y[rows] - ref) / np.maximum(mag, 1e-30)))
+        d = float(np.max(np.abs(Y - Y2)) / max(np.max(np.abs(Y2)), 1e-30))
+        ok = nf.value == 0 and e <= 3e-3 and d <= 2e-3 and np.all(np.isfinite(Y))
+        print(f"{'OK ' if ok else 'ERR'} FFN  {name:40s} rel err {e:.2e}, max |fused - unfused| / max|Y| {d:.2e}, flag {nf.value}")
+    errors += not ok
+    for P in (Pg, Pu, Pd):
+        L.gen9blas_packed_free(P)
+
+
+ffn("512x1536 -> 8960 -> 1536 (Qwen2.5-1.5B)", 512, 1536, 8960, 1536, x_scale=4.0)
+ffn("37x300 -> 1000 -> 77 (padding)", 37, 300, 1000, 77)
+ffn("overflow: |x| up to 3000", 64, 512, 512, 64, x_scale=3000.0, expect_flag=True)
+
 # output projection of Qwen2.5-1.5B: 151936 x 1536 FP32 (0.93 GB), M = 512 (llama-perplexity: all rows)
 if os.environ.get("SKIP_BIG") is None:
     N, K, M = 151936, 1536, 512

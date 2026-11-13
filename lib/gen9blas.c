@@ -119,7 +119,7 @@ static int init_l12(const char *dir) {
 
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
-static cl_kernel k_pa3_f32, k_epi_hf;   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w)
+static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu;   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
 int gen9blas_init(const char *dir) {
     static int inited;
     if (inited) return 0;
@@ -142,7 +142,7 @@ int gen9blas_init(const char *dir) {
     usm_arg = (clSetKernelArgMemPointerINTEL_fn)clGetExtensionFunctionAddressForPlatform(plat, "clSetKernelArgMemPointerINTEL");
     if (!usm_alloc || !usm_free || !usm_info || !usm_arg) FAIL("missing cl_intel_unified_shared_memory extension");
     if (init_l12(dir)) return -1;
-    KER(ph, "pk_a3_f32", k_pa3_f32); KER(ph, "gen9blas_epilog_hf", k_epi_hf);   // F16 weights x F32 activations
+    KER(ph, "pk_a3_f32", k_pa3_f32); KER(ph, "gen9blas_epilog_hf", k_epi_hf); KER(ph, "gen9blas_swiglu_pack_a3", k_swiglu);   // F16 weights x F32 activations
     // "v" kernels: (Ap, Bp, C, M, N, ldc, K, Kfull) -- also for chunks of data packed once (sub-buffers)
     // bin = NULL: main kernel from source (FP64: dgemm.cl, OpenCL C), not from an asm binary
     struct { int r; const char *bin, *k, *pa, *pb, *epi, *tri; int es, tn, km; cl_program pr; } t[4] = {
@@ -639,6 +639,68 @@ int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed 
         CHECK(clEnqueueNDRangeKernel(q, k_epi_hf, 3, o, ge, NULL, 0, NULL, NULL));
     }
     if (to_host(xC, zC, bC, C)) return -1;
+    *nonfinite = *nf != 0;
+    return 0;
+}
+
+// GEMM of a packed A (device) with a packed B into a device buffer C (row stride Np), banded when long.
+static int gemm_dev(type_t *r, cl_mem Ap, cl_mem Bp, cl_mem C, int Mp, int Np, int Kp) {
+    if (est_ms(r, Mp, Np, Kp) > max_launch_ms()) return launch(r, Ap, 0, Bp, 0, C, 0, Mp, Np, Np, Kp, Kp, 0);
+    ARG(r->main, 0, Ap); ARG(r->main, 1, Bp); ARG(r->main, 2, C); ARG(r->main, 3, Mp); ARG(r->main, 4, Np);
+    ARG(r->main, 5, Np); ARG(r->main, 6, Kp); ARG(r->main, 7, Kp);
+    size_t gm = (size_t)(Np / r->tn) * (Mp / 16) * 16, lm = 16;
+    CHECK(clEnqueueNDRangeKernel(q, r->main, 1, NULL, &gm, &lm, 0, NULL, NULL));
+    return 0;
+}
+
+// Gated FFN with FP16 weights (ggml: down(swiglu(gate(x), up(x)))), all intermediates on the GPU:
+// Y (F32, M x Nd) = (silu(X Wg) * (X Wu)) Wd, with Pg, Pu (K -> N) and Pd (N -> Nd) packed as GEN9BLAS_HS.
+// X is packed to FP16 once; gate and up stay FP16; h is computed in F32 and rounded to FP16 into down's packed A;
+// down's result goes through the FP16 -> F32 epilogue. *nonfinite = 1 on any inf / NaN / FP16 overflow on the way.
+static cl_mem dG, dU, dH; static size_t sG, sU, sH;
+int gen9blas_ffn_f16w(int M, const float *X, int ldx, const gen9blas_packed *Pg, const gen9blas_packed *Pu,
+                      const gen9blas_packed *Pd, float *Y, int ldy, int *nonfinite) {
+    static int *nf;
+    NEW_OPERATION();
+    if (!Pg || !Pu || !Pd || Pg->type != GEN9BLAS_HS || Pu->type != GEN9BLAS_HS || Pd->type != GEN9BLAS_HS || !k_swiglu)
+        FAIL("ffn_f16w: needs weights packed as GEN9BLAS_HS");
+    if (Pg->K != Pu->K || Pg->N != Pu->N || Pd->K != Pg->N || Pg->Np != Pu->Np)
+        FAIL("ffn_f16w: shapes do not chain (gate %dx%d, up %dx%d, down %dx%d)", Pg->K, Pg->N, Pu->K, Pu->N, Pd->K, Pd->N);
+    if (!nf && !(nf = gen9blas_alloc(64))) return -1;
+    *nonfinite = 0;
+    if (M <= 0) return 0;
+    type_t *r = &types[GEN9BLAS_HS];
+    int K = Pg->K, Kp = Pg->Kp, N = Pg->N, Np = Pg->Np, Nd = Pd->N, Npd = Pd->Np, Mp = (M + 15) / 16 * 16;
+    size_t bX = ((size_t)(M - 1) * ldx + K) * 4, bY = ((size_t)(M - 1) * ldy + Nd) * 4;
+    bf_t xX, xY; int zX, zY;
+    if (get_obj(X, bX, &uA, 1, 0, &xX, &zX) || get_obj(Y, bY, &uC, 0, 1, &xY, &zY)) return -1;
+    if (ensure_buf(&dAp, &sAp, (size_t)Mp * Kp * 2 + 4096) || ensure_buf(&dG, &sG, (size_t)Mp * Np * 2) ||
+        ensure_buf(&dU, &sU, (size_t)Mp * Np * 2) || ensure_buf(&dH, &sH, (size_t)Mp * Pd->Kp * 2 + 4096) ||
+        ensure_buf(&dCp, &sCp, (size_t)Mp * Npd * 2)) return -1;
+    *nf = 0;
+    bf_t xnf = { NULL, nf };
+    cl_long zero = 0;
+    ARGB(k_pa3_f32, 0, xX); ARG(k_pa3_f32, 1, dAp); ARG(k_pa3_f32, 2, M); ARG(k_pa3_f32, 3, K); ARG(k_pa3_f32, 4, ldx);
+    ARG(k_pa3_f32, 5, Kp); ARG(k_pa3_f32, 6, zero); ARG(k_pa3_f32, 7, Mp);
+    size_t ga[3] = { (size_t)Kp, (size_t)Mp, 1 };
+    CHECK(clEnqueueNDRangeKernel(q, k_pa3_f32, 3, NULL, ga, NULL, 0, NULL, NULL));
+    if (gemm_dev(r, dAp, Pg->buf, dG, Mp, Np, Kp) || gemm_dev(r, dAp, Pu->buf, dU, Mp, Np, Kp)) return -1;
+    int Kpd = Pd->Kp;
+    ARG(k_swiglu, 0, dG); ARG(k_swiglu, 1, dU); ARG(k_swiglu, 2, Np); ARG(k_swiglu, 3, M); ARG(k_swiglu, 4, N);
+    ARG(k_swiglu, 5, dH); ARG(k_swiglu, 6, Kpd); ARGB(k_swiglu, 7, xnf);
+    size_t gs[2] = { (size_t)Kpd, (size_t)Mp };
+    CHECK(clEnqueueNDRangeKernel(q, k_swiglu, 2, NULL, gs, NULL, 0, NULL, NULL));
+    if (gemm_dev(r, dH, Pd->buf, dCp, Mp, Npd, Kpd)) return -1;
+    float one = 1.0f, zf = 0.0f; cl_long lC = 0;
+    ARG(k_epi_hf, 0, dCp); ARG(k_epi_hf, 1, Npd); ARG(k_epi_hf, 2, Mp); ARGB(k_epi_hf, 3, xY); ARG(k_epi_hf, 4, ldy);
+    ARG(k_epi_hf, 5, lC); ARG(k_epi_hf, 6, one); ARG(k_epi_hf, 7, zf); ARGB(k_epi_hf, 8, xnf);
+    size_t mb = pack_band_bytes() / ((size_t)Nd * 6);
+    if (mb < 1) mb = 1;
+    for (size_t i0 = 0; i0 < (size_t)M; i0 += mb) {
+        size_t o[3] = { 0, i0, 0 }, ge[3] = { (size_t)Nd, (size_t)M - i0 < mb ? (size_t)M - i0 : mb, 1 };
+        CHECK(clEnqueueNDRangeKernel(q, k_epi_hf, 3, o, ge, NULL, 0, NULL, NULL));
+    }
+    if (to_host(xY, zY, bY, Y)) return -1;
     *nonfinite = *nf != 0;
     return 0;
 }

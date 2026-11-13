@@ -579,6 +579,21 @@ __kernel void gen9blas_epilog_hf(__global const half *Cp, int ldp, int Mp, __glo
     c[0] = v;
 }
 
+// ggml backend FFN fusion: h = silu(g) * u (ggml SWIGLU, silu(x) = x / (1 + e^-x)) from two FP16 GEMM results
+// (row-major, row stride ldp), computed in F32 and written as FP16 straight into the A3 packed layout of the next GEMM
+// (down projection, Kp = its padded K). *nonfinite |= 1 on inf / NaN in g, u or h, or |h| beyond FP16. Grid (Kp, Mp).
+__kernel void gen9blas_swiglu_pack_a3(__global const half *G, __global const half *U, int ldp, int M, int N,
+                                      __global half *Ap, int Kp, __global int *nonfinite) {
+    const int k = get_global_id(0), m = get_global_id(1);
+    float h = 0.0f;
+    if (m < M && k < N) {
+        const float g = vload_half(0, G + (size_t)m * ldp + k), u = vload_half(0, U + (size_t)m * ldp + k);
+        h = g / (1.0f + exp(-g)) * u;
+        if (!isfinite(g) || !isfinite(u) || !(fabs(h) <= 65504.0f)) atomic_or(nonfinite, 1);
+    }
+    vstore_half_rte(h, 0, Ap + PK_IDX_A3(m, k, Kp));
+}
+
 // ---------- "v" versions: separate N (columns to compute), ldc (row stride of C), K (loop length) and Kfull
 // (stride of packed data panels). Allows computing a piece of packed data once (sub-buffers with offset).
 // Batched: matrix b starts at Ap + b·M·Kfull, Bp + b·N·Kfull, C + b·M·ldc.

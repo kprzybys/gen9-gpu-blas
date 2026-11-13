@@ -46,6 +46,10 @@ void gen9blas_packed_free(gen9blas_packed *Bp);
 // A and the result are rounded to FP16 once each (accurate FP16 GEMM: FP32 sums of 32-product FP16 chunks).
 // *nonfinite = 1 if any result is inf / NaN (FP16 overflow): the caller should recompute in F32.
 int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
+// ggml backend, gated FFN with FP16 weights kept on the GPU: Y = (silu(X Wg) * (X Wu)) Wd (F32 X: M x K, Y: M x Nd);
+// Pg, Pu: K -> N, Pd: N -> Nd, all packed as GEN9BLAS_HS. Intermediates stay FP16 on the GPU; *nonfinite as above.
+int gen9blas_ffn_f16w(int M, const float *X, int ldx, const gen9blas_packed *Pg, const gen9blas_packed *Pu,
+                      const gen9blas_packed *Pd, float *Y, int ldy, int *nonfinite);
 // SYMM: C = alpha·A·B + beta·C (left, A: M×M symmetric) or alpha·B·A + beta·C (right, A: N×N). The uplo triangle is used.
 int gen9blas_symm(int type, int side, int uplo, int M, int N, double alpha, const void *A, int lda,
              const void *B, int ldb, double beta, void *C, int ldc);
