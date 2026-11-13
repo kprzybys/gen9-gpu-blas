@@ -100,3 +100,55 @@ the block-read ceiling measured on UHD 620 (~140-150 B/clk) [EST: per-clock tran
 fewer bytes per mad, i.e. more query rows per thread; at d_head 128 FP32 Q and O already take 64 of 128 GRF for 2
 rows, and SLM shares the same data port, so this is about the end for this design. Llama (4 B/mad, 78 B/clk) is not
 bandwidth-bound; it is at 81 % of peak, limited by the non-mad instructions (~15 %) and the 4-row softmax.
+
+## Hardening (review follow-up)
+Changes (no kernel change in the loop): asm/attn_gen.py asserts that Q (permuted in place) is not read after the
+loop in sched modes (as remap did), zeroes the whole send headers (K/V headers once before the loop; the epilogue's
+O-store header r72 (Qwen) after the loop, since live analysis now treats partial writes as non-kills), fails on any
+line of IGC's loop/epilogue that asm/isa.py does not understand (isa.check), asserts the heuristics (one l register
+per row, accumulated once, read by the epilogue; exactly one cmp (lt), counter written only by cnt += 8*NK, limit
+not written, exit on the cmp flag), asserts NS <= D/8 and reports the Kt over-read; pins ocloc 24.35.30872.36.
+bench/attn.c: Kt padded by KT_PAD = NK*D*16 B (was +64 KB; over-read is 2560 B Qwen C4, 1280 B Llama C2), n_k,
+LOCAL and full-subgroup checks (error, not a silent local = 8), reference sample STEP 7 by default (STEP 16 visited
+only rows 0-5 of each 32-row work-group), STEP=1 = whole output; K/V converted to double once (STEP=1 takes ~8 s).
+asm/Makefile: attn-check (skl + whl rebuilt, SHA-256 vs asm/attn_sha256.txt, part of `make check`), DEVICE stamp.
+Binary diff vs. commit 12a3e24 (asm compared): only 4 (Qwen) / 3 (Llama) `(W) mov (8) rH:ud 0` header zeroings
+before the loop and 1 after it (Qwen: r72); register allocation and the loop body identical.
+HD 530 (tc), NEO 24.35, nice 19 + ionice idle, DEVICE=skl binaries, raw output of bench/attn (via bench/attn.sh
+RAW= for the first two runs):
+
+# LOCAL=12 CL=attn_qwen.bin ./attn 12 2 128 512 4096 2 2
+LOCAL=12: must be a multiple of 8 (full subgroups) dividing the global size 24576
+exit 2
+# CL=attn_qwen.bin ./attn 12 2 128 512 4100 2 2
+need n_q > 0, n_k > 0, n_q * G divisible by RQ (2), n_k divisible by 8 * NK (16)
+exit 2
+# 2026-11-13 14:48:43 tc STEP=1 REPS=5 CL=attn_qwen.bin ./attn 12 2 128 512 4096 2 2 
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | sg=8 local=128 spill=0 private=0 ktpad=4096 | kt 0.283 ms attn 43.654 ms | attn 295.2 GFLOPS, incl. kt 293.3 | err 3.09e-06 (tokens 512/512, STEP 1) | GPU~1000 MHz
+# 2026-11-13 14:48:51 tc STEP=1 REPS=5 CL=attn_llama.bin ./attn 32 8 64 512 4096 4 2 
+H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 | sg=8 local=128 spill=0 private=0 ktpad=2048 | kt 0.568 ms attn 55.308 ms | attn 310.6 GFLOPS, incl. kt 307.5 | err 2.72e-06 (tokens 512/512, STEP 1) | GPU~1000 MHz
+# STEP=1 CL=attn_qwen.bin ./attn 12 2 128 256 8192 2 2
+H=12 HKV=2 D=128 nq=256 nk=8192 RQ=2 NK=2 | sg=8 local=128 spill=0 private=0 ktpad=4096 | kt 0.586 ms attn 44.106 ms | attn 292.1 GFLOPS, incl. kt 288.3 | err 3.43e-06 (tokens 256/256, STEP 1) | GPU~1000 MHz
+# controls, STEP 7: binaries of commit 12a3e24 (before_*) vs hardened, same host
+# CL=before_qwen.bin ./attn 12 2 128 512 4096 2 2
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | sg=8 local=128 spill=0 private=0 ktpad=4096 | kt 0.285 ms attn 43.694 ms | attn 294.9 GFLOPS, incl. kt 293.0 | err 3.09e-06 (tokens 74/512, STEP 7) | GPU~1000 MHz
+# CL=attn_qwen.bin ./attn 12 2 128 512 4096 2 2
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | sg=8 local=128 spill=0 private=0 ktpad=4096 | kt 0.279 ms attn 43.488 ms | attn 296.3 GFLOPS, incl. kt 294.4 | err 3.09e-06 (tokens 74/512, STEP 7) | GPU~1000 MHz
+# CL=before_llama.bin ./attn 32 8 64 512 4096 4 2
+H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 | sg=8 local=128 spill=0 private=0 ktpad=2048 | kt 0.598 ms attn 55.389 ms | attn 310.2 GFLOPS, incl. kt 306.9 | err 3.37e-06 (tokens 74/512, STEP 7) | GPU~1000 MHz
+# CL=attn_llama.bin ./attn 32 8 64 512 4096 4 2
+H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 | sg=8 local=128 spill=0 private=0 ktpad=2048 | kt 0.574 ms attn 55.203 ms | attn 311.2 GFLOPS, incl. kt 308.0 | err 3.37e-06 (tokens 74/512, STEP 7) | GPU~1000 MHz
+# STEP=16 CL=attn_qwen.bin ./attn 12 2 128 512 4096 2 2   (old sampling, for comparison)
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | sg=8 local=128 spill=0 private=0 ktpad=4096 | kt 0.286 ms attn 43.585 ms | attn 295.6 GFLOPS, incl. kt 293.7 | err 2.14e-06 (tokens 33/512, STEP 16) | GPU~1000 MHz
+# side note: LOCAL=24 (valid, 3 subgroups per work-group) gave 306.5 GFLOPS on Qwen, err 3.09e-06 (one run)
+Reading: the whole output now passes (max error 3.1e-6 / 2.7e-6 / 3.4e-6 relative, FP32 accumulation; the earlier
+2.1e-6 was the max over the 33-token sample); speed unchanged (295-296 Qwen, 310-311 Llama, 292 Qwen at n_k 8192);
+the header zeroing costs nothing measurable. LOCAL=24 being faster than 128 is unexplored [one run, not a result].
+
+## Laptop UHD 620 re-confirmation (14:43; the 14:05-14:23 window had other GPU work on the laptop)
+whl binaries rebuilt from commit 12a3e24 (C4 / C2), nothing else running (load 1.3), nice 19, two runs each:
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | sg=8 local=128 spill=0 private=0 | kt 0.813 ms attn 41.582 ms | attn 309.9 GFLOPS, incl. kt 303.9 | err 2.14e-06 | GPU~1053 MHz
+H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 | sg=8 local=128 spill=0 private=0 | kt 0.537 ms attn 50.330 ms | attn 341.3 GFLOPS, incl. kt 337.7 | err 1.96e-06 | GPU~1100 MHz
+H=12 HKV=2 D=128 nq=512 nk=4096 RQ=2 NK=2 | sg=8 local=128 spill=0 private=0 | kt 0.289 ms attn 41.336 ms | attn 311.7 GFLOPS, incl. kt 309.5 | err 2.14e-06 | GPU~1071 MHz
+H=32 HKV=8 D=64 nq=512 nk=4096 RQ=4 NK=2 | sg=8 local=128 spill=0 private=0 | kt 0.531 ms attn 52.207 ms | attn 329.1 GFLOPS, incl. kt 325.8 | err 1.96e-06 | GPU~1100 MHz
+Same as the first laptop confirmation (307.6 / 342.4): the earlier numbers were not disturbed.

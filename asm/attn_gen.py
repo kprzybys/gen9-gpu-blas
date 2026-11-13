@@ -24,6 +24,23 @@ Usage: python3 -I attn_gen.py remap|plain|poison|sched<NS> <src.cl> "<build opti
        (plain: IGC's code unchanged, without .spv; poison: one S mad negated, results must be wrong)
        env DEVICE=skl for HD 530 (desktop), default whl (UHD 620)
        python3 -I attn_gen.py analyze <src.cl> "<build options>"
+
+Toolchain pin: the symbolic pass reads IGC's own code, so the generator only runs with the ocloc it was checked
+against (OCLOC_VERSION below; `ocloc query OCL_DRIVER_VERSION`). Another version exits with a message;
+ATTN_OCLOC_ANY=1 overrides (then re-check the results on the GPU and the expected hashes, `make attn-check`).
+Every line of the regions the generator analyses (IGC's loop and epilogue) must be a form asm/isa.py understands
+(isa.check); anything else (new opcode, indirect or accumulator operand, unknown region) stops the generator.
+
+Requirements on the host (bench/attn.c checks them; the generated loop does not):
+  - n_k > 0 and n_k divisible by 8*NK (one loop iteration = 8*NK keys, no tail handling);
+  - n_q * G divisible by RQ, full SIMD8 subgroups: work-group size divisible by 8 and global size by the
+    work-group size (the analysis assumes all 8 lanes enabled);
+  - K PADDING (sched modes): the ring prefetches the first NS steps of the next key block, also after the last
+    block, so the K-transposed buffer Kt is read past the end of the last KV head by up to
+    (NS-1)*128 + (NK-1)*D*16 + 128 bytes (Qwen sched4 NK 2 D 128: 2560 B; Llama sched2 NK 2 D 64: 1280 B).
+    These bytes are loaded but never used. Since NS <= D/8 (asserted), the bound NK*D*16 bytes (one block of
+    8*NK keys: Qwen 4096 B, Llama 2048 B) covers every ring depth: allocate Kt with at least that much extra.
+    V is not over-read (V steps never prefetch past the current block).
 """
 import os
 import re
@@ -38,12 +55,29 @@ import isa  # noqa: E402
 
 W = "(W)     "
 KERNEL = "k_attn"
+RD4 = "// wr:1h+0, rd:4; hdc.dc1; a64 aligned oword block read x8"   # as ocloc disasm decodes it (isa.send_regs)
 # ocloc device: whl = UHD 620 (laptop), skl = HD 530 (desktop); a binary for one is CL_INVALID_BINARY on the other.
 DEVICE = os.environ.get("DEVICE", "whl")
 # PE_IN_S=1: exp in place, the score registers serve as the even p copies (saves RQ*NK registers)
 PE_IN_S = os.environ.get("PE_IN_S", "0") == "1"
 # COMPACT=1: l sums in IGC's l registers and row maxima in a temporary's spare lanes (3 registers fewer for Qwen)
 COMPACT = os.environ.get("COMPACT", "1") == "1"
+OCLOC_VERSION = "24.35.30872.36"    # NEO release the symbolic pass and the hashes in attn_sha256.txt were checked with
+
+
+def check_ocloc():
+    tmp = tempfile.mkdtemp()            # ocloc query also writes a file named after the query into the cwd
+    try:
+        r = subprocess.run(["ocloc", "query", "OCL_DRIVER_VERSION"], capture_output=True, text=True, cwd=tmp)
+    finally:
+        shutil.rmtree(tmp)
+    v = r.stdout.strip().splitlines()[-1].strip() if r.returncode == 0 and r.stdout.strip() else "?"
+    if v != OCLOC_VERSION:
+        msg = (f"attn_gen.py: ocloc reports driver version {v!r}, expected {OCLOC_VERSION} (the version the "
+               f"symbolic pass over IGC's code was checked with).")
+        if os.environ.get("ATTN_OCLOC_ANY") != "1":
+            raise SystemExit(msg + " Set ATTN_OCLOC_ANY=1 to try anyway, then re-check the results.")
+        print("WARNING: " + msg, file=sys.stderr)
 
 
 def disassemble(src, options, d):
@@ -95,7 +129,19 @@ def conflicts(loop):
     return n, c
 
 
+def assert_not_read_after(regs, lines, what):
+    """The registers regs (modified in place before/inside the loop) must be written before they are read in
+    lines (code after the loop): partial writes do not count as a write (isa.full_writes)."""
+    live = set(regs)
+    for l in lines:
+        w, r = isa.defs_uses(l)
+        assert not live & set(r), (f"{what} register read after the loop", sorted(live & set(r)), l)
+        live -= set(isa.full_writes(l))
+
+
 def remap(prologue, loop, epilogue):
+    isa.check_all(loop, "IGC's loop")
+    isa.check_all(epilogue, "IGC's epilogue")
     written = set()
     for l in loop:
         written |= set(isa.defs_uses(l)[0])
@@ -112,11 +158,7 @@ def remap(prologue, loop, epilogue):
     for l in loop:
         if not MAD.match(l):
             assert not set(qregs) & set(isa.defs_uses(l)[1]), ("Q register read outside the S mads", l)
-    live = set(qregs)
-    for l in epilogue:      # after the loop a Q register must be written before it is read
-        w, r = isa.defs_uses(l)
-        assert not live & set(r), ("Q register read after the loop", l)
-        live -= set(w)
+    assert_not_read_after(qregs, epilogue, "Q")     # the swaps below leave Q permuted
     mis = {0: [], 1: []}        # misplaced elements by current register parity
     for k, v in sorted(need.items()):
         if len(v) == 1 and k[0] % 2 != next(iter(v)):
@@ -185,6 +227,8 @@ def igc_maps(pro, loop, epi, P):
     Q[r][c] and O[r][c] (lane l = dim 8c + l), the K/V pointer registers, the l accumulators, counter/limit.
     Row numbers are internal (from the S accumulator chains); Q row r and O row r are the same query row."""
     D, NK, HKV = P["D"], P["NK"], P["HKV"]
+    isa.check_all(loop, "IGC's loop")
+    isa.check_all(epi, "IGC's epilogue")
     written = set()
     for l in loop:
         written |= set(isa.defs_uses(l)[0])
@@ -195,7 +239,7 @@ def igc_maps(pro, loop, epi, P):
 
     chains, schain_q, sinfo = 0, {}, {}
     qmap, omap, kbase, vbase = {}, {}, set(), set()
-    lregs = set()
+    lregs = {}                                          # l candidate -> accumulating adds per iteration
     pend_pv = []
     for l in loop:
         op = isa.opcode(l)
@@ -260,7 +304,8 @@ def igc_maps(pro, loop, epi, P):
                 val[int(ops[0][1][1:])] = ("Sm", a[1])
                 continue
             if ops[0][1] == ops[1][1] and get(int(ops[1][1][1:]))[0] == "entry":
-                lregs.add(int(ops[0][1][1:]))
+                lr = int(ops[0][1][1:])
+                lregs[lr] = lregs.get(lr, 0) + 1
         if op == "math.exp" and n == 8:
             a = get(int(ops[1][1][1:]))
             if a[0] == "Sm":
@@ -284,21 +329,70 @@ def igc_maps(pro, loop, epi, P):
         assert omap.setdefault((row_of[cid], c), e) == e, ("O register changes", cid, c, e)
     for e in set(omap.values()):                        # loop-carried: back in its register at the end
         assert get(e) == ("entry", e), ("O register rotated", e, get(e))
-    head = next(l for l in loop if re.search(r"cmp \(\d+\|M0\)\s+\(lt\)", l))
-    cnt, lim = re.findall(r"(r\d+\.\d+)<0;1,0>:d", head)[:2]
+    # l sums (heuristic: loop-carried `add (8) rX = rX + ...` :f that is not an O register). Must be exactly one
+    # register per row, accumulated once per iteration and read by the epilogue (sum and 1/l).
+    lr = sorted(set(lregs) - set(omap.values()))
+    assert len(lr) == len(rows), ("l registers: expected one per row", lr, len(rows))
+    assert all(lregs[r] == 1 for r in lr), ("l register accumulated more than once per iteration", lregs)
+    assert set(lr) <= live_in(epi)[0], ("l register not read by the epilogue", lr)
+    # loop counter: the only `cmp (lt)` of the loop, `cmp cnt < lim` on two scalar :d registers, after the only
+    # write of cnt (`add (1) cnt = cnt + 8*NK`); lim not written in the loop; the loop exits on the negated flag.
+    heads = [i for i, l in enumerate(loop) if re.search(r"cmp \(\d+\|M0\)\s+\(lt\)", l)]
+    assert len(heads) == 1, ("expected exactly one cmp (lt) in IGC's loop", [loop[i] for i in heads])
+    head = loop[heads[0]]
+    regs = re.findall(r"(r\d+\.\d+)<0;1,0>:d", head)
+    assert len(regs) == 2 and "null" in head, ("cmp (lt) form", head)
+    cnt, lim = regs
+    flag = re.search(r"\(lt\)(f\d\.\d)", head).group(1)
+
+    def bytes_of(s, ts=4):
+        r, sub = (int(x) for x in s[1:].split("."))
+        return set(range(r * 32 + sub * ts, r * 32 + sub * ts + ts))
+
+    def writes(l):
+        ops = isa.operands(l)
+        if isa.opcode(l) in (None, "send", "sends") or not ops or not ops[0][1].startswith("r"):
+            return {b for r in isa.defs_uses(l)[0] for b in range(r * 32, r * 32 + 32)}
+        _, reg, sub, region, t = ops[0]
+        m = re.match(r"<(\d+)>$", region)
+        hs = int(m.group(1)) if m else 1
+        st = int(reg[1:]) * 32 + sub * isa.TS[t]
+        return {st + e * hs * isa.TS[t] + b for e in range(isa.exec_size(l)) for b in range(isa.TS[t])}
+    cw = [i for i, l in enumerate(loop) if writes(l) & bytes_of(cnt)]
+    lw = [i for i, l in enumerate(loop) if writes(l) & bytes_of(lim)]
+    assert len(cw) == 1 and not lw, ("counter/limit written elsewhere in the loop", cnt, lim, cw, lw)
+    inc = loop[cw[0]]
+    assert re.search(rf"add \(1\|M0\)\s+{re.escape(cnt)}<1>:d\s+{re.escape(cnt)}<0;1,0>:d\s+{8 * NK}:w", inc), \
+        ("counter increment is not cnt += 8*NK", inc)
+    assert cw[0] < heads[0], ("cmp before the counter increment", inc, head)
+    exits = [l for l in loop if re.search(rf"\(~{re.escape(flag)}\)\s+break", l)]
+    assert len(exits) == 1, ("loop exit is not `(~flag) break` on the cmp flag", flag)
     assert len(kbase) == 1 and len(vbase) == 1, (kbase, vbase)
-    return dict(q=qmap, o=omap, l=sorted(lregs - set(omap.values())), kp=kbase.pop(), vp=vbase.pop(),
+    return dict(q=qmap, o=omap, l=lr, kp=kbase.pop(), vp=vbase.pop(),
                 cnt=cnt, lim=lim, rows=len(rows))
 
 
 def live_in(lines):
-    """Registers read before written (linear order)."""
-    w_, live = set(), set()
+    """(live, headers): registers read before they are completely written (linear order; partial writes such as
+    `mov (1) r72.2:ud` do not end a live range, isa.full_writes). headers = the subset whose every such read is as
+    the header (src0) of a send after a partial write of that register in lines: IGC sets only the header fields
+    the message uses and leaves the rest as found; the loop may use these registers if they are zeroed after it."""
+    full, part, live, hdr_ok = set(), set(), set(), {}
     for l in lines:
-        w, r = isa.defs_uses(l)
-        live |= set(r) - w_
-        w_ |= set(w)
-    return live
+        _, r = isa.defs_uses(l)
+        early = set(r) - full
+        live |= early
+        if isa.opcode(l) in ("send", "sends"):
+            h = isa.send_regs(l)[1][0]
+            for x in early:
+                hdr_ok[x] = hdr_ok.get(x, True) and x == h and x in part
+        else:
+            for x in early:
+                hdr_ok[x] = False
+        w = set(isa.defs_uses(l)[0])
+        full |= set(isa.full_writes(l))
+        part |= w
+    return live, {x for x in live if hdr_ok.get(x)}
 
 
 class Alloc:
@@ -334,7 +428,9 @@ def sched(pro, loop, epi, P, NS):
     cnt, lim = M["cnt"], M["lim"]
     busy = {0} | qregs | oregs | set(M["l"]) | {kp, kp + 1, vp, vp + 1}
     busy |= {int(re.match(r"r(\d+)", x).group(1)) for x in (cnt, lim)}
-    busy |= live_in(epi)
+    epi_live, epi_hdr = live_in(epi)
+    busy |= epi_live - epi_hdr          # epilogue send headers: zeroed after the loop instead (see live_in)
+    assert NS <= D // 8, ("ring deeper than the K phase: the prefetch would cross into V steps", NS, D // 8)
     if COMPACT:
         assert len(M["l"]) == RQ, M["l"]
     A = Alloc(set(range(128)) - busy)
@@ -376,6 +472,11 @@ def sched(pro, loop, epi, P, NS):
     left = abs(len(mis[0]) - len(mis[1]))
     for r in range(RQ):
         out += [f"{W}mov (1|M0)  r{Mx}.{MO + r}<1>:f  -1e+30:f", f"        mov (8|M0)  r{L[r]}.0<1>:f  0.0:f"]
+    # Send headers: the A64 oword block read uses only the address in DW0-1 (IGC's own headers set only .0:uq
+    # too), but the whole header is zeroed once here so no field holds a prologue leftover; inside the loop only
+    # .0:q is updated, the other 6 dwords stay zero.
+    for h in hK + hV:
+        out.append(f"{W}mov (8|M0)  r{h}.0<1>:ud  0x0:ud")
     for k in range(NK):
         out.append(f"{W}add (1|M0)  r{hK[k]}.0<1>:q  r{kp}.0<0;1,0>:q  {k * D * 16}:w")
     for h in range(nv):
@@ -390,11 +491,11 @@ def sched(pro, loop, epi, P, NS):
         o = []
         if s < nks:
             for k in range(NK):
-                o += [f"{W}send (16|M0)  r{b + 4 * k}:w  r{hK[k]}  0xC  0x024D0CFF",
+                o += [f"{W}send (16|M0)  r{b + 4 * k}:w  r{hK[k]}  0xC  0x024D0CFF  {RD4}",
                       f"{W}add (1|M0)  r{hK[k]}.0<1>:q  r{hK[k]}.0<0;1,0>:q  {128 + (NK - 1) * D * 16 if s == nks - 1 else 128}:w"]
         else:
             for h in range(nv):
-                o += [f"{W}send (16|M0)  r{b + 4 * h}:w  r{hV[h]}  0xC  0x024D0CFF",
+                o += [f"{W}send (16|M0)  r{b + 4 * h}:w  r{hV[h]}  0xC  0x024D0CFF  {RD4}",
                       f"{W}add (1|M0)  r{hV[h]}.0<1>:q  r{hV[h]}.0<0;1,0>:q  {rs}:w"]
         return o
     # slot of global step s: s % NS over a continuous step counter -> needs nsteps % NS == 0 for a fixed code body
@@ -470,12 +571,23 @@ def sched(pro, loop, epi, P, NS):
                 f"{W}math.inv (1|M0)  r{T2}.0<1>:f  r{T2}.0<0;1,0>:f"]
         out += [f"        mul (8|M0)  r{M['o'][(r, c)]}.0<1>:f  r{M['o'][(r, c)]}.0<8;8,1>:f  r{T2}.0<0;1,0>:f" for c in range(D // 8)]
     out += [f"        mov (8|M0)  r{x}.0<1>:f  0.125:f" for x in M["l"]]
-    info = f"Q swaps {len(loc) // 2} (unpaired {left}), {nfree} registers free for the loop"
+    # epilogue send headers that the loop may have used (live_in): zero, as IGC leaves the unused fields as found
+    out += [f"{W}mov (8|M0)  r{x}.0<1>:ud  0x0:ud" for x in sorted(epi_hdr)]
+    # Q is left permuted: nothing after the loop (our tail, IGC's epilogue) may read it before writing it
+    tail = out[out.index("(W&f0.0) jmpi  LATT_LOOP") + 1:]
+    assert_not_read_after(qregs, tail + epi, "Q")
+    isa.check_all(out, "the generated loop")
+    over = max(s * 128 + k * D * 16 for s in range(NS) for k in range(NK)) + 128
+    assert over <= NK * D * 16, (over, NK * D * 16)
+    out[0] += f"; Kt over-read {over} B (pad >= {NK * D * 16} B)"
+    info = (f"Q swaps {len(loc) // 2} (unpaired {left}), {nfree} registers free for the loop; epilogue headers "
+            f"zeroed {sorted(epi_hdr)}; Kt read up to {over} B past the end (host pad >= NK*D*16 = {NK * D * 16} B)")
     return pro, out, epi, info
 
 
 def main():
     mode, src, opts = sys.argv[1], sys.argv[2], sys.argv[3]
+    check_ocloc()
     d = tempfile.mkdtemp()
     try:
         dd = os.path.join(d, "d")

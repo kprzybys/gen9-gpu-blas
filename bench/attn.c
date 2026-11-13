@@ -3,7 +3,14 @@
 // Random Q (float), K, V (half) as llama.cpp flash_attn_ext gives them; one layer, non-causal.
 // Prints: build parameters, SIMD width, spill / private bytes, best time of the K transpose and of the attention
 // kernel (REPS runs after a warm-up), effective rate 4 * n_q * n_k * H * D / time, GPU clock during the best run,
-// and the error max |O - O_ref| / max |O_ref| against an FP64 CPU reference on a sample of query tokens.
+// and the error max |O - O_ref| / max |O_ref| against an FP64 CPU reference on query tokens 0, STEP, 2*STEP, ...
+// and the last one, all heads (default STEP 7: coprime with the 16/32/64 query rows of a work-group, so every
+// subgroup position is visited; STEP=1 checks the whole output, use it for acceptance).
+// Requirements of the kernels (also of the hand-assembled binaries, asm/attn_gen.py), checked here:
+//   n_k > 0 and divisible by 8*NK; n_q*G divisible by RQ; work-group size (LOCAL, default 128) divisible by 8
+//   (full SIMD8 subgroups) and dividing the global size; the K-transposed buffer Kt allocated with KT_PAD extra
+//   bytes, default NK*D*16 = one block of 8*NK keys: the sched binaries prefetch the next key block also after the
+//   last one (attn_gen.py header, docs/attention-gpu.md section 9).
 #define CL_TARGET_OPENCL_VERSION 300
 #include <CL/cl.h>
 #include <math.h>
@@ -64,7 +71,10 @@ int main(int argc, char **argv) {
     int G = H / HKV, reps = getenv("REPS") ? atoi(getenv("REPS")) : 5;
     double qsigma = getenv("QSIGMA") ? atof(getenv("QSIGMA")) : 5.0;   // score std = qsigma (K ~ N(0,1))
     const char *src_file = getenv("CL") ? getenv("CL") : "attn.cl";
-    if ((nq * G) % RQ || nk % (8 * NK)) { fprintf(stderr, "n_q * G must divide by RQ, n_k by 8 * NK\n"); return 2; }
+    if (nk <= 0 || nq <= 0 || (nq * G) % RQ || nk % (8 * NK)) {
+        fprintf(stderr, "need n_q > 0, n_k > 0, n_q * G divisible by RQ (%d), n_k divisible by 8 * NK (%d)\n", RQ, 8 * NK);
+        return 2;
+    }
 
     // Data: Q[h][t][d] float, K/V[t][hkv][d] half, O[t][h][d] float.
     size_t nQ = (size_t)H * nq * D, nKV = (size_t)nk * HKV * D, nO = (size_t)nq * H * D;
@@ -105,7 +115,16 @@ int main(int argc, char **argv) {
 
     size_t local = getenv("LOCAL") ? strtoull(getenv("LOCAL"), 0, 0) : 128;   // 128 > 64 by 10 % (Qwen)
     size_t global = (size_t)HKV * (nq * G / RQ) * 8;
-    if (global % local) local = 8;
+    if (local == 0 || local % 8 || global % local) {
+        if (getenv("LOCAL")) {
+            fprintf(stderr, "LOCAL=%zu: must be a multiple of 8 (full subgroups) dividing the global size %zu\n", local, global);
+            return 2;
+        }
+        size_t l = 128; while (global % l) l -= 8;          // global is a multiple of 8, so this ends at >= 8
+        fprintf(stderr, "warning: global size %zu not divisible by 128, work-group size %zu\n", global, l);
+        local = l;
+    }
+    size_t ktpad = getenv("KT_PAD") ? strtoull(getenv("KT_PAD"), 0, 0) : (size_t)NK * D * 16;
     size_t sg = 0; cl_ulong spill = 0, priv = 0;
     clGetKernelSubGroupInfo(ka, dev, CL_KERNEL_MAX_SUB_GROUP_SIZE_FOR_NDRANGE, sizeof local, &local, sizeof sg, &sg, NULL);
     clGetKernelWorkGroupInfo(ka, dev, CL_KERNEL_SPILL_MEM_SIZE_INTEL, sizeof spill, &spill, NULL);
@@ -114,7 +133,7 @@ int main(int argc, char **argv) {
     cl_mem bQ = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, nQ * 4, Q, &err); CHECK(err);
     cl_mem bK = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, nKV * 2, K, &err); CHECK(err);
     cl_mem bV = clCreateBuffer(ctx, CL_MEM_READ_ONLY | CL_MEM_COPY_HOST_PTR, nKV * 2, V, &err); CHECK(err);
-    cl_mem bKt = clCreateBuffer(ctx, CL_MEM_READ_WRITE, nKV * 2 + 65536, NULL, &err); CHECK(err);
+    cl_mem bKt = clCreateBuffer(ctx, CL_MEM_READ_WRITE, nKV * 2 + ktpad, NULL, &err); CHECK(err);
     cl_mem bO = clCreateBuffer(ctx, CL_MEM_WRITE_ONLY, nO * 4, NULL, &err); CHECK(err);
     float qscale = (float)(1.0 / sqrt((double)D) * 1.4426950408889634);
     CHECK(clSetKernelArg(kkt, 0, sizeof bK, &bK)); CHECK(clSetKernelArg(kkt, 1, sizeof bKt, &bKt));
@@ -149,21 +168,24 @@ int main(int argc, char **argv) {
     CHECK(clEnqueueReadBuffer(q, bO, CL_TRUE, 0, nO * 4, O, 0, NULL, NULL));
 
     // FP64 reference on a sample of query tokens (all heads): every STEP-th token plus the last one.
-    int step = getenv("STEP") ? atoi(getenv("STEP")) : 16;
+    int step = getenv("STEP") ? atoi(getenv("STEP")) : 7, nrows = 0;
+    if (step < 1) step = 1;
     double maxerr = 0, maxref = 0, *s = malloc(nk * sizeof(double)), *o = malloc(D * sizeof(double));
+    double *Kd = malloc(nKV * sizeof(double)), *Vd = malloc(nKV * sizeof(double));
+    for (size_t i = 0; i < nKV; i++) { Kd[i] = h2d(K[i]); Vd[i] = h2d(V[i]); }
     int nan = 0;
     for (int t = 0; t < nq; t = (t + step < nq || t == nq - 1) ? t + step : nq - 1) {
         for (int h = 0; h < H; h++) {
             const float *qr = Q + ((size_t)h * nq + t) * D; int hkv = h / G; double mx = -1e300, l = 0;
             for (int j = 0; j < nk; j++) {
-                const uint16_t *kr = K + ((size_t)j * HKV + hkv) * D; double a = 0;
-                for (int d = 0; d < D; d++) a += (double)qr[d] * h2d(kr[d]);
+                const double *kr = Kd + ((size_t)j * HKV + hkv) * D; double a = 0;
+                for (int d = 0; d < D; d++) a += (double)qr[d] * kr[d];
                 s[j] = a / sqrt((double)D); if (s[j] > mx) mx = s[j];
             }
             for (int d = 0; d < D; d++) o[d] = 0;
             for (int j = 0; j < nk; j++) {
-                double p = exp(s[j] - mx); l += p; const uint16_t *vr = V + ((size_t)j * HKV + hkv) * D;
-                for (int d = 0; d < D; d++) o[d] += p * h2d(vr[d]);
+                double p = exp(s[j] - mx); l += p; const double *vr = Vd + ((size_t)j * HKV + hkv) * D;
+                for (int d = 0; d < D; d++) o[d] += p * vr[d];
             }
             const float *og = O + ((size_t)t * H + h) * D;
             for (int d = 0; d < D; d++) {
@@ -173,14 +195,15 @@ int main(int argc, char **argv) {
                 if (fabs(ref) > maxref) maxref = fabs(ref);
             }
         }
+        nrows++;
         if (t == nq - 1) break;
     }
 
     double flop = 4.0 * nq * nk * H * D;
-    printf("H=%d HKV=%d D=%d nq=%d nk=%d RQ=%d NK=%d %s| sg=%zu local=%zu spill=%llu private=%llu | kt %.3f ms attn %.3f ms"
-           " | attn %.1f GFLOPS, incl. kt %.1f | err %.2e%s | GPU~%d MHz\n",
-           H, HKV, D, nq, nk, RQ, NK, extra, sg, local, (unsigned long long)spill, (unsigned long long)priv, best_kt, best_a,
-           flop / (best_a * 1e-3) / 1e9, flop / ((best_a + best_kt) * 1e-3) / 1e9, maxerr / maxref, nan ? " NaN" : "",
-           best_freq);
+    printf("H=%d HKV=%d D=%d nq=%d nk=%d RQ=%d NK=%d %s| sg=%zu local=%zu spill=%llu private=%llu ktpad=%zu | kt %.3f ms"
+           " attn %.3f ms | attn %.1f GFLOPS, incl. kt %.1f | err %.2e%s (tokens %d/%d, STEP %d) | GPU~%d MHz\n",
+           H, HKV, D, nq, nk, RQ, NK, extra, sg, local, (unsigned long long)spill, (unsigned long long)priv, ktpad, best_kt,
+           best_a, flop / (best_a * 1e-3) / 1e9, flop / ((best_a + best_kt) * 1e-3) / 1e9, maxerr / maxref,
+           nan ? " NaN" : "", nrows, nq, step, best_freq);
     return 0;
 }

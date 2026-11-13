@@ -190,8 +190,18 @@ the GPU. Open points that the standalone kernel does not cover:
   in-ubatch part), and the K layout: the kernel reads K transposed in 8-key groups (`k_kt`, 0.28 ms per layer at
   n_k 4096, under 1 %); a transposed K cache would avoid the pass;
 - one binary per shape (D, G, H_kv, rows per thread) and per device, built from the template by the generator; the
-  generator reads IGC's own loop (symbolic pass with asserts), so a new IGC/NEO version must be re-checked (pinned
-  24.35 here);
+  generator reads IGC's own loop (symbolic pass with asserts), so a new IGC/NEO version must be re-checked: the
+  generator refuses any ocloc other than 24.35.30872.36 (override `ATTN_OCLOC_ANY=1`), stops on any line form of
+  IGC's loop or epilogue that `asm/isa.py` does not understand, and `make -C asm attn-check` compares the binaries
+  for both devices with the SHA-256 in `asm/attn_sha256.txt`;
+- **K buffer padding**: the ring prefetches the first NS steps of the next key block also after the last block, so
+  the K-transposed buffer is read up to (NS-1)*128 + (NK-1)*D*16 + 128 bytes past the end of the last KV head
+  (Qwen ring 4: 2560 B; Llama ring 2: 1280 B; loaded, never used). The integration must allocate it with at least
+  NK*D*16 extra bytes (one block of 8*NK keys: 4096 / 2048 B; covers every ring depth since NS <= D/8);
+  `bench/attn.c` pads exactly that (`KT_PAD` overrides) instead of the earlier blanket 64 KB;
+- host-side preconditions the hand loop does not check: n_k > 0 and a multiple of 8*NK (no tail: llama.cpp's KV
+  length must be padded or the tail handled separately), n_q*G a multiple of the rows per thread, full SIMD8
+  subgroups (work-group size a multiple of 8 dividing the global size; `bench/attn.c` rejects anything else);
 - launch length: Qwen 1.5B at d = 3584 is ~40 ms per layer, far from the 640 ms preemption limit; long contexts
   and larger models need the per-launch FLOP rule of section 5;
 - Llama and Gemma shapes need their own row count and ring depth (Llama: 4 rows, ring 2; Gemma d_head 256 does not
