@@ -85,6 +85,9 @@ Also check the platform settings that act like a kernel change: EU thread arbitr
 - A cheap op moved to the GPU pays only when it rides in the same submission as a call that waits anyway (GEMM,
   attention); alone it pays ~0.2 ms of wait. Within one submission without waits, all host buffers must sit in one
   userptr object (span), or writes get lost [MEAS, `results/ggml-backend-gpu-ops-2026-11-13.txt`].
+- Before optimizing a kernel, compare the number of calls per whole run with the competitor: per-op profiles of
+  whisper showed a kernel tie with OpenVINO GenAI, and the whole difference was the application (33 vs 28 encoder
+  windows), counted cheaply with a bpftrace uprobe [MEAS, `results/whisper-large-v3-turbo-gp-2026-11-13.txt`].
 
 ## 2. Rules at the OpenCL C level
 
