@@ -163,6 +163,23 @@
       "tag": "MEAS",
       "source": "results/l3port-2026-11-13.txt (bench/l3port.cl)",
       "note": "OWord block reads, >= 2 in flight per thread; same for work-group 64/128 and a 1 MB region; up to 12 SIMD8 FP32 mads per 128 B hide under the reads. Qwen attention (16 mads per block) is issue-bound at ~88 % of this ceiling, not port-bound. OA L3ShaderThroughput matches true bytes once scaled by the OA clock (97-100 %)."
+    },
+    "sampler_read": {
+      "gbs_l3": [
+        100,
+        104
+      ],
+      "gbs_1mb_image": [
+        63,
+        65
+      ],
+      "combined_with_port_gbs": {
+        "2:1": 241,
+        "3:1..6:1": 215
+      },
+      "tag": "MEAS",
+      "source": "results/l3samp-2026-11-13.txt (UHD 620, 1.1 GHz)",
+      "note": "sample_ld SIMD8 RGBA32: the sampler adds at most ~20 % to the data port for L3-resident data; beyond L3 mixing is slower than the port alone"
     }
   },
   "send": {

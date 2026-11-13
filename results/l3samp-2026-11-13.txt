@@ -1,0 +1,48 @@
+# Does the texture sampler add read bandwidth to the L3 data port? (2026-11-13, gp-laptop UHD 620, GPU 1.1 GHz, idle)
+# Kernels bench/l3samp.cl (k_samp: sampler only; k_both: RP OWord block reads + 1 sampler read per step), reference
+# k_port of bench/l3port.cl; script bench/l3samp.sh; bench/clbench IMG4=1 = RGBA uint32 image (16 B per texel).
+# Each SIMD8 sampler message ("sample load with lod forced to 0", rd:4) returns 8 texels = 128 B, like one block read.
+# 2048 subgroups x n 4096 steps; Gop/s = GB/s. Hypothesis [HYP, before]: the paths add up (time = max of the two).
+## 64 KB image / 1 MB buffer region masked to 64 KB, PF = reads in flight per thread
+# 2026-11-13T20:16:36+01:00 gp-laptop GPU max 1100 MHz
+port   L64  PF4      local=64  time=    5.364 ms    200.18 Gop/s  GPU~1100 MHz
+samp   L64  PF2 64K  local=64  time=   10.669 ms    100.64 Gop/s  GPU~1100 MHz
+both   L64  PF2 64K  local=64  time=   10.657 ms    201.50 Gop/s  GPU~1100 MHz
+samp   L64  PF4 64K  local=64  time=   10.498 ms    102.28 Gop/s  GPU~1100 MHz
+both   L64  PF4 64K  local=64  time=   10.602 ms    202.55 Gop/s  GPU~1100 MHz
+port   L128 PF4      local=128 time=    5.370 ms    199.95 Gop/s  GPU~1100 MHz
+samp   L128 PF2 64K  local=128 time=   10.323 ms    104.02 Gop/s  GPU~1100 MHz
+both   L128 PF2 64K  local=128 time=   10.439 ms    205.72 Gop/s  GPU~1100 MHz
+samp   L128 PF4 64K  local=128 time=   10.353 ms    103.71 Gop/s  GPU~1100 MHz
+both   L128 PF4 64K  local=128 time=   10.357 ms    207.34 Gop/s  GPU~1100 MHz
+samp   L64  PF4 1M   local=64  time=   16.414 ms     65.42 Gop/s  GPU~1100 MHz
+both   L64  PF4 1M   local=64  time=   23.630 ms     90.88 Gop/s  GPU~1100 MHz
+## unbalanced mix, 64 KB (RP port blocks per sampler read); additive prediction RP2 ~301, RP3 ~268, RP4 ~250, RP6 ~233 GB/s
+both RP1 L64 PF2 local=64  time=   10.634 ms    201.95 Gop/s  GPU~1100 MHz
+both RP2 L64 PF2 local=64  time=   13.375 ms    240.83 Gop/s  GPU~1100 MHz
+both RP3 L64 PF2 local=64  time=   19.883 ms    216.01 Gop/s  GPU~1100 MHz
+both RP4 L64 PF2 local=64  time=   24.886 ms    215.73 Gop/s  GPU~1100 MHz
+both RP6 L64 PF2 local=64  time=   34.948 ms    215.07 Gop/s  GPU~1100 MHz
+port alone        local=64  time=    5.367 ms    200.07 Gop/s  GPU~1100 MHz
+samp alone        local=64  time=   10.571 ms    101.57 Gop/s  GPU~1100 MHz
+## 256 KB and 1 MB (beyond L3, ~768 KB)
+samp alone 256K     local=64  time=   10.541 ms    101.86 Gop/s  GPU~1100 MHz
+port alone 256K     local=64  time=    5.530 ms    194.18 Gop/s  GPU~1100 MHz
+both RP1 256K      local=64  time=   10.647 ms    201.69 Gop/s  GPU~1100 MHz
+both RP2 256K      local=64  time=   13.368 ms    240.96 Gop/s  GPU~1100 MHz
+both RP3 256K      local=64  time=   20.006 ms    214.68 Gop/s  GPU~1100 MHz
+samp alone 1M       local=64  time=   16.973 ms     63.26 Gop/s  GPU~1100 MHz
+port alone 1M       local=64  time=    5.522 ms    194.43 Gop/s  GPU~1100 MHz
+both RP1 1M        local=64  time=   23.551 ms     91.19 Gop/s  GPU~1100 MHz
+both RP2 1M        local=64  time=   29.093 ms    110.72 Gop/s  GPU~1100 MHz
+both RP3 1M        local=64  time=   34.472 ms    124.59 Gop/s  GPU~1100 MHz
+## Reading
+- Sampler alone: 100-104 GB/s from L3 (half the data port's 200), 63-65 GB/s for a 1 MB image.
+- The paths add up only partly: data-port + sampler peak at 241 GB/s with 2 block reads per sampler read (+20 % over
+  the port alone), 215 GB/s at 3:1 to 6:1 (+8 %), against 301 / 268 / 233 if fully additive. Same at 64 KB and
+  256 KB, so it is not the sampler's own cache.
+- Beyond L3 (1 MB) the sampler slows everything: mixes give 91-125 GB/s, below the port alone (194).
+- Verdict: a second read path worth at most ~+20 % of L3 bandwidth, only for L3-resident data and only for kernels
+  that are bound by the data port. None of today's hot kernels is (GEMM and Qwen attention are issue-bound,
+  results/l3port-2026-11-13.txt). Not pursued. Untested and possibly more useful: the sampler's free format
+  conversion (UNORM_INT8 / HALF -> float) as a way to remove decode instructions from issue-bound loops.

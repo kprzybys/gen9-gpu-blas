@@ -78,7 +78,7 @@ int main(int argc, char **argv) {
     }
     if (getenv("IMG")) {
         size_t w = 0, h = 0; sscanf(getenv("IMG"), "%zux%zu", &w, &h);
-        cl_image_format fmt = { CL_R, CL_UNSIGNED_INT32 };
+        cl_image_format fmt = { getenv("IMG4") ? CL_RGBA : CL_R, CL_UNSIGNED_INT32 };   // IMG4: 16 B per texel
         cl_image_desc desc = { CL_MEM_OBJECT_IMAGE2D, w, h, 1, 1, 0, 0, 0, 0, { NULL } };
         cl_mem im = clCreateImage(ctx, CL_MEM_READ_WRITE, &fmt, &desc, NULL, &err); CHECK(err);
         cl_uint z[4] = {0}; size_t o3[3] = {0, 0, 0}, r3[3] = {w, h, 1};
