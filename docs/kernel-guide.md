@@ -37,6 +37,29 @@ Also check the platform settings that act like a kernel change: EU thread arbitr
 211-220 -> 362 GFLOPS) and MOCS index 2 (index 0 is uncached, 2x slower), both set by `lib/kcl.c` [MEAS]
 ([performance-model.md](performance-model.md) §3).
 
+### Four checks before choosing or tuning a kernel
+
+1. **Profile the whole pass first, kernels second.** The share a kernel can win is bounded by its share of the pass.
+   In a pp512 pass (Qwen 1.5B Q4_K_M, ~220 t/s) the GEMM is 80 %, and the next largest item is not a kernel at all:
+   the execbuf ioctl, ~0.75 ms of kernel CPU per submission with the GPU idle, 7-8 % of the pass; CPU ops are ~2 %
+   [MEAS, `results/ggml-backend-pass-profile-attn-gpu-2026-11-13.txt`]. Use `KCL_PROFILE_KERNELS=1` (kernel sums),
+   `KCL_PHASES=1` (submission and wait) and `GEN9_INFO=1` (backend decisions) together.
+2. **Decide port-bound vs issue-bound by measurement, with a microbenchmark in the same bytes-per-instruction ratio.**
+   The OWord block-read port gives 7.1-7.3 B/clock/EU on HD 530 and 7.6 on UHD 620 with >= 2 reads in flight; up to
+   ~12 SIMD8 FP32 mads per 128 B block hide under the reads. At 16 mads per block (Qwen attention) the loop is
+   issue-bound at ~87 % of the port (OA: both FPU pipes 95 % of active time, stall 5 %) [MEAS,
+   `results/l3port-2026-11-13.txt`]. Make sure the microbenchmark measures the hardware, not the compiler: two
+   versions were discarded because IGC added ~25 register copies or an integer multiply per block (read the ISA).
+   The OA counter `L3ShaderThroughput` matches true bytes once scaled by the OA clock.
+3. **A fitted model parameter is not a hardware constant.** The multithreaded model fits the attention points with a
+   "6 B/clock/EU port", but the measured port is 7.1+; the fitted value lumps issue overhead and latency together
+   ([solvers.md](solvers.md) §5). Test a model's explanation separately from its fit before acting on it.
+4. **Extra work per element must fit the slack of the loop it joins.** Decoding Q4_K weights inside the FP16 GEMM
+   costs ~2 instructions per 16 mads (+12.5 %) on a loop that is already issue-bound with 0-1 free registers, so it
+   wins at most +5-14 % and only where weights are dequantized per use (7B); the scales fold into the 32-k carry for
+   ~3 % [EST, `results/qgemm-model-2026-11-13.txt`]. Count the added instructions against the loop's non-mad budget
+   and the free registers (solver budget) before writing a fused kernel.
+
 ## 2. Rules at the OpenCL C level
 
 Rules confirmed in this project (NEO 24.35, IGC from `ocloc` 24.35). Each links to its evidence.
