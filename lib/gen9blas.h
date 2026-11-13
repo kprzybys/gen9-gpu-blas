@@ -46,6 +46,8 @@ void gen9blas_packed_free(gen9blas_packed *Bp);
 // A and the result are rounded to FP16 once each (accurate FP16 GEMM: FP32 sums of 32-product FP16 chunks).
 // *nonfinite = 1 if any result is inf / NaN (FP16 overflow): the caller should recompute in F32.
 int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
+// the same with FP16 activations (lda in elements)
+int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
 // ggml backend, gated FFN with FP16 weights kept on the GPU: Y = (silu(X Wg) * (X Wu)) Wd (F32 X: M x K, Y: M x Nd);
 // Pg, Pu: K -> N, Pd: N -> Nd, all packed as GEN9BLAS_HS. Intermediates stay FP16 on the GPU; *nonfinite as above.
 // ggml backend, per-layer elementwise ops on host F32 memory. Queued without a wait (sync = 0) when every operand is
@@ -58,6 +60,12 @@ int gen9blas_flush(void);
 // Y = X / sqrt(mean(X^2) + eps) [* w], M rows of K (w = NULL: no weight).
 int gen9blas_rms_norm(int M, int K, const float *X, int ldx, const float *w, float eps, float *Y, int ldy, int sync);
 // C = A + B (op 0) or A * B (op 1), M rows of K; ldb = 0: B is one row broadcast to all rows.
+// as gen9blas_binop_rows; bs0 = 0: B has one value per row (broadcast along the row: ggml conv bias [1, rows]).
+int gen9blas_binop_rows2(int op, int M, int K, const float *A, int lda, const float *B, int ldb, int bs0, float *C, int ldc, int sync);
+// ggml NORM (mean / variance over K) [* w] [+ b] (w, b: one row of K or NULL).
+int gen9blas_layer_norm(int M, int K, const float *X, int ldx, const float *w, const float *b, float eps, float *Y, int ldy, int sync);
+// ggml GELU (tanh form, FP16 table semantics of ggml-cpu) over n contiguous floats.
+int gen9blas_gelu(size_t n, const float *X, float *Y, int sync);
 int gen9blas_binop_rows(int op, int M, int K, const float *A, int lda, const float *B, int ldb, float *C, int ldc, int sync);
 // ggml ROPE forward, modes NORMAL (neox 0) / NEOX (neox 1), rotating all n_dims = head size elements: X, Y element
 // (i, h, t) at t * s2 + h * s1 + i floats; pos[n_tok]; ff: freq factors (n_dims/2) or NULL; corr: ggml_rope_yarn_corr_dims.

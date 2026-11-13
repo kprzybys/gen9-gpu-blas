@@ -120,7 +120,7 @@ static int init_l12(const char *dir) {
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
 static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8;
-static cl_kernel k_rms, k_binop, k_rope;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
+static cl_kernel k_rms, k_binop, k_rope, k_lnorm, k_gelu;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
 int gen9blas_init(const char *dir) {
     static int inited;
     if (inited) return 0;
@@ -150,7 +150,9 @@ int gen9blas_init(const char *dir) {
     { cl_int e7; k_epi_8 = clCreateKernel(ph, "gen9blas_epilog_hf8", &e7); if (e7) k_epi_8 = NULL; }
     { cl_int e8; k_rms = clCreateKernel(ph, "gen9blas_rms_norm", &e8); if (e8) k_rms = NULL;
       k_binop = clCreateKernel(ph, "gen9blas_binop_rows", &e8); if (e8) k_binop = NULL;
-      k_rope = clCreateKernel(ph, "gen9blas_rope", &e8); if (e8) k_rope = NULL; }
+      k_rope = clCreateKernel(ph, "gen9blas_rope", &e8); if (e8) k_rope = NULL;
+      k_lnorm = clCreateKernel(ph, "gen9blas_layer_norm", &e8); if (e8) k_lnorm = NULL;
+      k_gelu = clCreateKernel(ph, "gen9blas_gelu", &e8); if (e8) k_gelu = NULL; }
     // "v" kernels: (Ap, Bp, C, M, N, ldc, K, Kfull) -- also for chunks of data packed once (sub-buffers)
     // bin = NULL: main kernel from source (FP64: dgemm.cl, OpenCL C), not from an asm binary
     struct { int r; const char *bin, *k, *pa, *pb, *epi, *tri; int es, tn, km; cl_program pr; } t[4] = {
@@ -751,7 +753,15 @@ static int epilog_hf(cl_mem dCp, int ldp, int Mp, bf_t xC, int ldc, int N, int M
     return 0;
 }
 
+static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite);
 int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
+    return gemm_pb_f16w_any(0, M, A, lda, P, C, ldc, nonfinite);
+}
+// The same with FP16 activations (ggml conv_1d: im2col result as src0, F16 kernel as src1): packed by the HS pa kernel.
+int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
+    return gemm_pb_f16w_any(1, M, A, lda, P, C, ldc, nonfinite);
+}
+static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
     static int *nf;   // USM flag word (coherent with the GPU through the LLC)
     NEW_OPERATION();
     if (!P || P->type != GEN9BLAS_HS || !types[GEN9BLAS_HS].ready || !k_pa3_f32) FAIL("gemm_pb_f16w: needs B packed as GEN9BLAS_HS");
@@ -760,12 +770,17 @@ int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed 
     if (M <= 0) return 0;
     type_t *r = &types[GEN9BLAS_HS];
     int N = P->N, K = P->K, Np = P->Np, Kp = P->Kp, Mp = (M + 15) / 16 * 16;
-    size_t bA = ((size_t)(M - 1) * lda + K) * 4, bC = ((size_t)(M - 1) * ldc + N) * 4;
+    size_t bA = ((size_t)(M - 1) * lda + K) * (ahalf ? 2 : 4), bC = ((size_t)(M - 1) * ldc + N) * 4;
     bf_t xA, xC; int zA, zC;
     if (get_obj(A, bA, &uA, 1, 0, &xA, &zA) || get_obj(C, bC, &uC, 0, 1, &xC, &zC)) return -1;
     if (ensure_buf(&dAp, &sAp, (size_t)Mp * Kp * 2 + 4096) || ensure_buf(&dCp, &sCp, (size_t)Mp * Np * 2)) return -1;
     *nf = 0;
-    if (pack_a3_f32(xA, dAp, M, K, lda, Kp, Mp)) return -1;
+    if (ahalf) {   // FP16 rows -> A3 tiles: the HS type's own packing kernel (as gemm_pb)
+        size_t ga[3]; cl_long zero = 0;
+        cl_kernel ka = pack_kernel(r, 0, 0, Mp, Kp, 1, ga);
+        ARGB(ka, 0, xA); ARG(ka, 1, dAp); ARG(ka, 2, M); ARG(ka, 3, K); ARG(ka, 4, lda); ARG(ka, 5, Kp); ARG(ka, 6, zero); ARG(ka, 7, Mp);
+        CHECK(clEnqueueNDRangeKernel(q, ka, 3, NULL, ga, NULL, 0, NULL, NULL));
+    } else if (pack_a3_f32(xA, dAp, M, K, lda, Kp, Mp)) return -1;
     if (est_ms(r, Mp, Np, Kp) <= max_launch_ms()) {
         ARG(r->main, 0, dAp); ARG(r->main, 1, P->buf); ARG(r->main, 2, dCp); ARG(r->main, 3, Mp); ARG(r->main, 4, Np);
         ARG(r->main, 5, Np); ARG(r->main, 6, Kp); ARG(r->main, 7, Kp);
@@ -904,17 +919,48 @@ int gen9blas_rms_norm(int M, int K, const float *X, int ldx, const float *w, flo
 }
 
 int gen9blas_binop_rows(int op, int M, int K, const float *A, int lda, const float *B, int ldb, float *C, int ldc, int sync) {
+    return gen9blas_binop_rows2(op, M, K, A, lda, B, ldb, 1, C, ldc, sync);
+}
+int gen9blas_binop_rows2(int op, int M, int K, const float *A, int lda, const float *B, int ldb, int bs0, float *C, int ldc, int sync) {
     NEW_OPERATION();
     if (!k_binop) FAIL("binop_rows: kernel not in this build");
     if (M <= 0 || K <= 0) return 0;
-    size_t bA = ((size_t)(M - 1) * lda + K) * 4, bB = ((size_t)(ldb ? M - 1 : 0) * ldb + K) * 4, bC = ((size_t)(M - 1) * ldc + K) * 4;
+    size_t bA = ((size_t)(M - 1) * lda + K) * 4, bB = ((size_t)(ldb ? M - 1 : 0) * ldb + (bs0 ? K : 1)) * 4, bC = ((size_t)(M - 1) * ldc + K) * 4;
     bf_t xA, xB, xC; int zA, zB, zC;
     if (get_obj(A, bA, &uA, 1, 0, &xA, &zA) || get_obj(B, bB, &uB, 1, 0, &xB, &zB) || get_obj(C, bC, &uC, 0, 1, &xC, &zC)) return -1;
     ARGB(k_binop, 0, xA); ARG(k_binop, 1, lda); ARGB(k_binop, 2, xB); ARG(k_binop, 3, ldb); ARGB(k_binop, 4, xC);
-    ARG(k_binop, 5, ldc); ARG(k_binop, 6, op);
+    ARG(k_binop, 5, ldc); ARG(k_binop, 6, op); ARG(k_binop, 7, bs0);
     size_t g[2] = { (size_t)K, (size_t)M };
     CHECK(clEnqueueNDRangeKernel(q, k_binop, 2, NULL, g, NULL, 0, NULL, NULL));
     return ew_done(sync, xC, zC, bC, C);
+}
+
+int gen9blas_layer_norm(int M, int K, const float *X, int ldx, const float *w, const float *b, float eps, float *Y, int ldy, int sync) {
+    NEW_OPERATION();
+    if (!k_lnorm) FAIL("layer_norm: kernel not in this build");
+    if (M <= 0 || K <= 0) return 0;
+    size_t bX = ((size_t)(M - 1) * ldx + K) * 4, bY = ((size_t)(M - 1) * ldy + K) * 4;
+    bf_t xX, xW = BM(NULL), xB = BM(NULL), xY; int zX, zW, zB, zY, hw = w != NULL, hb = b != NULL;
+    if (get_obj(X, bX, &uA, 1, 0, &xX, &zX) || (hw && get_obj(w, (size_t)K * 4, &uB, 1, 0, &xW, &zW)) ||
+        (hb && get_obj(b, (size_t)K * 4, &uD, 1, 0, &xB, &zB)) || get_obj(Y, bY, &uC, 0, 1, &xY, &zY)) return -1;
+    if (!hw) xW = xX;
+    if (!hb) xB = xX;
+    ARGB(k_lnorm, 0, xX); ARG(k_lnorm, 1, ldx); ARGB(k_lnorm, 2, xW); ARG(k_lnorm, 3, hw); ARGB(k_lnorm, 4, xB); ARG(k_lnorm, 5, hb);
+    ARG(k_lnorm, 6, eps); ARGB(k_lnorm, 7, xY); ARG(k_lnorm, 8, ldy); ARG(k_lnorm, 9, K);
+    size_t g[2] = { 128, (size_t)M }, l[2] = { 128, 1 };
+    CHECK(clEnqueueNDRangeKernel(q, k_lnorm, 2, NULL, g, l, 0, NULL, NULL));
+    return ew_done(sync, xY, zY, bY, Y);
+}
+
+int gen9blas_gelu(size_t n, const float *X, float *Y, int sync) {
+    NEW_OPERATION();
+    if (!k_gelu) FAIL("gelu: kernel not in this build");
+    if (!n) return 0;
+    bf_t xX, xY; int zX, zY;
+    if (get_obj(X, n * 4, &uA, 1, 0, &xX, &zX) || get_obj(Y, n * 4, &uC, 0, 1, &xY, &zY)) return -1;
+    ARGB(k_gelu, 0, xX); ARGB(k_gelu, 1, xY);
+    CHECK(clEnqueueNDRangeKernel(q, k_gelu, 1, NULL, &n, NULL, 0, NULL, NULL));
+    return ew_done(sync, xY, zY, n * 4, Y);
 }
 
 int gen9blas_rope(int n_dims, int nh, int n_tok, const float *X, long xs1, long xs2, float *Y, long ys1, long ys2,

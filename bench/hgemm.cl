@@ -980,10 +980,11 @@ void gen9blas_rms_norm(__global const float *x, int ldx, __global const float *w
     else       for (int i = t; i < K; i += 128) yr[i] = xr[i] * scale;
 }
 // c = a + b (op 0) or a * b (op 1), M rows of K; b is one row (ldb = 0, ggml broadcast) or M rows. Grid (K, M).
+// bs0: element stride of b within a row (1; 0 = one value per row, ggml broadcast of a column, e.g. a conv bias).
 __kernel void gen9blas_binop_rows(__global const float *a, int lda, __global const float *b, int ldb,
-                                  __global float *c, int ldc, int op) {
+                                  __global float *c, int ldc, int op, int bs0) {
     const size_t i = get_global_id(0), r = get_global_id(1);
-    const float u = a[r * lda + i], v = b[r * ldb + i];
+    const float u = a[r * lda + i], v = b[r * ldb + i * bs0];
     c[r * ldc + i] = op ? u * v : u + v;
 }
 // ggml ROPE (modes NORMAL 0 and NEOX 2, n_dims = ne0, no offset), forward. Element (i, h, t) at t * s2 + h * s1 + i
@@ -1015,5 +1016,50 @@ __kernel void gen9blas_rope(__global const float *x, long xs1, long xs2, __globa
         yp[i0] = x0 * c - x1 * s;
         yp[i1] = x0 * s + x1 * c;
     }
+}
+// ggml NORM (LayerNorm without affine) [* w] [+ b], one work-group of 128 per row (grid (128, M)), as ggml-cpu:
+// mean = sum / K, variance = sum((x - mean)^2) / K, y = (x - mean) * (1 / sqrt(variance + eps)), then * w, then + b.
+__kernel __attribute__((reqd_work_group_size(128, 1, 1)))
+void gen9blas_layer_norm(__global const float *x, int ldx, __global const float *w, int has_w, __global const float *b,
+                         int has_b, float eps, __global float *y, int ldy, int K) {
+    __local float part[128];
+    const int t = get_local_id(0);
+    const size_t r = get_global_id(1);
+    __global const float *xr = x + r * ldx;
+    float s = 0.0f;
+    for (int i = t; i < K; i += 128) s += xr[i];
+    part[t] = s;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int h = 64; h > 0; h >>= 1) { if (t < h) part[t] += part[t + h]; barrier(CLK_LOCAL_MEM_FENCE); }
+    const float mean = part[0] / (float)K;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    s = 0.0f;
+    for (int i = t; i < K; i += 128) { const float d = xr[i] - mean; s += d * d; }
+    part[t] = s;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int h = 64; h > 0; h >>= 1) { if (t < h) part[t] += part[t + h]; barrier(CLK_LOCAL_MEM_FENCE); }
+    const float scale = 1.0f / sqrt(part[0] / (float)K + eps);
+    __global float *yr = y + r * ldy;
+    for (int i = t; i < K; i += 128) {
+        float v = (xr[i] - mean) * scale;
+        if (has_w) v = v * w[i];
+        if (has_b) v = v + b[i];
+        yr[i] = v;
+    }
+}
+// ggml GELU (tanh form) as ggml-cpu with GGML_GELU_FP16: x <= -10 -> 0, x >= 10 -> x, otherwise the table value
+// fp16(gelu(fp16(x))). n elements, contiguous. Grid (n).
+__kernel void gen9blas_gelu(__global const float *x, __global float *y) {
+    const size_t i = get_global_id(0);
+    const float v = x[i];
+    float r;
+    if (v <= -10.0f) r = 0.0f;
+    else if (v >= 10.0f) r = v;
+    else {
+        const float h = convert_float(convert_half_rte(v));
+        const float g = 0.5f * h * (1.0f + tanh(0.79788456080286535587989211986876f * h * (1.0f + 0.044715f * h * h)));
+        r = convert_float(convert_half_rte(g));
+    }
+    y[i] = r;
 }
 #pragma OPENCL FP_CONTRACT ON
