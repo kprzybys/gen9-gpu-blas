@@ -196,13 +196,16 @@ def loop_quarters(prologue, loop_k, epilogue, acc_map, dtype, kc=None, acc_map_f
 
     def load_q(b):
         A, B, BO = buf[b]
+        if dtype == "hf" and kc:   # one header add per send: +2 quarters at once (the send reads the header at issue)
+            return [f"{W}send (16|M0)  r{A}:w  r{H[2 * b]}  {SEND}", f"{W}send (16|M0)  r{B}:w  r{H[2 * b + 1]}  {SEND}"] + \
+                advance(H, [2 * b, 2 * b + 1], 2 * qw)
         if dtype == "hf":
             o = loads(H, [(A, 2 * b), (B, 2 * b + 1)])
         else:
             o = loads(H, [(A, 2 * b), (A + 4, 2 * b), (B, 2 * b + 1), (BO, 2 * b + 1)])
         return o + advance(H, [2 * b, 2 * b + 1], 2 * qw - (128 if dtype == "hf" else 256))
 
-    def mads(b):
+    def mads(b, first=False):
         A, B, BO = buf[b]
         o = []
         for kl in range(4):
@@ -213,20 +216,28 @@ def loop_quarters(prologue, loop_k, epilogue, acc_map, dtype, kc=None, acc_map_f
                 else:
                     g, sub = A + 2 * (r // 4) + (kl % 2 == 0), (r % 4) * 2 + kl // 2
                     breg = (B if kl % 2 == 0 else BO) + 2 * (kl // 2)
-                o.append(f"        mad (16|M0)  r{a}.0<1>:{dtype}  r{a}.0<2;1>:{dtype}  r{breg}.0<2;1>:{dtype}  r{g}.{sub}<0>:{dtype}")
+                if first and kl == 0:   # first product of a kc chunk: h = b * a instead of h = 0 (carry) + b * a
+                    o.append(f"        mul (16|M0)  r{a}.0<1>:{dtype}  r{breg}.0<16;16,1>:{dtype}  r{g}.{sub}<0;1,0>:{dtype}")
+                else:
+                    o.append(f"        mad (16|M0)  r{a}.0<1>:{dtype}  r{a}.0<2;1>:{dtype}  r{breg}.0<2;1>:{dtype}  r{g}.{sub}<0>:{dtype}")
         return o
 
     step = kc or 16
     out += load_q(0) + load_q(1) + ["LGEN:"]
     for q in range(step // 4):
-        out += mads(q % 2) + load_q(q % 2)
+        out += mads(q % 2, first=bool(kc) and q == 0) + load_q(q % 2)
+    # hd: carry f += h after each chunk. h is not zeroed here: the next chunk starts with mul (bit-identical: h = +0 + p
+    # and h = p differ only by the sign of a zero, and f, which starts at +0, cannot become -0 by adding it). The epilogue
+    # adds h once more, so h is zeroed once after the loop.
     if kc:
         for r in range(16):
             h, f = acc_map[r], acc_map_f[r]
             out += [f"        add (8|M0)  r{f}.0<1>:f  r{f}.0<8;8,1>:f  r{h}.0<8;8,1>:hf",
-                    f"        add (8|M8)  r{f + 1}.0<1>:f  r{f + 1}.0<8;8,1>:f  r{h}.8<8;8,1>:hf",
-                    f"        mov (16|M0)  r{h}.0<1>:hf  0.0:hf"]
-    return out + loop_end(counter, limit, step, "LGEN")
+                    f"        add (8|M8)  r{f + 1}.0<1>:f  r{f + 1}.0<8;8,1>:f  r{h}.8<8;8,1>:hf"]
+    out += loop_end(counter, limit, step, "LGEN")
+    if kc:
+        out += [f"        mov (16|M0)  r{acc_map[r]}.0<1>:hf  0.0:hf" for r in range(16)]
+    return out
 
 
 def load_map(kind):

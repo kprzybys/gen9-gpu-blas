@@ -1,0 +1,25 @@
+# Accurate FP16 GEMM (GEN9BLAS_HS, hgemm_kc_v, asm loop from asm/gemm_gen.py "hd"): fewer non-mad instructions, UHD 620
+## Why
+Pass profile (results/ggml-backend-pass-profile-*): hgemm_kc_v is 72 % of a pp512 pass at ~650 GFLOPS, OA "FPU both"
+81 % with < 5 % stall and < 4 % idle EUs; every GEMM shape of the pass (q/o, k/v, gate/up, down, square, M 512-4096)
+runs at 640-660 -> not shape-bound. Instruction count of the loop per 32-k chunk (512 mad): carry 16 x (2 mixed add +
+1 mov h = 0) = 48; loads 8 quarters x (2 send + 2 header add + 2 advance add) = 48; loop 3 -> 99 non-mad (19 %),
+matching the 81 % dual-issue: the loop is issue-bound.
+[HYP, before measuring] (1) one header add of +256 per send instead of +128 and +128; (2) no h = 0 after the carry,
+the next chunk's first product is a mul (h = b * a) -> 67 non-mad per chunk, ~6 % fewer instructions -> GEMM ~+7 %.
+Bit-identical expected: h = +0 + p and h = p differ only in the sign of a zero, and f (starts at +0) cannot become -0
+by adding such a zero; h is zeroed once after the loop because the template epilogue writes (half)(f + h).
+## Checks
+- gemm_pb_f16w on 5 shapes + ffn_f16w (pkv_bits test): output bytes identical to the previous binary.
+- Poison (first product of each chunk replaced by mov 0): output differs -> the driver runs our ISA.
+- make -C asm gemm-check: OK (bench/gen_hd.bin = generator output). test_packed.py, test_basic.py pass.
+- Qwen2.5-1.5B Q4_K_M perplexity (-c 512 --chunks 10): 15.2592, identical.
+## Measured (kernel-only GFLOPS, M = 512, KCL_PROFILE_KERNELS, 120 calls, alternating binaries)
+           gate/up K=1536 N=8960   down K=8960 N=1536
+old        613 / 644 / 656         607 / 631 / 643
+new        668 / 714 / 713         658 / 714 / 715      -> +8-11 % (prediction ~+7 %: hit, slightly above)
+llama-bench pp512 Qwen2.5-1.5B Q4_K_M (-r 4, alternating): old 179.3 / 184.7, new 195.3 / 199.2 t/s -> +8-9 %.
+## Next (asm/gemm_gen.py)
+A 16x32 accurate tile is register-bound: per the CP-SAT count of an earlier run, it fits only after free_regs() keeps
+only the epilogue's live-in registers (E = 7-9 instead of 17), with one load buffer (kl 4) or two half-size buffers
+sharing headers, and no spare register at all; 8x32 fits easily but reads more per mad (6.4 vs 8 FMA per element).
