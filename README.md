@@ -34,7 +34,8 @@ Gen8 target of `ocloc`) with source changes for Cherryview's restrictions. FP32 
 (`test_basic`, `test_level3`, `test_level12` without the SciPy-referenced ROTG/ROTMG/ROTM cases, `test_userptr`,
 `test_skinny`, `test_long_launch`); the drop-in BLAS layer suites (`test_blas*`, which need OpenBLAS) were not run. No
 FP16, no assembly kernels, the faster skinny-GEMM variant is off, FP64 division is emulated (IEEE results except
-subnormal quotients, which may be off by 1 ulp), and no performance has been measured yet. Details, sources and the
+subnormal quotients, which may be off by 1 ulp). Speed: SGEMM 36-42 GFLOPS, DGEMM 8.1 GFLOPS, levels 1-2 up to
+8 GB/s of a 12.8 GB/s single memory channel (`results/braswell-gen8-2026-11-13.txt`). Details, sources and the
 hardware findings (e.g. the A64 QWord scattered read hangs this GPU): [docs/gen8.md](docs/gen8.md).
 
 | Item | Value |
@@ -160,7 +161,7 @@ Reproducing the measurements: [docs/benchmarks.md](docs/benchmarks.md).
 
 - Tested on two Gen9 GPUs: the UHD 620 (all measurements) and an HD 530 (Skylake, tests and level-3 speed; see "Tested
   configuration"). Other Gen9/Gen9.5 parts may work but are untested; newer generations and the `xe` driver are not supported.
-- Gen8: only Braswell/Cherryview (PCI 0x22b0-0x22b3), experimental: FP32 and FP64 only, not tuned, not measured
+- Gen8: only Braswell/Cherryview (PCI 0x22b0-0x22b3), experimental: FP32 and FP64 only, not tuned (SGEMM about 1/3 of the FP32 peak)
   ([docs/gen8.md](docs/gen8.md)). `kcl` treats every other GPU as Gen9: on Broadwell or on a newer generation it
   would send Gen9 commands, so do not run it there.
 - `kcl` is a subset of OpenCL, just enough for the kernels of this library. It does not configure scratch space: a

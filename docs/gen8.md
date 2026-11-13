@@ -250,6 +250,21 @@ SIMD8 and the A64 aligned OWord block read x4 (`intel_sub_group_block_read2`); w
 is not known [HYP]. They are only the faster variant, so on Gen8 `gen9blas.c` uses `skinny_k*` instead (as with
 `GEN9BLAS_SKINNY_R=0`).
 
+## 6d. Performance (2026-11-13, `results/braswell-gen8-2026-11-13.txt`) [MEAS]
+
+At 600 MHz (the GPU ran at its maximum clock throughout the GEMM stages):
+
+| | Gen8 Cherryview | fraction of peak | for scale: UHD 620 (Gen9.5, asm kernels) |
+|---|---|---|---|
+| SGEMM n = 1024 .. 4096 | 42.3 .. 36.2 GFLOPS | 0.37 .. 0.31 of 115 | ~340 GFLOPS |
+| DGEMM n = 2048, 4096 | 8.2, 8.1 GFLOPS | 0.57 of 14.4 | ~55 GFLOPS |
+| streaming levels 1-2 (axpy, dot, nrm2, iamax, gemv) | 6.7 .. 8.1 GB/s | 0.52 .. 0.63 of 12.8 GB/s | |
+| ger / syr / syr2, trsv | 1.9 .. 5.4, 3.5 .. 4.5 GB/s | | |
+
+The SGEMM main kernel on Gen8 is the OpenCL C frame (`sgemm_v`) of the Gen9 asm generator, not tuned for Gen8; DGEMM
+reaches a larger share of its (much lower) peak. The band-splitting estimate (`est_ms`: 50 / 8 GFLOPS) is right for FP64
+and 1.2-1.4x optimistic for FP32. No CPU comparison: the target has only the reference BLAS.
+
 ## 7. Open questions and known limitations
 
 - Why `skinny_r4/r8` give wrong results (SIMD8? A64 OWord block read x4?); Gen8 uses `skinny_k*` instead (6c).
@@ -257,8 +272,10 @@ is not known [HYP]. They are only the faster variant, so on Gen8 `gen9blas.c` us
 - The accuracy of `native_recip` on the hardware is not measured; `div_chv` tolerates a 1e-3 error in emulation, and the
   hardware test of the division (6c) is the check.
 - Snooping: coherent in all tests so far (including command-streamer fetches of the WC-mapped batch); its bandwidth cost
-  against uncached memory with clflush is not measured. No performance has been measured on Gen8 at all.
-- `est_ms` assumes 50 / 8 GFLOPS (FP32 / FP64) for band splitting, not measured; at the idle clock the peaks are lower.
+  against uncached memory with clflush is not measured (streaming routines reach 0.52-0.63 of the theoretical 12.8 GB/s, 6d).
+- SGEMM reaches 0.31-0.37 of the FP32 peak with the untuned OpenCL C kernel (6d).
+- `est_ms` assumes 50 / 8 GFLOPS (FP32 / FP64) for band splitting; measured 36-42 / 8.1-8.2 (6d), so FP32 bands run up to
+  ~1.4x longer than `GEN9BLAS_MAX_LAUNCH_MS`.
   With one request per kernel only a single launch has to fit the ~10 s heartbeat; only GEMM is band-split.
 - The 4 GB address space: when it is full, kcl waits for the GPU and retries, but does not evict cached userptr objects
   (up to `KCL_USERPTR_MB`, default 1 GB); `KCL_ADDR` (2 MB alignment, colouring) is ignored on Gen8.
