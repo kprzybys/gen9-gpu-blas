@@ -182,10 +182,14 @@ built for `whl`.
 its use, and with ~6 threads per EU the read latency stays exposed; the hand loop keeps the next one to three steps
 in flight (+25 % over the same template in OpenCL C). Removing the conflicts alone gave nothing for Qwen.
 
-What limits it now: the first explanation below ([EST], L3 read bandwidth) is contradicted by the OA counters
-(`results/oa-attention-hd530-2026-11-13.txt`): stalls are 2-3 %, both FPU pipes are busy 86-88 % of active time,
-L3 traffic is 112-118 GB/s, and the loss is ~20 % (Qwen) / 13 % (Llama) of EU time without a thread [MEAS];
-[HYP] work distribution (work-group granularity, grid tail); `LOCAL=24` is 3.5 % faster with less idle time.
+What limits it now: OPEN. The OA counters (`results/oa-attention-hd530-2026-11-13.txt`) show stalls 2-3 %, both
+FPU pipes busy 86-88 % of active time, and ~20 % (Qwen) / 13 % (Llama) of EU time without a thread [MEAS]; work-group
+64 cut the idle share and gave 305 GFLOPS (section 10). Whether Qwen is bound by the data port / L3 is not settled:
+by arithmetic the loop demands 148 GB/s (~6.2 B/clock/EU) at 296 GFLOPS while the uncalibrated L3ShaderThroughput
+counter shows 112-118 GB/s, and other multi-thread EU model (`results/mt-model-2026-11-13.txt`, commit
+665094c) fits the Qwen points with an effective ~6 B/clock/EU port limit and finds Llama not memory-bound. Deciding
+test: a block-read microbenchmark in the Qwen access pattern (7 threads/EU, with and without mads, work-group 64 vs
+128) under OA, which also calibrates the counter.
 The original estimate, kept for the record: L3 read bandwidth for Qwen. At 2 rows per thread each 128 B block read feeds 16 SIMD8
 mads (8 B per mad), and 296 GFLOPS is 148 GB/s = 148 B per clock, the block-read ceiling measured on UHD 620
 (155-158 GB/s at ~1.1 GHz). More speed would need more query rows per thread, but FP32 Q and O already take 64 of

@@ -272,8 +272,10 @@ should come with this breakdown next to its GFLOPS.
   whole launches (no start/tail split); repeated recordings agree within ~3 points. With launches of ~90 ms the
   summary became inconsistent with the rate (EU active 55 % at the same GFLOPS as a 75 % run) [HYP: report
   intervals above ~180 ms wrap a 32-bit EU-cycle counter, 24 EU x 1 GHz]: keep launches under OA <= ~50 ms. `GtiReadThroughput` varied
-  0.8-12.9 GB/s between similar kernels and is not interpreted until its semantics are checked. Counters say
-  nothing about correctness.
+  0.8-12.9 GB/s between similar kernels and is not interpreted until its semantics are checked.
+  `L3ShaderThroughput` is **not calibrated** either: the Qwen attention loop must read 148 GB/s at 296 GFLOPS
+  (64 sends x 128 B per 1024 SIMD8 mads = 8 B per mad), yet the counter shows 112-118 GB/s (76-80 %); calibrate it
+  on a microbenchmark of known demand before using it as a bandwidth figure. Counters say nothing about correctness.
 - **First use** (`results/oa-attention-hd530-2026-11-13.txt`): the asm attention kernel is not memory-bound
   (stall 2-3 %, both FPU pipes busy 86-88 % of active time); its loss is ~20 % (Qwen) / 13 % (Llama) of EU time
   without a thread, which overturned the L3-bandwidth explanation and points at work distribution [HYP:
