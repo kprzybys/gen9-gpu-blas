@@ -1,0 +1,62 @@
+# Desktop i5-6500 (4C/4T, 65 W) + HD 530, llama.cpp 2cbe0ec, backend 6449002, OpenVINO 2026.4.1, -t 4, nice 19, 2026-11-13 12:50 CET (HD 530: Gen9 GT2, 24 EU, max 1050 MHz; NEO 24.35.30872.36)
+## 1. Correctness: llama-perplexity -c 512 --chunks 4 (text: docs/*.md of the repo), Qwen2.5-1.5B-Instruct Q4_K_M; lines: CPU, GEN9, OpenVINO GPU
+# 12:50:40 load 0.53 0.65 0.81 gpu 1000 MHz background service 30.8% cpu
+0.26.647.977 I Final estimate: PPL = 9.3603 +/- 0.83613
+# 12:51:06 load 1.99 0.99 0.91 gpu 1000 MHz background service 30.8% gen9
+0.18.263.275 I Final estimate: PPL = 9.3369 +/- 0.83343
+gen9: graph_compute 670; no-op nodes 0; MUL_MAT run: cached weight 583, packed now 197, per call 0; F16 weights 780 (recomputed in F32 after FP16 overflow: 0); weights over the cache budget, packed per use 0
+gen9: FFN blocks fused 0 (recomputed unfused after FP16 overflow: 0); SWIGLU alone 0; supports_op GLU asked 835, declined 835
+gen9: quantized weights dequantized 197 (on the GPU: 197; to F32 because of FP16 range: 0), 3.25 s (GPU 3.25; CPU path: alloc 0.00, to_float+FP16 0.00, pack_b 0.00)
+gen9: supports_op MUL_MAT asked 5914, declined: shape/layout 8, type 0, batch<32 4334, hint 0, no GPU 0
+# 12:51:25 load 2.05 1.06 0.94 gpu 1017 MHz background service 30.8% ov
+0.59.079.641 I Final estimate: PPL = 9.6756 +/- 0.85994
+## 2. pp512 at KV depth d (llama-bench -p 512 -n 0 -d 0,512,1536,3584 -r 2)
+# 12:52:24 load 1.47 1.10 0.96 gpu 1017 MHz background service 30.8% gen9 qwen2.5-1.5b-instruct-q4_k_m.gguf
+| qwen2 1.5B Q4_K - Medium       |   1.04 GiB |     1.78 B | GEN9       |  -1 | ^gen9_load_backends_only$=CPU |           pp512 |        163.97 ± 0.18 |
+| qwen2 1.5B Q4_K - Medium       |   1.04 GiB |     1.78 B | GEN9       |  -1 | ^gen9_load_backends_only$=CPU |    pp512 @ d512 |        142.49 ± 3.66 |
+| qwen2 1.5B Q4_K - Medium       |   1.04 GiB |     1.78 B | GEN9       |  -1 | ^gen9_load_backends_only$=CPU |   pp512 @ d1536 |        113.82 ± 1.97 |
+| qwen2 1.5B Q4_K - Medium       |   1.04 GiB |     1.78 B | GEN9       |  -1 | ^gen9_load_backends_only$=CPU |   pp512 @ d3584 |         84.06 ± 2.35 |
+gen9: graph_compute 3818; no-op nodes 0; MUL_MAT run: cached weight 3667, packed now 772, per call 0; F16 weights 4439 (recomputed in F32 after FP16 overflow: 0); weights over the cache budget, packed per use 0
+gen9: FFN blocks fused 0 (recomputed unfused after FP16 overflow: 0); SWIGLU alone 0; supports_op GLU asked 3415, declined 3415
+gen9: quantized weights dequantized 772 (on the GPU: 772; to F32 because of FP16 range: 0), 9.15 s (GPU 9.15; CPU path: alloc 0.00, to_float+FP16 0.00, pack_b 0.00)
+gen9: supports_op MUL_MAT asked 13070, declined: shape/layout 56, type 0, batch<32 7960, hint 0, no GPU 0
+# 12:54:09 load 2.64 1.60 1.16 gpu 933 MHz background service 30.7% ov qwen2.5-1.5b-instruct-q4_k_m.gguf
+| qwen2 1.5B Q4_K - Medium       |   1.04 GiB |     1.78 B | OPENVINO   |  99 |           pp512 |         58.52 ± 0.05 |
+| qwen2 1.5B Q4_K - Medium       |   1.04 GiB |     1.78 B | OPENVINO   |  99 |    pp512 @ d512 |         55.93 ± 1.56 |
+| qwen2 1.5B Q4_K - Medium       |   1.04 GiB |     1.78 B | OPENVINO   |  99 |   pp512 @ d1536 |         52.25 ± 1.84 |
+| qwen2 1.5B Q4_K - Medium       |   1.04 GiB |     1.78 B | OPENVINO   |  99 |   pp512 @ d3584 |         46.21 ± 2.52 |
+# 12:58:29 load 0.93 1.21 1.10 gpu 1017 MHz background service 30.7% gen9 Llama-3.2-1B-Instruct-Q4_K_M.gguf
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | GEN9       |  -1 | ^gen9_load_backends_only$=CPU |           pp512 |        210.20 ± 1.12 |
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | GEN9       |  -1 | ^gen9_load_backends_only$=CPU |    pp512 @ d512 |        176.54 ± 0.88 |
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | GEN9       |  -1 | ^gen9_load_backends_only$=CPU |   pp512 @ d1536 |        141.09 ± 1.99 |
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | GEN9       |  -1 | ^gen9_load_backends_only$=CPU |   pp512 @ d3584 |        109.25 ± 2.11 |
+gen9: graph_compute 1794; no-op nodes 1104; MUL_MAT run: cached weight 2071, packed now 436, per call 0; F16 weights 2507 (recomputed in F32 after FP16 overflow: 0); weights over the cache budget, packed per use 0
+gen9: FFN blocks fused 0 (recomputed unfused after FP16 overflow: 0); SWIGLU alone 0; supports_op GLU asked 1915, declined 1915
+gen9: quantized weights dequantized 436 (on the GPU: 436; to F32 because of FP16 range: 0), 6.80 s (GPU 6.80; CPU path: alloc 0.00, to_float+FP16 0.00, pack_b 0.00)
+gen9: supports_op MUL_MAT asked 7526, declined: shape/layout 56, type 0, batch<32 4600, hint 0, no GPU 0
+# 12:59:53 load 2.74 1.69 1.28 gpu 933 MHz background service 30.7% ov Llama-3.2-1B-Instruct-Q4_K_M.gguf
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | OPENVINO   |  99 |           pp512 |         80.11 ± 0.93 |
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | OPENVINO   |  99 |    pp512 @ d512 |         76.06 ± 2.73 |
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | OPENVINO   |  99 |   pp512 @ d1536 |         68.19 ± 6.12 |
+| llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | OPENVINO   |  99 |   pp512 @ d3584 |         57.80 ± 8.22 |
+# 13:03:15 load 1.20 1.43 1.26 gpu 1017 MHz background service 30.7% end
+
+## Analysis (time per 512-token ubatch = 512 / t/s; matrix products are identical at every depth, so the increase
+## over d = 0 is attention over the extra KV entries)
+Attention shapes from the GGUF headers: Qwen2.5-1.5B L 28, H 12, H_kv 2, d_head 128 (H*L*d_head = 43 008);
+Llama-3.2-1B L 16, H 32, H_kv 8, d_head 64 (32 768).
+Extra attention FLOP from d = 0 to d = 3584: 4 * 512 * 3584 * H*L*d_head (Q*K^T and P*V, 2 FLOP per multiply-add).
+model   stack     t(d0)   t(d512)  t(d1536)  t(d3584)  extra    extra FLOP   effective attention rate
+Qwen    GEN9      3.12 s  3.59     4.50      6.09      2.97 s   3.16e11      106 GFLOPS (CPU, ggml flash attention)
+Qwen    OpenVINO  8.75    9.15     9.80      11.08     2.33 s   3.16e11      135 GFLOPS (GPU)
+Llama   GEN9      2.44    2.90     3.63      4.69      2.25 s   2.41e11      107 GFLOPS (CPU)
+Llama   OpenVINO  6.39    6.73     7.51      8.86      2.47 s   2.41e11       97 GFLOPS (GPU; sd up to 8 %)
+- At d = 3584 attention is about half of the GEN9 ubatch time (Qwen 49 %, Llama 48 %); its cost is linear in d
+  (Qwen 0.47 / 1.38 / 2.97 s at d = 512 / 1536 / 3584).
+- OpenVINO's GPU attention is not faster than the CPU attention under GEN9 in absolute time; its pp drops less in
+  percent only because its matrix products are 2.6-2.8x slower. (This corrects the earlier reading of the laptop
+  pp2048 numbers as "OpenVINO handles attention better".)
+- Perplexity (4 chunks, same text): CPU 9.3603, GEN9 9.3369 (-0.25 %), OpenVINO 9.6756 (+3.4 %). GEN9 is correct on
+  HD 530 (Skylake) with kernels built for -device whl; the OpenVINO gap is worth a longer check.
+- Conditions: desktop, no power-limit throttling observed; a background service used ~31 % of one core throughout;
+  GPU clock 933-1017 MHz at the sample points.

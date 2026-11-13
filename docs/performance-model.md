@@ -120,6 +120,7 @@ untyped surface 200-600, atomics 14 000. These are the compiler authors' assumpt
 | Scattered read bandwidth (2/4 B per line) vs block | as above | not measured |
 | GPU gap between dependent kernels in a queue | calls with several kernels (pack A, pack B, GEMM, epilogue) | not measured; whole HGEMM call at n = 1024: about 0.4 ms outside kernel times |
 | Thread dispatch cost vs grid size | small kernels | not measured |
+| `exp` throughput (FP32), SLM bandwidth and bank conflicts, mixed-mode `mad` (hf -> f) rate in SIMD8 | attention on the GPU ([attention-gpu.md](attention-gpu.md)) | not measured |
 
 ## 6. Formulas
 
