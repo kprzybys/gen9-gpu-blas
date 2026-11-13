@@ -1,0 +1,63 @@
+# Hybrid LAPACK (Cholesky potrf, then LU getrf) on gen9blas -- model before any measurement, 2026-11-13 night
+Scheme (MAGMA style, no copies: CPU and GPU work on the same host buffers through userptr): diagonal block / panel on the
+CPU (OpenBLAS), panel TRSM and trailing SYRK/GEMM on the GPU in FP32; optional FP64 iterative refinement on the CPU
+(sposv-style mixed precision: factor in FP32, residual and correction in FP64). Background: reports/Katalog kerneli GPU.md
+(section LAPACK), research_notes/Katalog kerneli GPU/dense_linear_algebra.md. Nothing below is measured for LAPACK yet.
+
+## Facts used (kp, UHD 620 + i5/i7-8x65U, all FP32 unless noted)
+- gen9blas whole call, square n = 2048 / 4096: SGEMM 341-351, SSYRK 242-266, STRSM 183 / 226-232 GFLOPS, CPU < 1 %
+  (results/no-neo-level3-2026-11-11.txt, level3-whole-call-2026-11-12.txt). Package 17-22 W during SGEMM.
+- OpenBLAS on the CPU (8 threads), same machine (results/compare-l3-power-2026-11-11.txt): SGEMM n = 4096 297 GFLOPS at
+  package 39-41 W (turbo, short) but 189 GFLOPS at 16.7 W (sustained); n = 1024 175 GFLOPS at 16.7 W; STRSM 188 GFLOPS;
+  DGEMM n = 2048 79 GFLOPS (sustained power state not stated). GPU DGEMM 53-56 GFLOPS.
+- Sync: one GPU wait ~0.19 ms (wake-up) + execbuf ~0.035 ms (results/ggml-backend-ffn-quantized-2026-11-13.txt).
+- Bandwidth 19-27 GB/s shared; FP32 balance ~21 FLOP/B. CPU and GPU share the 15-25 W budget: running both at full
+  speed lowers both clocks (results/ggml-backend-ffn-fusion-2026-11-13.txt).
+
+## Cholesky potrf (lower, n, block nb), right-looking, no lookahead in v1
+Flops n^3/3. Per step on a trailing size m = n - k: CPU potf2 nb^3/3; GPU TRSM m*nb^2; GPU SYRK m^2*nb (lower half).
+Shares of flops: SYRK ~ 1 - 1.5 nb/n, TRSM ~ 1.5 nb/n, potf2 (nb/n)^2:
+  n = 2048, nb = 256: SYRK 81 %, TRSM 19 %, potf2 1.6 %;  n = 4096: 91 / 9.4 / 0.4 %;  n = 8192: 95 / 4.7 / 0.1 %.
+Trailing C traffic of our GEMM with beta = 1 (GEMM into a work buffer, separate epilogue reading and writing C): ~16 B per
+updated element per step; summed over steps 16 * n^3 / (6 nb) B. n = 8192, nb = 256: 5.7 GB = ~0.25 s at 23 GB/s against
+~0.6 s of SYRK compute -> nb = 512 halves it (2.9 GB, ~0.12 s). [the epilogue is not overlapped with the GEMM today]
+Per-step overhead: wait for the diagonal block (one GPU wait ~0.25 ms) + CPU potf2 (nb = 256: 5.6 MFLOP, ~0.1-0.3 ms) +
+submit; n/nb steps -> n = 8192, nb = 512: 16 steps, ~8 ms = ~1 % of the run. Lookahead not needed for potrf at n >= 2048.
+Assumed rate of the rank-nb update (SYRK/GEMM with K = nb, beta = 1): 250-300 GFLOPS [HYP, first thing to measure].
+Predicted whole potrf, FP32, effective GFLOPS (n^3/3 / time):
+  n = 2048: 150-200;  n = 4096: 200-250;  n = 8192: 230-280.
+Ceiling against OpenBLAS:
+- vs OpenBLAS spotrf (FP32, CPU): sustained-power OpenBLAS ~170-190 GFLOPS (SGEMM-limited), turbo ~280: hybrid 1.0-1.5x at
+  n >= 4096, parity or loss at 2048. Energy: GPU path at ~17-22 W package vs CPU 17 W sustained / 40 W turbo.
+- vs OpenBLAS dposv (FP64 on the CPU, ~60-80 GFLOPS): mixed-precision hybrid. Refinement per iteration: FP64 residual
+  (DGEMV over A in FP64: n^2 * 8 B, memory-bound) + two triangular solves with the FP32 factor (n^2 * 4 B each).
+  n = 8192: ~25 + 2 x 13 = ~50 ms per iteration, 2-3 iterations for cond(A) <= ~1e5 -> 0.1-0.15 s + factor ~0.65-0.8 s
+  = ~0.8-0.95 s vs dpotrf ~183 GFLOP / 70 GFLOPS = ~2.6 s -> 2.7-3.3x. n = 2048: factor ~15-20 ms, refinement
+  ~3 ms per iteration -> ~25 ms vs ~41 ms -> ~1.6x. Valid only for cond(A) well below 1/eps_FP32 (~1e7); else fall back.
+- CPU and GPU both on the trailing update: at most (340 + 180) / 340 = 1.5x, and the shared power budget eats most of it
+  (measured with FFN fusion) -> not in v1.
+
+## LU getrf (partial pivoting), right-looking with lookahead depth 1
+Flops 2n^3/3. Panel (n - k) x nb on the CPU (OpenBLAS sgetrf on the panel: IAMAX, swaps, GER/recursive): total panel flops
+~ n^2 nb / 2 (share 0.75 nb/n: 9 % at n = 2048 / nb = 256, 2.3 % at 8192) but at a low CPU rate on tall-skinny shapes
+(assumed 40-80 GFLOPS [HYP]); LASWP of the rows left and right of the panel: nb rows x n columns per step, ~n^2 * 8 B in
+total (n = 8192: ~0.5 GB, ~25 ms if on the CPU); GPU: TRSM of U12 (nb x (n-k-nb)) + GEMM trailing update.
+Lookahead: the GPU first updates the next panel's columns, the CPU factors that panel while the GPU updates the rest.
+Step time = max(CPU panel + swaps, GPU update) + one wait.
+  n = 2048, nb = 256: panel ~0.5 GFLOP at 40-80 -> 7-13 ms total vs GPU update ~5.7 GFLOP at 250-300 -> ~20 ms: overlap
+  hides most of the panel; predicted 160-220 GFLOPS (2n^3/3 / time).
+  n = 4096: 210-260;  n = 8192: 240-290 (GPU-bound).
+Ceiling vs OpenBLAS sgetrf: unknown OpenBLAS rate on kp [measure first]; expected 0.9-1.5x like potrf; vs dgesv (FP64)
+with refinement as above ~2.5-3x at n = 8192.
+
+## Falsification criteria (set now; measurement only after the approval and the shared-GPU lock)
+F1. Rank-nb update (SGEMM/SSYRK, K = 256 / 512, M = N = 2048-8192, beta = 1) below 220 GFLOPS -> the potrf/getrf rate
+    predictions above are wrong (then: measure where the time goes, epilogue vs kernel, before writing any LAPACK code).
+F2. Hybrid spotrf below 0.8x of the predicted range at n = 4096 / 8192, or per-step overhead above 0.5 ms -> step model wrong.
+F3. Mixed-precision posv below 1.5x of OpenBLAS dposv at n = 8192 (same power state, alternating runs), or its backward
+    error more than 10x dposv's on SPD matrices with cond <= 1e5 -> the FP32+refinement route is not worth it.
+F4. Hybrid sgetrf with lookahead below 0.8x of OpenBLAS sgetrf at n = 4096 -> the CPU panel dominates; then panel on GPU
+    or a deeper lookahead must be modelled first.
+Order: (1) microbenchmark the rank-nb update shapes (F1, ~10 min GPU); (2) OpenBLAS spotrf/sgetrf/dposv baselines on kp
+at both power states (CPU-heavy: needs the shared-GPU lock); (3) potrf v1 in lib/ (C, OpenBLAS for potf2) with a test against
+LAPACK; (4) posv with refinement; (5) getrf with lookahead.
