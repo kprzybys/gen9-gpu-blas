@@ -286,6 +286,11 @@ objects, no change). Source: `results/overhead-2026-11-12.txt`.
 
 ## 6. Measurement conditions
 
+**Files copied to a remote test machine can arrive empty.** Piping a script through two ssh hops on stdin once
+delivered a 0-byte file; the measurement script silently did nothing for 13 minutes. After every copy, check the size
+or a hash on the remote side before running (or transfer base64 and verify), and make run scripts fail on an empty
+input (2026-11-13, attention stage 3).
+
 **Run-to-run noise is about 10%.** The desktop compositor, the screen locker and screen casting also use the GPU
 (a locked screen took 47% of the render engine during a long run). A single measurement once suggested the
 opposite of the truth (zero-copy slower; alternating series: 2-15% faster). Compare variants alternating, several

@@ -3,7 +3,9 @@
 Status: model (sections 1-7), stage 2 result (section 8: criterion not met in OpenCL C), stage 2b result
 (section 9: criterion met by a hand-scheduled assembly kernel, 296 GFLOPS = 2.8x the CPU) and the pre-integration
 check (section 10: the same kernel through kcl on userptr memory in llama.cpp's layout, 301 GFLOPS incl. pre-pass
-and submission, work-group size 64). Evidence tags as in [performance-model.md](performance-model.md)
+and submission, work-group size 64) and stage 3 (section 11: integrated into the ggml backend, opt-in GEN9_ATTN=1,
+causal masking by index; pp512 at depth 3584 -36 % (Qwen2.5-1.5B) / -43 % (Llama-3.2-1B) time, perplexity within
+noise). Evidence tags as in [performance-model.md](performance-model.md)
 ([SPEC], [MEAS], [SW], [EST], [HYP]). Stage 2 (a standalone kernel in `bench/`) starts only from this prediction,
 and its result is judged against the stop criterion in section 6.
 
@@ -300,3 +302,90 @@ What limits now (Qwen, kcl, 64): ~305 GFLOPS = 79 % of the 384 GFLOPS FP32 peak 
 stall 5 %, idle 8 %, both FPU pipes 83 % of active time (the non-`mad` instructions of the loop, ~17 % of issue
 slots, section 9). The remaining levers are inside the loop (fewer non-`mad` instructions) or in the work itself
 (the causal mask skips about half the in-ubatch key blocks), not in the launch.
+
+## 11. Stage 3: integration into the ggml backend
+
+Measured on HD 530 (desktop "tc", ~1.0 GHz) on 2026-11-13, llama.cpp 2cbe0ec, lib at 651fb9b plus the stage-3 files;
+raw outputs, predictions with timestamps and tables in `results/attn-integration-hd530-2026-11-13.txt` [MEAS].
+
+**Design.**
+- Kernel: template option `-DCAUSAL=1` (`asm/attn.cl`), binaries `attn_qwen_tokc` / `attn_llama_tokc` (`make -C asm
+  attn`, hashes in `asm/attn_sha256.txt`; the eight older binaries rebuild bit-identically). Index-based masking: a
+  subgroup's RQ rows belong to one token t (G % RQ == 0), which sees nv = min(nk, vis0 + dvis*t) keys (dvis 1: causal,
+  0: the same prefix for every token). The loop runs over ceil(nv/16) key blocks only, so fully masked blocks cost
+  nothing (`nv` made uniform with `sub_group_broadcast`: otherwise IGC puts the loop under SIMD if/endif and the
+  generator stops). `asm/attn_gen.py` adds, before the softmax of each block, `rem = lim - cnt`, a compare and a jump:
+  3 scalar instructions per full block; only the one partial block per row sets the score lanes of keys >= nv to
+  -1e30 (exp -> 0). Cost not measurable: Qwen unmasked 304.6 vs 305.1 GFLOPS, Llama 311.7 vs 313.1; causal at depth
+  3584 306 / 316 GFLOPS on visible keys. FP64 check over the whole output (STEP=1, partial blocks in every row,
+  n_q 33/75/200): max error 3.8e-6.
+- Library: `lib/gen9blas_attn.c` (`gen9blas_attn_f16kv`, declarations appended to `lib/gen9blas.h`; kernels embedded
+  in `lib/kernels.c` by `lib/gen_kernels.py` when the `*_tokc` binaries exist). One kcl operation per node: userptr
+  regions K and V from the view's first row to the end of the whole KV tensor (pinned once; the view grows every 256
+  tokens), Q and O; `k_kt` transposes only the nk = ceil16(max visible) rows into an own Kt buffer padded by
+  NK*D*16 B; `k_attn` with work-group 64 (smaller if 64 does not divide the grid), split into launches of at most
+  `GEN9BLAS_MAX_LAUNCH_MS` (default 100) at 200 GFLOPS = 2e10 FLOP by token slices (1.5B/1B models at 4k context: one
+  launch); one submission, `kcl_wait` (a GPU reset is reported, the node is then recomputed on the CPU).
+  `KCL_USERPTR_MB` (1 GB) is not raised: the 1.5B/1B caches are 117-268 MB; if a region cannot be mapped the library
+  returns "not handled" and the backend computes the node with ggml-cpu. Qwen2.5-7B at 32k (1.8 GB of K/V) would be
+  re-pinned through kcl's LRU per layer (~15 ms per layer [EST]); it has no binary yet anyway (G = 7).
+- Backend (`ggml-backend/ggml-gen9.cpp`, opt-in `GEN9_ATTN=1`): supports_op accepts F16 K/V, F32 Q/O, no ALiBi /
+  soft-capping / sinks, (D, G, H_kv) with a binary ((128, 6, 2) Qwen2.5-1.5B, (64, 4, 8) Llama-3.2-1B), llama.cpp's
+  layouts (Q the permuted view of Qcur, K/V rows of H_kv*D, dst contiguous), n_q >= 32, n_kv a multiple of 16, mask
+  F16 [n_kv, >= n_q, 1, 1] or none, kv_rows [n, 1] if present. The mask contents exist only at compute time: each
+  row must be +0 for the first n_t columns and -inf after, with n_t = n_0 + dvis*t (word-wise check, 0.3 ms per node,
+  ~2 % of the attention time); with kv_rows the listed rows must be the identity over the visible columns. Anything
+  else (several sequences, holes after a context shift, SWA) is computed by ggml-cpu inside the backend (single-node
+  graph on a CPU backend), counted. GEN9_INFO prints asked / declined by reason / run on the GPU / computed on the CPU.
+- Note for users: with `-fa auto` llama.cpp's probe graph has n_q = 1, which GEN9 declines, so flash attention stays
+  enabled; the measurements use `-fa on`.
+
+**Accepted / declined.** On the GPU: Qwen2.5-1.5B and Llama-3.2-1B prompt batches (n_q >= 32) with the standard
+single-sequence causal mask, with or without kv_rows. Declined to ggml-cpu: token generation (n_q 1), quantized or F32
+K/V, ALiBi, soft-capping (Gemma 2), sinks, shapes without a binary (Qwen2.5-7B G 7, Gemma D 256, ...), other
+layouts. test-backend-ops (`-o FLASH_ATTN_EXT -b GEN9`, GEN9_ATTN=1): 0 failures, all 5721 cases declined (its masks
+are random values and its K/V are not in the KV-cache layout), so the GPU path is tested by `ggml-backend/test_attn`
+(FLASH_ATTN_EXT node on GEN9 vs ggml-cpu in llama.cpp's layouts, test-backend-ops' NMSE metric): NMSE 4e-14..4e-12
+(bound 5e-4) for causal, depth 0..3584, n_q 75, large logits, no mask, kv_rows; a mask with a hole goes to ggml-cpu
+(NMSE 0).
+
+**Perplexity** (-c 2048, 8 chunks, -fa on): Qwen 9.4610 (ATTN=0) vs 9.4603 (ATTN=1), -0.007 %; Llama 21.0995 vs
+21.0978, -0.008 %; within noise (statistical error +-0.28 / +-0.73). Every n_q 512 attention node ran on the GPU
+(896 / 512), none fell back.
+
+**End to end** (llama-bench -fa on -r 5, ATTN=0 vs 1 alternating, median t/s):
+
+| Test | Qwen2.5-1.5B ATTN=0 | ATTN=1 | time | Llama-3.2-1B ATTN=0 | ATTN=1 | time |
+|---|---|---|---|---|---|---|
+| pp512 | 163.9 | 182.1 | -10.0 % | 215.7 | 254.9 | -15.4 % |
+| pp512 @ d1024 | 130.7 | 163.0 | -19.8 % | 161.1 | 227.5 | -29.2 % |
+| pp512 @ d2048 | 110.9 | 149.2 | -25.6 % | 130.3 | 206.4 | -36.9 % |
+| pp512 @ d3584 | 83.8 | 131.0 | **-36.0 %** | 104.7 | 182.5 | **-42.7 %** |
+| pp2048 | 121.7 | 165.0 | -26.3 % | 171.5 | 234.4 | -26.8 % |
+| pp4096 + tg128 | 87.8 | 114.9 | -23.6 % | 102.7 | 135.0 | -24.0 % |
+
+Prediction for d3584 was -25 to -33 % (section 9: 6.09 -> ~4.0 s); measured 6.11 -> 3.91 s (Qwen): the saved 2.20 s
+plus the GPU attention time (3.38e11 FLOP at 297 GFLOPS = 1.14 s) give a CPU attention cost of ~3.3 s, i.e. the
+stage-1 rate (~100-106 GFLOPS) was right, and the result sits just past the optimistic end of the range. At d0 the
+gain is twice the prediction (0.31 vs 0.135 s per ubatch) [HYP: per-node overhead of the CPU op, not separated]. The
+attention runs at 290-304 GFLOPS including pinning, submission, wait and the mask check (GEN9_INFO).
+
+**OA** (one d3584 run, whole process): EU counters while busy unchanged by attention (EU active 92-93 %, both FPU
+pipes 90 % of active time, IPC 1.90): the attention kernel runs as near the FPU limit as the GEMMs. The GPU's share
+of the recording rose 50 -> 58 % (diluted by model load and depth fill; predicted 70-75 % was wrong).
+
+**Open.** Default stays off until measured on the laptop (UHD 620, shared power: section 5 expects a larger gain
+there) and decided by the user; binaries for more shapes (Qwen2.5-7B G 7, Gemma-2 D 256 with soft-capping); token
+generation (n_q 1) stays on the CPU; test-backend-ops cannot reach the GPU path (a case in the KV-cache layout with a
+prefix mask would be needed upstream); the CPU idles while the GPU computes attention (overlap with the next layer's
+CPU work is not possible inside one ggml split).
+
+### 11.1 Register-allocation bounds (CP-SAT solver, separate work)
+
+Exact solver results on the generator's instances (`docs/solvers.md`, `results/solver-regalloc-2026-11-13.txt`,
+`experiments/solver/`, commit e708621) [MEAS]: the first-fit allocator of `asm/attn_gen.py` is optimal for every
+current shape (0 differences in 320 cases); Llama NS >= 4 is infeasible (45 free GRF, the leanest configuration needs
+8*NS + 21, so NS <= 3), Qwen NS 4 fits only with PE_IN_S or COMPACT (the shipped C4 uses COMPACT), NS 8 is impossible.
+More prefetch depth would need a different design (e.g. Q in FP16, smaller RQ). A single-thread schedule model does not
+reproduce NS 2 vs NS 4 (287.7 vs 295.5 GFLOPS) [HYP]: latency is hidden mainly by the other EU threads, consistent with
+the 2-3 % stall in OA. Since 9faa6c4 the generator rejects any sched/remap loop with a bank conflict or any scratch.
