@@ -19,6 +19,9 @@
 //   STEP      reference sampling as in bench/attn (default 7; 1 = whole output; 0 = no check); CHECK_LAYERS
 //             comma-separated layers to check (default first and last)
 //   QSIGMA    score scale as in bench/attn (default 5)
+//   RAMP      softmax rescale test (docs/attention-gpu.md section 12): K dim 0 of key j = RAMP * j (RAMP > 0, the row
+//             maximum grows in every key block, the rescale runs every block) or |RAMP| * (n_k - 1 - j) (RAMP < 0, the
+//             maximum is in the first block, the rescale never runs after it), Q dim 0 = 1; use with QSIGMA=0.1
 //   VIS0      causal binaries (*_tokc, docs/attention-gpu.md section 11): token t sees min(n_k, VIS0 + DVIS*t) keys
 //             (DVIS default 1); default binary attn_*_tokc.bin; FLOP and the FP64 reference count visible keys only
 // Output: pass 0 (first use: userptr pinning of every layer's pages) separately from the steady state; kernel time
@@ -101,6 +104,7 @@ int main(int argc, char **argv) {
     int reg_view = getenv("REG") && !strcmp(getenv("REG"), "view");
     int step = getenv("STEP") ? atoi(getenv("STEP")) : 7;
     double qsigma = getenv("QSIGMA") ? atof(getenv("QSIGMA")) : 5.0;
+    double ramp = getenv("RAMP") ? atof(getenv("RAMP")) : 0.0;
     if (nk <= 0 || nq <= 0 || (nq * G) % RQ || nk % (8 * NK) || kv_size < nk || L < 1 || passes < 1) {
         fprintf(stderr, "need n_q > 0, n_k > 0, n_q*G divisible by RQ (%d), n_k divisible by 8*NK (%d), KV_SIZE >= n_k\n", RQ, 8 * NK);
         return 2;
@@ -124,10 +128,16 @@ int main(int argc, char **argv) {
         for (int w = 0; w < 2; w++) {
             uint16_t *t = (uint16_t *)(kv + (2 * (size_t)l + w) * S);
             for (size_t i = 0; i < (size_t)nk * HKV * D; i++) t[i] = f2h((float)nrand());
+            if (ramp != 0 && w == 0)
+                for (size_t i = 0; i < (size_t)nk * HKV * D; i += D) {
+                    size_t j = i / ((size_t)HKV * D);
+                    t[i] = f2h((float)(ramp > 0 ? ramp * j : -ramp * (nk - 1 - j)));
+                }
         }
     const size_t qn = (size_t)nq * H * D;
     float *QO = ggml_like_alloc(2 * qn * 4), *Q = QO, *O = QO + qn;   // Q and O adjacent (one compute buffer)
     for (size_t i = 0; i < qn; i++) Q[i] = (float)(qsigma * nrand());
+    if (ramp != 0) for (size_t i = 0; i < qn; i += D) Q[i] = 1.0f;
     memset(O, 0, qn * 4);
 
     setenv("GEN9BLAS_PROFILE", "1", 0);   // kcl: timestamp buffer for event profiling

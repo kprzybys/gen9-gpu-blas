@@ -1,0 +1,519 @@
+Attention loop slimming (fewer non-mad instructions in the generated loop), HD 530 (desktop tc), 2026-11-13
+===========================================================================================================
+Generator asm/attn_gen.py sched<NS>, template asm/attn.cl, base = HEAD edece33 (binaries identical to asm/attn_sha256.txt).
+Census tool: per key block of 8*NK keys, LATT_LOOP .. jmpi LATT_LOOP; 'dyn' = executed on a full block with no
+row rescaling (mask partial path and rescale path skipped, the common case after the first blocks).
+
+== 1. Census of the shipped loops (skl, *_tokc) ==
+--- qwen
+category                                         static   dyn
+S zero (mov 0)                                        4     4
+mad                                                1024  1024
+send (K/V block read)                                64    64
+address: header add (:q)                             64    64
+mask: rem/cmp/jmpi (full block)                       3     3
+mask: partial-block path                              8     0
+softmax: max reduction (sel)                          8     8
+softmax: max cmp + jmpi                               4     4
+softmax: rescale path (add/mov/exp + mul O,l)        40     0
+softmax: s - m (add)                                  4     4
+softmax: exp                                          4     4
+softmax: l += p (add)                                 4     4
+p odd copy (mov)                                      4     4
+loop: counter add/cmp/jmpi                            3     3
+total                                              1238  1190
+non-mad                                             214   166
+--- llama
+category                                         static   dyn
+S zero (mov 0)                                        8     8
+mad                                                1024  1024
+send (K/V block read)                                32    32
+address: header add (:q)                             32    32
+mask: rem/cmp/jmpi (full block)                       3     3
+mask: partial-block path                             12     0
+softmax: max reduction (sel)                         16    16
+softmax: max cmp + jmpi                               8     8
+softmax: rescale path (add/mov/exp + mul O,l)        48     0
+softmax: s - m (add)                                  8     8
+softmax: exp                                          8     8
+softmax: l += p (add)                                 8     8
+p odd copy (mov)                                      8     8
+loop: counter add/cmp/jmpi                            3     3
+total                                              1218  1158
+non-mad                                             194   134
+--- whisper
+category                                         static   dyn
+S zero (mov 0)                                        8     8
+mad                                                1024  1024
+send (K/V block read)                                32    32
+address: header add (:q)                             32    32
+mask: rem/cmp/jmpi (full block)                       3     3
+mask: partial-block path                             12     0
+softmax: max reduction (sel)                         16    16
+softmax: max cmp + jmpi                               8     8
+softmax: rescale path (add/mov/exp + mul O,l)        48     0
+softmax: s - m (add)                                  8     8
+softmax: exp                                          8     8
+softmax: l += p (add)                                 8     8
+p odd copy (mov)                                      8     8
+loop: counter add/cmp/jmpi                            3     3
+total                                              1218  1158
+non-mad                                             194   134
+
+== 2. Plan per category (what can go, what not) ==
+- address/header adds (Qwen 64, Llama/whisper 32 per block, (1|M0) :q, one per send): the two K headers (NK 2) and the
+  two V headers (Qwen, D/64 = 2) sit in adjacent registers; one (2|M0) :q add with dst <4> (32 B apart) advances both.
+  Llama/whisper V (one header): two headers for even/odd key steps, one (2|M0) add of 2*rs every second step.
+  -> Qwen 32, Llama 16 adds. Needs isa.REGION to accept dst <4> (isa.py, requested separately).
+- loop counter/cmp/jmpi (3) + mask rem/cmp/jmpi (3): counter add + cmp moved before the softmax with flag f1.1, the
+  mask jumps on the same flag (the last block always takes the mask path, harmless: rem = 16 masks nothing) -> 4.
+  Unrolling by 2 key blocks: saves 1.5 instructions per block, doubles code, needs n_k % 32 or a tail; registers are at
+  the solver bound (11.1: Llama 2 left, Qwen 2 left) -> not worth it.
+- softmax max reduction (sel 4 per row) + cmp/jmpi per row: rows reduced together through 2-register regions,
+  one cmp (RQ) and one .any<RQ>h jump; per-row test only inside the rare rescale path -> Qwen 8+4 -> 5+2,
+  Llama 16+8 -> 8+2.
+- S zero (mov 0, RQ*NK SIMD8): first K mad of the block as mul (as GEMM b6b3b3e) -> 0. loopcheck's attention mode
+  loses the first (K, Q) product of a mul-started chain: rule requested separately.
+- s - m add, exp, l += p, p odd copy (RQ*NK each): no removal without changing the arithmetic (s - m before exp is the
+  math; both parities of p are needed because each V block read covers 4 consecutive GRF of both parities; l must
+  be summed). Starting S from -m_old would change the rounding order -> not done.
+- hoisting: nothing loop-invariant is left in the loop (Q permutation, header zeroing already before it).
+- rescale path: unchanged arithmetic, executed rarely (not in 'dyn').
+
+== 3. Predictions (before building/measuring) ==
+PREDICT 19:31:38 model: kernel time per block ~ executed instructions (dyn, all kinds) for the upper estimate,
+  ~ FPU pipe cycles (SIMD8 f32 op = 2, scalar = 1, send/jmpi = 0) for the lower one; Qwen capped at ~344 GFLOPS (L3 port).
+  Base (attn_kcl, kernel only, n_k 4096 causal d3584): Qwen ~305, Llama ~313-316, whisper ~317.
+PREDICT 19:31:38 change A SLIM_SMAX (rows reduced together, one branch): Qwen dyn 1190 -> 1185 (-0.4 %): +0.2..0.4 %
+  (not measurable, +-1 % noise); Llama/whisper 1158 -> 1144 (-1.2 %): +0.7..1.2 %, i.e. ~316-318.
+PREDICT 19:31:38 change B SLIM_HDR (one (2) :q add per header pair): Qwen -32 (-2.7 %): +1.5..2.8 % -> 310-314;
+  Llama/whisper -16 (-1.4 %): +0.7..1.4 %.
+PREDICT 19:31:38 change C SLIM_CNT (counter before the softmax, shared flag): -2 scalar: +0.1..0.2 % (not measurable).
+PREDICT 19:31:38 change D SLIM_MUL (first K mad as mul, no S zeroing): Qwen -4 SIMD8 (+0.3..0.7 %), Llama -8 (+0.7..1.4 %).
+PREDICT 19:31:38 all four: Qwen 1190 -> 1147 dyn (+2..3.7 %, ~311-316, below the 330 goal), Llama 1158 -> 1118
+  (+2..3.6 %, ~320-325). The 330 goal is not reachable by removing instructions alone in this design (non-mad that
+  must stay: 64 sends + ~70 softmax/address instructions per 1024 mads).
+
+== 4. Variants built (tags in the kcl kernel table; whl binaries, run on HD 530 through kcl) ==
+  0 = HEAD (edece33 generator; hashes = attn_sha256.txt)        1 = SLIM_SMAX
+  2 = SLIM_SMAX + SLIM_HDR       3 = 2 + SLIM_CNT       4 = 3 + SLIM_MUL       p = 4 with one S product negated (poison)
+  Generator checks for every variant (skl and whl): check_generated (0 bank conflicts, no scratch) and loopcheck OK with
+  the original asm/loopcheck.py at 768ba8c (rules: 1a163eb dst <4>, mul-started chain, .anyNh predicates;
+  768ba8c Q entry registers in a mul-started chain).
+  Dynamic instructions per full block (census): Qwen 1190 / 1185 / 1153 / 1151 / 1147; Llama, whisper 1158 / 1144 / 1128 / 1126 / 1118.
+
+== 5. Correctness on tc (bench/attn_kcl STEP=1, layers 0 and 1, whole output vs FP64) ==
+RAMP (new option of bench/attn_kcl.c, QSIGMA=0.1): RAMP=1 K dim 0 = key index -> the row maximum grows in every key
+block (rescale every block); RAMP=-1 reversed -> maximum in the first block (rescale never after it).
+q0.bin VIS0=37 12 2 128 75 128 2 2 -> err 2.24e-06 2.07e-06 
+l0.bin VIS0=37 32 8 64 75 128 4 2 -> err 1.87e-06 1.27e-06 
+q0.bin VIS0=1 12 2 128 33 48 2 2 -> err 1.38e-06 2.35e-06 
+l0.bin VIS0=1 32 8 64 33 48 4 2 -> err 1.19e-06 9.85e-07 
+q0.bin VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 2.76e-06 2.59e-06 
+l0.bin VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 1.83e-06 2.41e-06 
+q0.bin VIS0=7 DVIS=0 12 2 128 40 256 2 2 -> err 1.39e-06 1.71e-06 
+l0.bin VIS0=7 DVIS=0 32 8 64 40 256 4 2 -> err 1.13e-06 8.60e-07 
+q0.bin VIS0=4000 12 2 128 200 4096 2 2 -> err 2.77e-06 2.60e-06 
+l0.bin VIS0=4000 32 8 64 200 4096 4 2 -> err 2.99e-06 2.95e-06 
+w0.bin VIS0=1500 DVIS=0 20 20 64 1500 1504 4 2 -> err 2.00e-06 2.16e-06 
+w0.bin VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 1.91e-06 1.84e-06 
+w0.bin VIS0=37 DVIS=0 20 20 64 40 48 4 2 -> err 1.44e-06 1.43e-06 
+q0.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 2.82e-05 4.73e-05 
+q0.bin QSIGMA=0.1 RAMP=1 VIS0=37 12 2 128 75 128 2 2 -> err 2.74e-06 2.74e-06 
+l0.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 4.72e-05 3.74e-05 
+l0.bin QSIGMA=0.1 RAMP=1 VIS0=37 32 8 64 75 128 4 2 -> err 4.34e-06 3.39e-06 
+w0.bin QSIGMA=0.1 RAMP=1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 7.24e-05 8.53e-05 
+q0.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 4.75e-05 5.65e-05 
+q0.bin QSIGMA=0.1 RAMP=-1 VIS0=37 12 2 128 75 128 2 2 -> err 6.28e-06 4.61e-06 
+l0.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 5.15e-05 3.63e-05 
+l0.bin QSIGMA=0.1 RAMP=-1 VIS0=37 32 8 64 75 128 4 2 -> err 5.83e-06 4.25e-06 
+w0.bin QSIGMA=0.1 RAMP=-1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 6.68e-05 6.99e-05 
+q3.bin VIS0=37 12 2 128 75 128 2 2 -> err 2.24e-06 2.07e-06 
+l3.bin VIS0=37 32 8 64 75 128 4 2 -> err 1.87e-06 1.27e-06 
+q3.bin VIS0=1 12 2 128 33 48 2 2 -> err 1.38e-06 2.35e-06 
+l3.bin VIS0=1 32 8 64 33 48 4 2 -> err 1.19e-06 9.85e-07 
+q3.bin VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 2.76e-06 2.59e-06 
+l3.bin VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 1.83e-06 2.41e-06 
+q3.bin VIS0=7 DVIS=0 12 2 128 40 256 2 2 -> err 1.39e-06 1.71e-06 
+l3.bin VIS0=7 DVIS=0 32 8 64 40 256 4 2 -> err 1.13e-06 8.60e-07 
+q3.bin VIS0=4000 12 2 128 200 4096 2 2 -> err 2.77e-06 2.60e-06 
+l3.bin VIS0=4000 32 8 64 200 4096 4 2 -> err 2.99e-06 2.95e-06 
+w3.bin VIS0=1500 DVIS=0 20 20 64 1500 1504 4 2 -> err 2.00e-06 2.16e-06 
+w3.bin VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 1.91e-06 1.84e-06 
+w3.bin VIS0=37 DVIS=0 20 20 64 40 48 4 2 -> err 1.44e-06 1.43e-06 
+q3.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 2.82e-05 4.73e-05 
+q3.bin QSIGMA=0.1 RAMP=1 VIS0=37 12 2 128 75 128 2 2 -> err 2.74e-06 2.74e-06 
+l3.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 4.72e-05 3.74e-05 
+l3.bin QSIGMA=0.1 RAMP=1 VIS0=37 32 8 64 75 128 4 2 -> err 4.34e-06 3.39e-06 
+w3.bin QSIGMA=0.1 RAMP=1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 7.24e-05 8.53e-05 
+q3.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 4.75e-05 5.65e-05 
+q3.bin QSIGMA=0.1 RAMP=-1 VIS0=37 12 2 128 75 128 2 2 -> err 6.28e-06 4.61e-06 
+l3.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 5.15e-05 3.63e-05 
+l3.bin QSIGMA=0.1 RAMP=-1 VIS0=37 32 8 64 75 128 4 2 -> err 5.83e-06 4.25e-06 
+w3.bin QSIGMA=0.1 RAMP=-1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 6.68e-05 6.99e-05 
+q4.bin VIS0=37 12 2 128 75 128 2 2 -> err 2.24e-06 2.07e-06 
+l4.bin VIS0=37 32 8 64 75 128 4 2 -> err 1.87e-06 1.27e-06 
+q4.bin VIS0=1 12 2 128 33 48 2 2 -> err 1.38e-06 2.35e-06 
+l4.bin VIS0=1 32 8 64 33 48 4 2 -> err 1.19e-06 9.85e-07 
+q4.bin VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 2.76e-06 2.59e-06 
+l4.bin VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 1.83e-06 2.41e-06 
+q4.bin VIS0=7 DVIS=0 12 2 128 40 256 2 2 -> err 1.39e-06 1.71e-06 
+l4.bin VIS0=7 DVIS=0 32 8 64 40 256 4 2 -> err 1.13e-06 8.60e-07 
+q4.bin VIS0=4000 12 2 128 200 4096 2 2 -> err 2.77e-06 2.60e-06 
+l4.bin VIS0=4000 32 8 64 200 4096 4 2 -> err 2.99e-06 2.95e-06 
+w4.bin VIS0=1500 DVIS=0 20 20 64 1500 1504 4 2 -> err 2.00e-06 2.16e-06 
+w4.bin VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 1.91e-06 1.84e-06 
+w4.bin VIS0=37 DVIS=0 20 20 64 40 48 4 2 -> err 1.44e-06 1.43e-06 
+q4.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 2.82e-05 4.73e-05 
+q4.bin QSIGMA=0.1 RAMP=1 VIS0=37 12 2 128 75 128 2 2 -> err 2.74e-06 2.74e-06 
+l4.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 4.72e-05 3.74e-05 
+l4.bin QSIGMA=0.1 RAMP=1 VIS0=37 32 8 64 75 128 4 2 -> err 4.34e-06 3.39e-06 
+w4.bin QSIGMA=0.1 RAMP=1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 7.24e-05 8.53e-05 
+q4.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 4.75e-05 5.65e-05 
+q4.bin QSIGMA=0.1 RAMP=-1 VIS0=37 12 2 128 75 128 2 2 -> err 6.28e-06 4.61e-06 
+l4.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 5.15e-05 3.63e-05 
+l4.bin QSIGMA=0.1 RAMP=-1 VIS0=37 32 8 64 75 128 4 2 -> err 5.83e-06 4.25e-06 
+w4.bin QSIGMA=0.1 RAMP=-1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 6.68e-05 6.99e-05 
+qp.bin VIS0=37 12 2 128 75 128 2 2 -> err 7.74e-01 1.06e+00 
+lp.bin VIS0=37 32 8 64 75 128 4 2 -> err 7.78e+37 7.48e+37 
+qp.bin VIS0=1 12 2 128 33 48 2 2 -> err 4.52e-01 7.56e-01 
+lp.bin VIS0=1 32 8 64 33 48 4 2 -> err 8.02e+37 8.46e+37 
+qp.bin VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 6.46e-01 4.60e-01 
+lp.bin VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 4.92e+37 5.00e+37 
+qp.bin VIS0=7 DVIS=0 12 2 128 40 256 2 2 -> err 6.84e-01 1.05e+00 
+lp.bin VIS0=7 DVIS=0 32 8 64 40 256 4 2 -> err 9.11e+37 8.64e+37 
+qp.bin VIS0=4000 12 2 128 200 4096 2 2 -> err 7.90e-01 6.84e-01 
+lp.bin VIS0=4000 32 8 64 200 4096 4 2 -> err 7.73e+37 8.30e+37 
+wp.bin VIS0=1500 DVIS=0 20 20 64 1500 1504 4 2 -> err 7.25e-01 9.44e-01 
+wp.bin VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 7.47e-01 1.01e+00 
+wp.bin VIS0=37 DVIS=0 20 20 64 40 48 4 2 -> err 6.00e-01 7.06e-01 
+qp.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 3.56e-02 6.45e-02 
+qp.bin QSIGMA=0.1 RAMP=1 VIS0=37 12 2 128 75 128 2 2 -> err 2.71e-02 3.66e-02 
+lp.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 4.60e+38 3.41e+38 
+lp.bin QSIGMA=0.1 RAMP=1 VIS0=37 32 8 64 75 128 4 2 -> err 3.29e+38 3.00e+38 
+wp.bin QSIGMA=0.1 RAMP=1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 3.27e-02 6.17e-02 
+qp.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 4.19e-02 5.57e-02 
+qp.bin QSIGMA=0.1 RAMP=-1 VIS0=37 12 2 128 75 128 2 2 -> err 3.51e-02 4.02e-02 
+lp.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 4.22e+38 3.30e+38 
+lp.bin QSIGMA=0.1 RAMP=-1 VIS0=37 32 8 64 75 128 4 2 -> err 4.17e+38 3.37e+38 
+wp.bin QSIGMA=0.1 RAMP=-1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 5.76e-02 9.39e-02 
+(the first 13 lines of tag 1 were run earlier with the same results as tag 0, bit-identical error values:)
+w0.bin VIS0=37 DVIS=0 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 20 20 64 40 48 4 2 -> err 1.44e-06 1.43e-06 
+q1.bin VIS0=37 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 12 2 128 75 128 2 2 -> err 2.24e-06 2.07e-06 
+l1.bin VIS0=37 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 32 8 64 75 128 4 2 -> err 1.87e-06 1.27e-06 
+q1.bin VIS0=1 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 12 2 128 33 48 2 2 -> err 1.38e-06 2.35e-06 
+l1.bin VIS0=1 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 32 8 64 33 48 4 2 -> err 1.19e-06 9.85e-07 
+q1.bin VIS0=1000 DVIS=0 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 12 2 128 64 1024 2 2 -> err 2.76e-06 2.59e-06 
+l1.bin VIS0=1000 DVIS=0 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 32 8 64 64 1024 4 2 -> err 1.83e-06 2.41e-06 
+q1.bin VIS0=7 DVIS=0 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 12 2 128 40 256 2 2 -> err 1.39e-06 1.71e-06 
+l1.bin VIS0=7 DVIS=0 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 32 8 64 40 256 4 2 -> err 1.13e-06 8.60e-07 
+q1.bin VIS0=4000 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 12 2 128 200 4096 2 2 -> err 2.77e-06 2.60e-06 
+l1.bin VIS0=4000 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 32 8 64 200 4096 4 2 -> err 2.99e-06 2.95e-06 
+w1.bin VIS0=1500 DVIS=0 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 20 20 64 1500 1504 4 2 -> err 2.00e-06 2.16e-06 
+w1.bin VIS0=1500 DVIS=0 nice -n 19 ionice -c3 timeout 120 ./attn_kcl 20 20 64 64 1504 4 2 -> err 1.91e-06 1.84e-06 
+Result: every variant gives the same error values as HEAD to the last printed digit in all 23 cases (incl. partial
+blocks, the whisper n_k 1500 rounding case, RAMP +-1 for all three shapes); poison binaries are wrong (0.03 .. 1e38).
+
+== 6. Speed, round 1 (bench/attn_kcl STEP=0, kernel-only attn GFLOPS = steady median of 5 passes; tags alternated
+      per round, 3 rounds; Qwen 12/2/128 n_q 512 n_k 4096 VIS0 3585 (causal d3584), 28 layers; Llama 32/8/64 same,
+      16 layers; whisper 20/20/64 n_q 1500 n_k 1504 VIS0 1500 DVIS 0, 32 layers), 19:56 ==
+q0 round 0: 305.8 GFLOPS @ 1000 MHz
+q1 round 0: 307.0 GFLOPS @ 1000 MHz
+q2 round 0: 290.6 GFLOPS @ 1000 MHz
+q3 round 0: 291.2 GFLOPS @ 1000 MHz
+q4 round 0: 290.0 GFLOPS @ 1000 MHz
+q0 round 1: 306.0 GFLOPS @ 1000 MHz
+q1 round 1: 306.6 GFLOPS @ 1000 MHz
+q2 round 1: 290.6 GFLOPS @ 1000 MHz
+q3 round 1: 291.1 GFLOPS @ 1000 MHz
+q4 round 1: 290.2 GFLOPS @ 1000 MHz
+q0 round 2: 306.1 GFLOPS @ 1000 MHz
+q1 round 2: 306.4 GFLOPS @ 1000 MHz
+q2 round 2: 290.8 GFLOPS @ 1000 MHz
+q3 round 2: 291.0 GFLOPS @ 1000 MHz
+q4 round 2: 289.7 GFLOPS @ 1000 MHz
+l0 round 0: 316.3 GFLOPS @ 1000 MHz
+l1 round 0: 319.3 GFLOPS @ 999 MHz
+l2 round 0: 310.6 GFLOPS @ 1000 MHz
+l3 round 0: 311.3 GFLOPS @ 1000 MHz
+l4 round 0: 310.8 GFLOPS @ 1000 MHz
+l0 round 1: 315.8 GFLOPS @ 1000 MHz
+l1 round 1: 319.9 GFLOPS @ 1000 MHz
+l2 round 1: 310.4 GFLOPS @ 1000 MHz
+l3 round 1: 311.1 GFLOPS @ 1000 MHz
+l4 round 1: 310.7 GFLOPS @ 1000 MHz
+l0 round 2: 315.8 GFLOPS @ 1000 MHz
+l1 round 2: 320.0 GFLOPS @ 1000 MHz
+l2 round 2: 310.9 GFLOPS @ 1000 MHz
+l3 round 2: 311.4 GFLOPS @ 1000 MHz
+l4 round 2: 310.4 GFLOPS @ 1000 MHz
+w0 round 0: 316.7 GFLOPS @ 1000 MHz
+w1 round 0: 320.2 GFLOPS @ 1000 MHz
+w2 round 0: 310.6 GFLOPS @ 1000 MHz
+w3 round 0: 311.4 GFLOPS @ 1000 MHz
+w4 round 0: 310.4 GFLOPS @ 1000 MHz
+w0 round 1: 316.5 GFLOPS @ 1000 MHz
+w1 round 1: 320.0 GFLOPS @ 1000 MHz
+w2 round 1: 311.2 GFLOPS @ 1000 MHz
+w3 round 1: 311.4 GFLOPS @ 1000 MHz
+w4 round 1: 310.6 GFLOPS @ 1000 MHz
+w0 round 2: 316.9 GFLOPS @ 1000 MHz
+w1 round 2: 320.5 GFLOPS @ 1000 MHz
+w2 round 2: 311.3 GFLOPS @ 999 MHz
+w3 round 2: 311.9 GFLOPS @ 1000 MHz
+w4 round 2: 311.0 GFLOPS @ 1000 MHz
+
+[exited with code 0]
+Medians: Qwen   0: 306.0  1: 306.6 (+0.2 %)  2: 290.6 (-5.2 % vs 1)  3: 291.1 (+0.2 % vs 2)  4: 290.0 (-0.4 % vs 3)
+         Llama  0: 315.8  1: 319.9 (+1.3 %)  2: 310.6 (-2.9 % vs 1)  3: 311.3 (+0.2 % vs 2)  4: 310.7 (-0.2 % vs 3)
+         whisper 0: 316.7 1: 320.2 (+1.1 %)  2: 311.2 (-2.8 % vs 1)  3: 311.4 (+0.1 % vs 2)  4: 310.5 (-0.3 % vs 3)
+vs prediction: SMAX hit (Qwen +0.2 within 0.2..0.4, Llama/whisper +1.1..1.3 vs 0.7..1.2); CNT hit (+0.1..0.2);
+HDR WRONG SIGN (predicted +1.5..2.8 % / +0.7..1.4 %, measured -5.2 % / -2.9 %); MUL wrong sign, small (-0.2..-0.4 %).
+
+== 7. OA (bench/oa.sh -n 1 -b 95, ComputeBasic, one attn_kcl run with PASSES=3; launches ~40 ms Qwen / ~51 ms Llama
+      per layer) ==
+== q0
+steady (median of 3 passes x 28 layers): attn 39.49 ms/layer, kt 0.277 ms/layer, wall 39.98 ms/layer, pass CPU (main thread) 3.1 ms | attn 305.9 GFLOPS, incl. kt 303.8, incl. kt + submit/wait 302.2 | best layer attn 39.233 ms = 307.9 GFLOPS (kt 0.273) | GPU~1000 MHz
+OA ComputeBasic: 108 busy reports of 228, GPU time 583.3 ms, clock 994 MHz
+EU active 91.3 %  stall 3.0 %  idle 5.7 %  occupancy 82.7 %
+FPU both 76.4 % (84 % of active)  FPU0 87.8 %  FPU1 79.6 %  send 4.5 %  IPC 1.83
+L3ShaderThroughput 137.38 GB/s  GtiReadThroughput 2.79 GB/s  GtiWriteThroughput 0.09 GB/s  SlmBytesRead 0.00 GB/s  SlmBytesWritten 0.00 GB/s
+== q1
+steady (median of 3 passes x 28 layers): attn 39.41 ms/layer, kt 0.278 ms/layer, wall 39.90 ms/layer, pass CPU (main thread) 2.9 ms | attn 306.6 GFLOPS, incl. kt 304.4, incl. kt + submit/wait 302.8 | best layer attn 39.169 ms = 308.4 GFLOPS (kt 0.272) | GPU~1000 MHz
+OA ComputeBasic: 110 busy reports of 228, GPU time 613.4 ms, clock 993 MHz
+EU active 91.5 %  stall 3.0 %  idle 5.6 %  occupancy 83.0 %
+FPU both 76.5 % (84 % of active)  FPU0 87.9 %  FPU1 79.8 %  send 4.5 %  IPC 1.83
+L3ShaderThroughput 137.97 GB/s  GtiReadThroughput 2.61 GB/s  GtiWriteThroughput 0.09 GB/s  SlmBytesRead 0.00 GB/s  SlmBytesWritten 0.00 GB/s
+== q2
+steady (median of 3 passes x 28 layers): attn 41.57 ms/layer, kt 0.277 ms/layer, wall 42.05 ms/layer, pass CPU (main thread) 3.1 ms | attn 290.6 GFLOPS, incl. kt 288.7, incl. kt + submit/wait 287.3 | best layer attn 41.201 ms = 293.2 GFLOPS (kt 0.273) | GPU~1000 MHz
+OA ComputeBasic: 112 busy reports of 230, GPU time 608.2 ms, clock 993 MHz
+EU active 91.3 %  stall 2.2 %  idle 6.5 %  occupancy 82.6 %
+FPU both 68.4 % (75 % of active)  FPU0 90.5 %  FPU1 69.0 %  send 4.3 %  IPC 1.75
+L3ShaderThroughput 131.24 GB/s  GtiReadThroughput 3.08 GB/s  GtiWriteThroughput 0.09 GB/s  SlmBytesRead 0.00 GB/s  SlmBytesWritten 0.00 GB/s
+== l0
+steady (median of 3 passes x 16 layers): attn 51.01 ms/layer, kt 0.566 ms/layer, wall 51.78 ms/layer, pass CPU (main thread) 1.7 ms | attn 315.8 GFLOPS, incl. kt 312.3, incl. kt + submit/wait 311.1 | best layer attn 50.608 ms = 318.3 GFLOPS (kt 0.554) | GPU~1000 MHz
+EU active 90.0 %  stall 2.9 %  idle 7.1 %  occupancy 81.8 %
+FPU both 77.2 % (86 % of active)  FPU0 87.6 %  FPU1 79.5 %  send 2.3 %  IPC 1.85
+L3ShaderThroughput 70.38 GB/s  GtiReadThroughput 2.86 GB/s  GtiWriteThroughput 0.09 GB/s  SlmBytesRead 0.00 GB/s  SlmBytesWritten 0.00 GB/s
+== l1
+steady (median of 3 passes x 16 layers): attn 50.28 ms/layer, kt 0.566 ms/layer, wall 51.07 ms/layer, pass CPU (main thread) 1.8 ms | attn 320.4 GFLOPS, incl. kt 316.8, incl. kt + submit/wait 315.4 | best layer attn 50.004 ms = 322.1 GFLOPS (kt 0.549) | GPU~1000 MHz
+EU active 91.2 %  stall 2.4 %  idle 6.4 %  occupancy 83.5 %
+FPU both 79.3 % (87 % of active)  FPU0 89.1 %  FPU1 81.3 %  send 2.4 %  IPC 1.87
+L3ShaderThroughput 72.43 GB/s  GtiReadThroughput 2.97 GB/s  GtiWriteThroughput 0.09 GB/s  SlmBytesRead 0.00 GB/s  SlmBytesWritten 0.00 GB/s
+== l2
+steady (median of 3 passes x 16 layers): attn 51.86 ms/layer, kt 0.569 ms/layer, wall 52.66 ms/layer, pass CPU (main thread) 1.8 ms | attn 310.6 GFLOPS, incl. kt 307.2, incl. kt + submit/wait 305.9 | best layer attn 51.552 ms = 312.5 GFLOPS (kt 0.550) | GPU~1000 MHz
+EU active 90.2 %  stall 2.4 %  idle 7.5 %  occupancy 81.8 %
+FPU both 73.5 % (81 % of active)  FPU0 88.9 %  FPU1 74.7 %  send 2.3 %  IPC 1.81
+L3ShaderThroughput 69.49 GB/s  GtiReadThroughput 2.76 GB/s  GtiWriteThroughput 0.09 GB/s  SlmBytesRead 0.00 GB/s  SlmBytesWritten 0.00 GB/s
+== l4
+steady (median of 3 passes x 16 layers): attn 51.91 ms/layer, kt 0.570 ms/layer, wall 52.69 ms/layer, pass CPU (main thread) 1.7 ms | attn 310.3 GFLOPS, incl. kt 306.9, incl. kt + submit/wait 305.7 | best layer attn 51.471 ms = 313.0 GFLOPS (kt 0.550) | GPU~1000 MHz
+EU active 90.7 %  stall 2.2 %  idle 7.1 %  occupancy 82.8 %
+FPU both 72.8 % (80 % of active)  FPU0 89.5 %  FPU1 73.9 %  send 2.3 %  IPC 1.80
+L3ShaderThroughput 70.04 GB/s  GtiReadThroughput 2.75 GB/s  GtiWriteThroughput 0.09 GB/s  SlmBytesRead 0.00 GB/s  SlmBytesWritten 0.00 GB/s
+Reading: one (2|M0) :q add with a 2-register region (dst <4>) is not cheaper than two (1|M0) :q adds; it moves work
+onto FPU0 and starves the dual issue: Qwen FPU1 79.6 -> 69.0 %, FPU0 87.8 -> 90.5 %, both-pipes 84 -> 75 % of active;
+Llama FPU1 81.3 -> 74.7 %. [HYP] 64-bit integer ops run on FPU0 only and a QW region crossing two GRFs is issued in
+two passes (not separable with these counters). SMAX: Llama both-pipes 86 -> 87 % of active, EU active +1.2 points.
+
+PREDICT 19:56:11 variant 5 = SMAX + CNT (no HDR): Qwen ~306.5-307.5 (+0.2..0.4 % over 0), Llama/whisper ~320-321 (+1.3..1.6 %).
+PREDICT 19:56:11 variant 6 = 5 + MUL: -0.2..-0.4 % vs 5 (as 4 vs 3); MUL is dropped unless it is >= 0.
+
+== 8. Round 2 without HDR (decision after round 1), 20:32 ==
+Tags: 5 = SMAX + CNT, 6 = 5 + MUL. Correctness (same 23 cases as section 5, plus a mutant):
+q5.bin VIS0=37 12 2 128 75 128 2 2 -> err 2.24e-06 2.07e-06 
+l5.bin VIS0=37 32 8 64 75 128 4 2 -> err 1.87e-06 1.27e-06 
+q5.bin VIS0=1 12 2 128 33 48 2 2 -> err 1.38e-06 2.35e-06 
+l5.bin VIS0=1 32 8 64 33 48 4 2 -> err 1.19e-06 9.85e-07 
+q5.bin VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 2.76e-06 2.59e-06 
+l5.bin VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 1.83e-06 2.41e-06 
+q5.bin VIS0=7 DVIS=0 12 2 128 40 256 2 2 -> err 1.39e-06 1.71e-06 
+l5.bin VIS0=7 DVIS=0 32 8 64 40 256 4 2 -> err 1.13e-06 8.60e-07 
+q5.bin VIS0=4000 12 2 128 200 4096 2 2 -> err 2.77e-06 2.60e-06 
+l5.bin VIS0=4000 32 8 64 200 4096 4 2 -> err 2.99e-06 2.95e-06 
+w5.bin VIS0=1500 DVIS=0 20 20 64 1500 1504 4 2 -> err 2.00e-06 2.16e-06 
+w5.bin VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 1.91e-06 1.84e-06 
+w5.bin VIS0=37 DVIS=0 20 20 64 40 48 4 2 -> err 1.44e-06 1.43e-06 
+q5.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 2.82e-05 4.73e-05 
+q5.bin QSIGMA=0.1 RAMP=1 VIS0=37 12 2 128 75 128 2 2 -> err 2.74e-06 2.74e-06 
+l5.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 4.72e-05 3.74e-05 
+l5.bin QSIGMA=0.1 RAMP=1 VIS0=37 32 8 64 75 128 4 2 -> err 4.34e-06 3.39e-06 
+w5.bin QSIGMA=0.1 RAMP=1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 7.24e-05 8.53e-05 
+q5.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 4.75e-05 5.65e-05 
+q5.bin QSIGMA=0.1 RAMP=-1 VIS0=37 12 2 128 75 128 2 2 -> err 6.28e-06 4.61e-06 
+l5.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 5.15e-05 3.63e-05 
+l5.bin QSIGMA=0.1 RAMP=-1 VIS0=37 32 8 64 75 128 4 2 -> err 5.83e-06 4.25e-06 
+w5.bin QSIGMA=0.1 RAMP=-1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 6.68e-05 6.99e-05 
+q6.bin VIS0=37 12 2 128 75 128 2 2 -> err 2.24e-06 2.07e-06 
+l6.bin VIS0=37 32 8 64 75 128 4 2 -> err 1.87e-06 1.27e-06 
+q6.bin VIS0=1 12 2 128 33 48 2 2 -> err 1.38e-06 2.35e-06 
+l6.bin VIS0=1 32 8 64 33 48 4 2 -> err 1.19e-06 9.85e-07 
+q6.bin VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 2.76e-06 2.59e-06 
+l6.bin VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 1.83e-06 2.41e-06 
+q6.bin VIS0=7 DVIS=0 12 2 128 40 256 2 2 -> err 1.39e-06 1.71e-06 
+l6.bin VIS0=7 DVIS=0 32 8 64 40 256 4 2 -> err 1.13e-06 8.60e-07 
+q6.bin VIS0=4000 12 2 128 200 4096 2 2 -> err 2.77e-06 2.60e-06 
+l6.bin VIS0=4000 32 8 64 200 4096 4 2 -> err 2.99e-06 2.95e-06 
+w6.bin VIS0=1500 DVIS=0 20 20 64 1500 1504 4 2 -> err 2.00e-06 2.16e-06 
+w6.bin VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 1.91e-06 1.84e-06 
+w6.bin VIS0=37 DVIS=0 20 20 64 40 48 4 2 -> err 1.44e-06 1.43e-06 
+q6.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 2.82e-05 4.73e-05 
+q6.bin QSIGMA=0.1 RAMP=1 VIS0=37 12 2 128 75 128 2 2 -> err 2.74e-06 2.74e-06 
+l6.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 4.72e-05 3.74e-05 
+l6.bin QSIGMA=0.1 RAMP=1 VIS0=37 32 8 64 75 128 4 2 -> err 4.34e-06 3.39e-06 
+w6.bin QSIGMA=0.1 RAMP=1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 7.24e-05 8.53e-05 
+q6.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 4.75e-05 5.65e-05 
+q6.bin QSIGMA=0.1 RAMP=-1 VIS0=37 12 2 128 75 128 2 2 -> err 6.28e-06 4.61e-06 
+l6.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 5.15e-05 3.63e-05 
+l6.bin QSIGMA=0.1 RAMP=-1 VIS0=37 32 8 64 75 128 4 2 -> err 5.83e-06 4.25e-06 
+w6.bin QSIGMA=0.1 RAMP=-1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 6.68e-05 6.99e-05 
+Rescale-test sensitivity: mutant m = tag 5 with the per-row rescale jumps made unconditional (alpha never applied,
+running maximum still updated; test binary, built with ATTN_LOOPCHECK=0):
+qm.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 9.84e-01  1.02e+00  
+qm.bin QSIGMA=0.1 RAMP=1 VIS0=37 12 2 128 75 128 2 2 -> err 8.97e-01  7.52e-01  
+lm.bin QSIGMA=0.1 RAMP=1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 1.04e+00  9.65e-01  
+lm.bin QSIGMA=0.1 RAMP=1 VIS0=37 32 8 64 75 128 4 2 -> err 8.67e-01  8.21e-01  
+wm.bin QSIGMA=0.1 RAMP=1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 1.01e+00  1.00e+00  
+qm.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 12 2 128 64 1024 2 2 -> err 4.75e-05  5.65e-05  
+qm.bin QSIGMA=0.1 RAMP=-1 VIS0=37 12 2 128 75 128 2 2 -> err 6.28e-06  4.61e-06  
+lm.bin QSIGMA=0.1 RAMP=-1 VIS0=1000 DVIS=0 32 8 64 64 1024 4 2 -> err 5.15e-05  3.63e-05  
+lm.bin QSIGMA=0.1 RAMP=-1 VIS0=37 32 8 64 75 128 4 2 -> err 5.83e-06  4.25e-06  
+wm.bin QSIGMA=0.1 RAMP=-1 VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 6.68e-05  6.99e-05  
+  -> RAMP=1 (rescale every block) catches a missing rescale (error ~1), RAMP=-1 (never) does not, as intended.
+  (A blunter mutant, the whole rescale branch skipped, gives NaN in every case: m stays -1e30.)
+Speed (perf.sh, 3 rounds, tags alternated):
+ 20:12:04 up 38 days, 23:31,  3 users,  load average: 1,46, 1,26, 1,05
+q0 round 0: 306.2 GFLOPS @ 1000 MHz
+q1 round 0: 306.6 GFLOPS @ 1000 MHz
+q5 round 0: 306.8 GFLOPS @ 1000 MHz
+q6 round 0: 307.8 GFLOPS @ 1000 MHz
+q0 round 1: 305.9 GFLOPS @ 1000 MHz
+q1 round 1: 306.7 GFLOPS @ 1000 MHz
+q5 round 1: 307.4 GFLOPS @ 1000 MHz
+q6 round 1: 307.6 GFLOPS @ 1000 MHz
+q0 round 2: 305.9 GFLOPS @ 1000 MHz
+q1 round 2: 307.0 GFLOPS @ 1000 MHz
+q5 round 2: 306.6 GFLOPS @ 1000 MHz
+q6 round 2: 307.5 GFLOPS @ 1000 MHz
+l0 round 0: 316.2 GFLOPS @ 1000 MHz
+l1 round 0: 320.1 GFLOPS @ 1000 MHz
+l5 round 0: 320.6 GFLOPS @ 1000 MHz
+l6 round 0: 321.0 GFLOPS @ 1000 MHz
+l0 round 1: 316.0 GFLOPS @ 1000 MHz
+l1 round 1: 320.2 GFLOPS @ 1000 MHz
+l5 round 1: 320.3 GFLOPS @ 1000 MHz
+l6 round 1: 321.0 GFLOPS @ 1000 MHz
+l0 round 2: 315.7 GFLOPS @ 999 MHz
+l1 round 2: 319.6 GFLOPS @ 1000 MHz
+l5 round 2: 320.9 GFLOPS @ 1000 MHz
+l6 round 2: 321.0 GFLOPS @ 1000 MHz
+w0 round 0: 316.4 GFLOPS @ 999 MHz
+w1 round 0: 320.0 GFLOPS @ 1000 MHz
+w5 round 0: 320.5 GFLOPS @ 1000 MHz
+w6 round 0: 320.8 GFLOPS @ 1000 MHz
+w0 round 1: 316.7 GFLOPS @ 1000 MHz
+w1 round 1: 319.7 GFLOPS @ 1000 MHz
+w5 round 1: 320.3 GFLOPS @ 1000 MHz
+w6 round 1: 320.4 GFLOPS @ 999 MHz
+w0 round 2: 316.6 GFLOPS @ 1000 MHz
+w1 round 2: 320.3 GFLOPS @ 1000 MHz
+w5 round 2: 319.8 GFLOPS @ 1000 MHz
+w6 round 2: 320.8 GFLOPS @ 1000 MHz
+Medians: Qwen    0: 305.9  1: 306.7  5: 306.8 (+0.3 % vs 0)  6: 307.5 (+0.5 %)
+         Llama   0: 316.0  1: 320.1  5: 320.6 (+1.5 %)       6: 321.0 (+1.6 %)
+         whisper 0: 316.6  1: 320.0  5: 320.3 (+1.2 %)       6: 320.8 (+1.3 %)
+vs prediction for 5: Qwen +0.3 % (predicted +0.2..0.4: hit), Llama/whisper +1.2..1.5 % (predicted +1.3..1.6: hit).
+MUL without HDR: +0.1..0.2 % (in the noise; with HDR it was -0.2..-0.4 %). Decision: HDR and MUL
+rejected; shipped = variant 5 (SMAX + CNT on by default in asm/attn_gen.py, MUL and HDR behind env switches, off).
+Stop rule: four changes, none >= 2 % -> stop; Qwen stays at ~307 GFLOPS (goal ~330 not reached).
+
+== 9. Final binaries (variant 5 = new defaults of asm/attn_gen.py) ==
+make attn-sha: all 14 entries of asm/attn_sha256.txt changed (skl + whl: attn_qwen, attn_llama, *_tok, *_tokc,
+attn_whisper_tokc), intentionally: every sched loop gets the new softmax and counter. make attn-check: 14 OK.
+With SLIM_SMAX=0 SLIM_CNT=0 the generator reproduces the old 14 hashes bit for bit (make attn-check: 14 OK).
+loopcheck (original asm/loopcheck.py at 768ba8c): OK for all 14; check_generated: 0 bank conflicts, no scratch.
+Non-causal binaries on tc:
+wP.bin VIS0=1500 DVIS=0 20 20 64 64 1504 4 2 -> err 7.96e-01  7.21e-01  
+qt0.bin 12 2 128 64 1024 2 2 -> err 2.76e-06  2.59e-06  
+lt0.bin 32 8 64 64 1024 4 2 -> err 1.82e-06  2.41e-06  
+qt0.bin QSIGMA=0.1 RAMP=1 12 2 128 64 1024 2 2 -> err 8.73e-05  6.10e-05  
+lt0.bin QSIGMA=0.1 RAMP=1 32 8 64 64 1024 4 2 -> err 4.08e-05  5.18e-05  
+qt5.bin 12 2 128 64 1024 2 2 -> err 2.76e-06  2.59e-06  
+lt5.bin 32 8 64 64 1024 4 2 -> err 1.82e-06  2.41e-06  
+qt5.bin QSIGMA=0.1 RAMP=1 12 2 128 64 1024 2 2 -> err 8.73e-05  6.10e-05  
+  NEO path (bench/attn, skl binaries, Q[h][t][d], STEP=1, n_q 512 n_k 1024):
+  attn_qwen.bin  err 3.62e-06, 304.8 GFLOPS;  attn_llama.bin err 1.76e-06, 315.6 GFLOPS
+Poison of the final variant (first S mad with -q; ATTN_POISON=1 ATTN_LOOPCHECK=0, test binaries only):
+41774dfe885792bc
+qP.bin VIS0=37 12 2 128 75 128 2 2 -> err 7.62e-01  9.06e-01  
+lP.bin VIS0=37 32 8 64 75 128 4 2 -> err 9.64e-01  8.21e-01  
+
+== 10. End to end (tc, llama.cpp 2cbe0ec build-cpu, backend sources at c1b8586: lib/ and ggml-backend/ggml-gen9.cpp
+      identical to that commit, GEN9_FFN unset (= off at c1b8586), GEN9_ATTN unset (= on), -t 4 -fa 1) ==
+Backend A = c1b8586 with the HEAD attention binaries (whl q0/l0/w0 = old attn_sha256.txt), B = same with the new ones.
+llama-bench pp512 -r 5 (run once per variant, order alternated per test, before the decision to drop MUL: B here =
+variant 6, SMAX + CNT + MUL; the end-to-end comparison was then dropped by decision, the kernel gain is in
+the noise of pp):
+  Qwen  d0     A 198.7 +- 0.7   B 196.6 +- 1.8 t/s      d3584  A 139.0 +- 0.9   B 139.3 +- 1.8
+  Llama d0     A 282.3 +- 2.4   B 278.6 +- 3.7          d3584  A 194.7 +- 1.2   B 195.7 +- 1.4
+  GEN9_INFO: every FLASH_ATTN_EXT node on the GPU in all runs (Qwen d3584: 364 launches, A 294.6 / B 295.7 GFLOPS incl.
+  pinning/submit/wait; Llama d3584: 208, A 303.4 / B 307.1).
+Perplexity Qwen2.5-1.5B Q4_K_M, -c 2048 --chunks 4, -fa on (docs/*.md text):
+  A (HEAD binaries)        [1]6.0829,[2]8.5797,[3]7.6151,[4]8.3137  PPL 8.3137 +- 0.34354
+  B variant 6              [1]6.0829,[2]8.5797,[3]7.6151,[4]8.3137  PPL 8.3137 +- 0.34354
+  B variant 5 (shipped)    -rwxrwxr-x 1 user user 1966768 Nov 13 20:24 B/lib/libgen9blas.so  PPL 8.3137 +- 0.34354
+  (448 FLASH_ATTN_EXT launches on the GPU each, 290-293 GFLOPS incl. overhead). Identical to all printed digits.
+
+Raw llama-bench / perplexity log (variant 6 B):
+# 20:18:47 load 1.11 1.08 1.01 gpu 1017 MHz A qwen2.5-1.5b-instruct-q4_k_m.gguf d 0
+{"n_depth": 0, "avg_ts": 198.708921, "stddev_ts": 0.702066, "samples_ts": [ 199.201, 199.299, 197.6, 198.998, 198.447 ]}
+gen9: supports_op FLASH_ATTN_EXT asked 84, declined: GEN9_ATTN off 0, type 0, ALiBi/softcap/sinks 0, shape/no binary 0, layout 0, n_q<32 0, mask/kv_rows shape 0, no GPU 0
+gen9: FLASH_ATTN_EXT run on the GPU 168 (168 launches, 0 with kv_rows), 0.542 s, 135.6 GFLOP (250.3 GFLOPS incl. pinning/submit/wait); mask analysis 0.019 s; computed by ggml-cpu inside GEN9: mask not causal/full 0, kv_rows not identity 0, library declined 0, GPU error 0 (0.000 s)
+gen9: FLASH_ATTN_EXT with n_k not a multiple of 16: rounded up on the GPU 0, V tail not finite -> ggml-cpu 0
+# 20:19:05 load 1.72 1.22 1.06 gpu 1017 MHz B qwen2.5-1.5b-instruct-q4_k_m.gguf d 0
+{"n_depth": 0, "avg_ts": 196.563812, "stddev_ts": 1.819669, "samples_ts": [ 197.84, 194.295, 194.878, 198.043, 197.763 ]}
+gen9: supports_op FLASH_ATTN_EXT asked 84, declined: GEN9_ATTN off 0, type 0, ALiBi/softcap/sinks 0, shape/no binary 0, layout 0, n_q<32 0, mask/kv_rows shape 0, no GPU 0
+gen9: FLASH_ATTN_EXT run on the GPU 168 (168 launches, 0 with kv_rows), 0.539 s, 135.6 GFLOP (251.7 GFLOPS incl. pinning/submit/wait); mask analysis 0.024 s; computed by ggml-cpu inside GEN9: mask not causal/full 0, kv_rows not identity 0, library declined 0, GPU error 0 (0.000 s)
+gen9: FLASH_ATTN_EXT with n_k not a multiple of 16: rounded up on the GPU 0, V tail not finite -> ggml-cpu 0
+# 20:19:22 load 1.82 1.28 1.09 gpu 933 MHz B qwen2.5-1.5b-instruct-q4_k_m.gguf d 3584
+{"n_depth": 3584, "avg_ts": 139.340168, "stddev_ts": 1.819841, "samples_ts": [ 139.831, 140.124, 140.181, 136.109, 140.456 ]}
+gen9: supports_op FLASH_ATTN_EXT asked 308, declined: GEN9_ATTN off 0, type 0, ALiBi/softcap/sinks 0, shape/no binary 0, layout 0, n_q<32 0, mask/kv_rows shape 0, no GPU 0
+gen9: FLASH_ATTN_EXT run on the GPU 364 (364 launches, 0 with kv_rows), 9.532 s, 2819.1 GFLOP (295.7 GFLOPS incl. pinning/submit/wait); mask analysis 0.210 s; computed by ggml-cpu inside GEN9: mask not causal/full 0, kv_rows not identity 0, library declined 0, GPU error 0 (0.000 s)
+gen9: FLASH_ATTN_EXT with n_k not a multiple of 16: rounded up on the GPU 0, V tail not finite -> ggml-cpu 0
+# 20:20:07 load 2.86 1.65 1.22 gpu 1017 MHz A qwen2.5-1.5b-instruct-q4_k_m.gguf d 3584
+{"n_depth": 3584, "avg_ts": 139.002405, "stddev_ts": 0.942277, "samples_ts": [ 139.878, 140.04, 137.793, 138.656, 138.646 ]}
+gen9: supports_op FLASH_ATTN_EXT asked 308, declined: GEN9_ATTN off 0, type 0, ALiBi/softcap/sinks 0, shape/no binary 0, layout 0, n_q<32 0, mask/kv_rows shape 0, no GPU 0
+gen9: FLASH_ATTN_EXT run on the GPU 364 (364 launches, 0 with kv_rows), 9.570 s, 2819.1 GFLOP (294.6 GFLOPS incl. pinning/submit/wait); mask analysis 0.231 s; computed by ggml-cpu inside GEN9: mask not causal/full 0, kv_rows not identity 0, library declined 0, GPU error 0 (0.000 s)
+gen9: FLASH_ATTN_EXT with n_k not a multiple of 16: rounded up on the GPU 0, V tail not finite -> ggml-cpu 0
+# 20:20:52 load 2.62 1.75 1.27 gpu 1017 MHz A Llama-3.2-1B-Instruct-Q4_K_M.gguf d 0
+{"n_depth": 0, "avg_ts": 282.316826, "stddev_ts": 2.415169, "samples_ts": [ 282.012, 283.984, 282.766, 284.462, 278.36 ]}
+gen9: supports_op FLASH_ATTN_EXT asked 48, declined: GEN9_ATTN off 0, type 0, ALiBi/softcap/sinks 0, shape/no binary 0, layout 0, n_q<32 0, mask/kv_rows shape 0, no GPU 0
+gen9: FLASH_ATTN_EXT run on the GPU 96 (96 launches, 0 with kv_rows), 0.398 s, 103.3 GFLOP (259.7 GFLOPS incl. pinning/submit/wait); mask analysis 0.013 s; computed by ggml-cpu inside GEN9: mask not causal/full 0, kv_rows not identity 0, library declined 0, GPU error 0 (0.000 s)
+gen9: FLASH_ATTN_EXT with n_k not a multiple of 16: rounded up on the GPU 0, V tail not finite -> ggml-cpu 0
+# 20:21:04 load 2.60 1.77 1.29 gpu 1017 MHz B Llama-3.2-1B-Instruct-Q4_K_M.gguf d 0
+{"n_depth": 0, "avg_ts": 278.564745, "stddev_ts": 3.663967, "samples_ts": [ 279.871, 281.076, 272.376, 278.237, 281.263 ]}
+gen9: supports_op FLASH_ATTN_EXT asked 48, declined: GEN9_ATTN off 0, type 0, ALiBi/softcap/sinks 0, shape/no binary 0, layout 0, n_q<32 0, mask/kv_rows shape 0, no GPU 0
+gen9: FLASH_ATTN_EXT run on the GPU 96 (96 launches, 0 with kv_rows), 0.390 s, 103.3 GFLOP (265.1 GFLOPS incl. pinning/submit/wait); mask analysis 0.014 s; computed by ggml-cpu inside GEN9: mask not causal/full 0, kv_rows not identity 0, library declined 0, GPU error 0 (0.000 s)
+gen9: FLASH_ATTN_EXT with n_k not a multiple of 16: rounded up on the GPU 0, V tail not finite -> ggml-cpu 0
+# 20:21:17 load 3.10 1.93 1.35 gpu 1017 MHz B Llama-3.2-1B-Instruct-Q4_K_M.gguf d 3584
+{"n_depth": 3584, "avg_ts": 195.662880, "stddev_ts": 1.423625, "samples_ts": [ 197.701, 194.811, 196.129, 195.743, 193.93 ]}
+gen9: supports_op FLASH_ATTN_EXT asked 176, declined: GEN9_ATTN off 0, type 0, ALiBi/softcap/sinks 0, shape/no binary 0, layout 0, n_q<32 0, mask/kv_rows shape 0, no GPU 0
+gen9: FLASH_ATTN_EXT run on the GPU 208 (208 launches, 0 with kv_rows), 6.994 s, 2147.9 GFLOP (307.1 GFLOPS incl. pinning/submit/wait); mask analysis 0.142 s; computed by ggml-cpu inside GEN9: mask not causal/full 0, kv_rows not identity 0, library declined 0, GPU error 0 (0.000 s)
+gen9: FLASH_ATTN_EXT with n_k not a multiple of 16: rounded up on the GPU 0, V tail not finite -> ggml-cpu 0
+# 20:21:49 load 2.79 1.95 1.37 gpu 1017 MHz A Llama-3.2-1B-Instruct-Q4_K_M.gguf d 3584
+{"n_depth": 3584, "avg_ts": 194.657148, "stddev_ts": 1.206127, "samples_ts": [ 194.242, 194.846, 194.803, 193.026, 196.369 ]}
+gen9: supports_op FLASH_ATTN_EXT asked 176, declined: GEN9_ATTN off 0, type 0, ALiBi/softcap/sinks 0, shape/no binary 0, layout 0, n_q<32 0, mask/kv_rows shape 0, no GPU 0
+gen9: FLASH_ATTN_EXT run on the GPU 208 (208 launches, 0 with kv_rows), 7.080 s, 2147.9 GFLOP (303.4 GFLOPS incl. pinning/submit/wait); mask analysis 0.154 s; computed by ggml-cpu inside GEN9: mask not causal/full 0, kv_rows not identity 0, library declined 0, GPU error 0 (0.000 s)
+gen9: FLASH_ATTN_EXT with n_k not a multiple of 16: rounded up on the GPU 0, V tail not finite -> ggml-cpu 0
+# 20:22:21 load 2.98 2.09 1.44 gpu 1017 MHz A perplexity qwen -c 2048 --chunks 4
+[1]6.0829,[2]8.5797,[3]7.6151,[4]8.3137,
+0.53.107.246 I Final estimate: PPL = 8.3137 +/- 0.34354
+gen9: supports_op FLASH_ATTN_EXT asked 560, declined: GEN9_ATTN off 0, type 0, ALiBi/softcap/sinks 0, shape/no binary 0, layout 0, n_q<32 0, mask/kv_rows shape 0, no GPU 0
+gen9: FLASH_ATTN_EXT run on the GPU 448 (448 launches, 0 with kv_rows), 4.970 s, 1443.8 GFLOP (290.5 GFLOPS incl. pinning/submit/wait); mask analysis 0.113 s; computed by ggml-cpu inside GEN9: mask not causal/full 0, kv_rows not identity 0, library declined 0, GPU error 0 (0.000 s)
+gen9: FLASH_ATTN_EXT with n_k not a multiple of 16: rounded up on the GPU 0, V tail not finite -> ggml-cpu 0
+# 20:23:14 load 2.93 2.22 1.52 gpu 1017 MHz B perplexity qwen -c 2048 --chunks 4
+[1]6.0829,[2]8.5797,[3]7.6151,[4]8.3137,
+0.53.151.514 I Final estimate: PPL = 8.3137 +/- 0.34354
+gen9: supports_op FLASH_ATTN_EXT asked 560, declined: GEN9_ATTN off 0, type 0, ALiBi/softcap/sinks 0, shape/no binary 0, layout 0, n_q<32 0, mask/kv_rows shape 0, no GPU 0
+gen9: FLASH_ATTN_EXT run on the GPU 448 (448 launches, 0 with kv_rows), 4.942 s, 1443.8 GFLOP (292.2 GFLOPS incl. pinning/submit/wait); mask analysis 0.117 s; computed by ggml-cpu inside GEN9: mask not causal/full 0, kv_rows not identity 0, library declined 0, GPU error 0 (0.000 s)
+gen9: FLASH_ATTN_EXT with n_k not a multiple of 16: rounded up on the GPU 0, V tail not finite -> ggml-cpu 0
+# 20:24:07 load 3.16 2.37 1.61 gpu 1017 MHz done

@@ -62,6 +62,16 @@ DEVICE = os.environ.get("DEVICE", "whl")
 PE_IN_S = os.environ.get("PE_IN_S", "0") == "1"
 # COMPACT=1: l sums in IGC's l registers and row maxima in a temporary's spare lanes (3 registers fewer for Qwen)
 COMPACT = os.environ.get("COMPACT", "1") == "1"
+# Loop slimming (docs/attention-gpu.md section 12; results/attn-slim-hd530-2026-11-13.txt). Default on (measured gains):
+#   SLIM_SMAX row maxima of all RQ rows in one reduction tree and one `.any<RQ>h` branch (Llama/whisper +1.3 %)
+#   SLIM_CNT  loop counter test before the softmax, its flag shared by the causal mask and the loop jump
+#   SLIM_MUL  first K product of a block as mul instead of zeroing the scores
+# Default off (measured slower, kept for the record): SLIM_HDR two send headers per (2|M0) :q add with dst <4>
+#   (Qwen -5 %, Llama -3 %: the 2-register QW add loads FPU0 and starves the dual issue, OA FPU1 -10 points).
+SLIM_SMAX = os.environ.get("SLIM_SMAX", "1") == "1"
+SLIM_CNT = os.environ.get("SLIM_CNT", "1") == "1"
+SLIM_MUL = os.environ.get("SLIM_MUL", "0") == "1"
+SLIM_HDR = os.environ.get("SLIM_HDR", "0") == "1"
 OCLOC_VERSION = "24.35.30872.36"    # NEO release the symbolic pass and the hashes in attn_sha256.txt were checked with
 
 
@@ -463,9 +473,27 @@ def sched(pro, loop, epi, P, NS):
         Mx, T1, T2 = A.one(), A.one(), A.one()
         MO = 0
     nv = D // 64                                        # V block reads per row
-    hK = [A.one() for _ in range(NK)]
-    hV = [A.one() for _ in range(nv)]
+    # SLIM_HDR: header pairs in adjacent registers, advanced together by one (2|M0) :q add with dst <4> (32 B apart);
+    # with one V block read per step (D 64) two V headers serve the even and odd key steps (advanced by 2 rows).
+    hdr2 = SLIM_HDR and NK == 2
+    vpair = SLIM_HDR and nv <= 2
+
+    def pair():
+        try:
+            b = A.block(2, 0)
+        except SystemExit:
+            b = A.block(2, 1)
+        return [b, b + 1]
+    hK = pair() if hdr2 else [A.one() for _ in range(NK)]
+    hV = pair() if vpair else [A.one() for _ in range(nv)]
     rs = HKV * D * 2                                    # V row stride (bytes)
+    # SLIM_SMAX: RQ consecutive registers that are dead during the row-max reduction (odd p copies, even p copies
+    # unless they are the score registers, T1, unallocated): Pe/Po are last read by the previous block's V mads and
+    # written only after the reduction; T1 is free after the mask.
+    dead = (set(Pe.values()) - set(S.values())) | set(Po.values()) | {T1} | set(A.free)
+    Rblk = next(([b + i for i in range(RQ)] for b in range(128) if all(b + i in dead for i in range(RQ))), None)
+    if SLIM_SMAX:
+        assert Rblk is not None, ("SLIM_SMAX: no", RQ, "consecutive dead registers", sorted(dead))
     out = [f"// --- attn_gen sched: NS={NS} slots={slots} S={S} Pe={Pe} Po={Po} L={L} M=r{Mx} headers K{hK} V{hV}; "
            f"IGC: kp=r{kp[0]}.{kp[1]}:q vp=r{vp[0]}.{vp[1]}:q cnt={cnt} lim={lim} l={M['l']}; {nfree} free registers, {len(A.free)} left"]
     # Q permutation: element (r, c, i) must sit in a register of parity 1 - (i // 2) % 2 (slot bases even).
@@ -490,8 +518,8 @@ def sched(pro, loop, epi, P, NS):
         out.append(f"{W}mov (8|M0)  r{h}.0<1>:ud  0x0:ud")
     for k in range(NK):
         out.append(f"{W}add (1|M0)  r{hK[k]}.0<1>:q  r{kp[0]}.{kp[1]}<0;1,0>:q  {k * D * 16}:w")
-    for h in range(nv):
-        out.append(f"{W}add (1|M0)  r{hV[h]}.0<1>:q  r{vp[0]}.{vp[1]}<0;1,0>:q  {h * 128}:w")
+    for h in range(len(hV)):    # nv 2: the two halves of a V row; vpair with nv 1: rows j and j + 1
+        out.append(f"{W}add (1|M0)  r{hV[h]}.0<1>:q  r{vp[0]}.{vp[1]}<0;1,0>:q  {h * (128 if nv == 2 else rs)}:w")
     nks, nvs = D // 8, 8 * NK
     nsteps = nks + nvs
 
@@ -501,9 +529,22 @@ def sched(pro, loop, epi, P, NS):
         b = slots_of[s]
         o = []
         if s < nks:
-            for k in range(NK):
-                o += [f"{W}send (16|M0)  r{b + 4 * k}:w  r{hK[k]}  0xC  0x024D0CFF  {RD4}",
-                      f"{W}add (1|M0)  r{hK[k]}.0<1>:q  r{hK[k]}.0<0;1,0>:q  {128 + (NK - 1) * D * 16 if s == nks - 1 else 128}:w"]
+            step = 128 + (NK - 1) * D * 16 if s == nks - 1 else 128
+            if hdr2:
+                o += [f"{W}send (16|M0)  r{b + 4 * k}:w  r{hK[k]}  0xC  0x024D0CFF  {RD4}" for k in range(NK)]
+                o.append(f"{W}add (2|M0)  r{hK[0]}.0<4>:q  r{hK[0]}.0<4;1,0>:q  {step}:w")
+            else:
+                for k in range(NK):
+                    o += [f"{W}send (16|M0)  r{b + 4 * k}:w  r{hK[k]}  0xC  0x024D0CFF  {RD4}",
+                          f"{W}add (1|M0)  r{hK[k]}.0<1>:q  r{hK[k]}.0<0;1,0>:q  {step}:w"]
+        elif vpair and nv == 2:
+            o += [f"{W}send (16|M0)  r{b + 4 * h}:w  r{hV[h]}  0xC  0x024D0CFF  {RD4}" for h in range(nv)]
+            o.append(f"{W}add (2|M0)  r{hV[0]}.0<4>:q  r{hV[0]}.0<4;1,0>:q  {rs}:w")
+        elif vpair:                 # nv 1: key step j reads through hV[j % 2]; both advance by 2 rows after odd j
+            j = s - nks
+            o.append(f"{W}send (16|M0)  r{b}:w  r{hV[j % 2]}  0xC  0x024D0CFF  {RD4}")
+            if j % 2:
+                o.append(f"{W}add (2|M0)  r{hV[0]}.0<4>:q  r{hV[0]}.0<4;1,0>:q  {2 * rs}:w")
         else:
             for h in range(nv):
                 o += [f"{W}send (16|M0)  r{b + 4 * h}:w  r{hV[h]}  0xC  0x024D0CFF  {RD4}",
@@ -519,6 +560,9 @@ def sched(pro, loop, epi, P, NS):
             for k in range(NK):
                 for r in range(RQ):
                     q = loc.get((M["q"][(r, c)], i), (M["q"][(r, c)], i))
+                    if SLIM_MUL and c == 0 and i == 0:  # first product of the block: S = K q, no S = 0 before
+                        o.append(f"        mul (8|M0)  r{S[(r, k)]}.0<1>:f  r{b + 4 * k}.0<8;8,1>:hf  r{q[0]}.{q[1]}<0;1,0>:f")
+                        continue
                     o.append(f"        mad (8|M0)  r{S[(r, k)]}.0<1>:f  r{S[(r, k)]}.0<2;1>:f  r{b + 4 * k + i // 2}.{(i % 2) * 8}<2;1>:hf  r{q[0]}.{q[1]}<0>:f")
         return o
 
@@ -533,7 +577,61 @@ def sched(pro, loop, epi, P, NS):
                 o.append(f"        mad (8|M0)  r{M['o'][(r, c)]}.0<1>:f  r{M['o'][(r, c)]}.0<2;1>:f  r{vr}.{(cc % 2) * 8}<2;1>:hf  r{p}.{jj}<0>:f")
         return o
 
+    def softmax_vec():
+        """SLIM_SMAX: the row maxima of all RQ rows in one reduction tree and one branch (section 12). Stage 1 per
+        row: R[r] = max over the NK score registers; R are RQ consecutive registers dead at this point (p copies, T1).
+        Rows are then reduced together through 2-register regions (<8;4,1>, <4;2,1>, <2;1,0>) into T2.0..RQ-1;
+        one cmp (RQ) against the running maxima and one `.any<RQ>h` jump skip the rescale when no row grew. In the
+        rescale path each row is tested again (cmp + jmpi per row), so a row whose maximum did not grow is not
+        touched (same arithmetic as softmax(): a = exp(m - mn), O and l multiplied only when mn > m)."""
+        o, R = [], Rblk
+        for r in range(RQ):
+            sk = [S[(r, k)] for k in range(NK)]
+            if NK == 1:
+                o.append(f"        mov (8|M0)  r{R[r]}.0<1>:f  r{sk[0]}.0<8;8,1>:f")
+            else:
+                o.append(f"        sel (8|M0)  (ge)f0.0  r{R[r]}.0<1>:f  r{sk[0]}.0<8;8,1>:f  r{sk[1]}.0<8;8,1>:f")
+                for k in range(2, NK):
+                    o.append(f"        sel (8|M0)  (ge)f0.0  r{R[r]}.0<1>:f  r{R[r]}.0<8;8,1>:f  r{sk[k]}.0<8;8,1>:f")
+        if RQ == 1:
+            o += [f"{W}sel (4|M0)  (ge)f0.0  r{T2}.0<1>:f  r{R[0]}.0<4;4,1>:f  r{R[0]}.4<4;4,1>:f",
+                  f"{W}sel (2|M0)  (ge)f0.0  r{T2}.0<1>:f  r{T2}.0<2;2,1>:f  r{T2}.2<2;2,1>:f",
+                  f"{W}sel (1|M0)  (ge)f0.0  r{T2}.0<1>:f  r{T2}.0<0;1,0>:f  r{T2}.1<0;1,0>:f"]
+        elif RQ == 2:   # R0 lanes: 4 per row, then 2 per row, then T2.0/T2.1
+            o += [f"{W}sel (8|M0)  (ge)f0.0  r{R[0]}.0<1>:f  r{R[0]}.0<8;4,1>:f  r{R[0]}.4<8;4,1>:f",
+                  f"{W}sel (4|M0)  (ge)f0.0  r{R[0]}.0<1>:f  r{R[0]}.0<4;2,1>:f  r{R[0]}.2<4;2,1>:f",
+                  f"{W}sel (2|M0)  (ge)f0.0  r{T2}.0<1>:f  r{R[0]}.0<2;1,0>:f  r{R[0]}.1<2;1,0>:f"]
+        else:           # RQ 4: rows 0,1 -> R0 (4 lanes each), rows 2,3 -> R1; then 2 per row in R0; then T2.0..3
+            o += [f"{W}sel (8|M0)  (ge)f0.0  r{R[0]}.0<1>:f  r{R[0]}.0<8;4,1>:f  r{R[0]}.4<8;4,1>:f",
+                  f"{W}sel (8|M0)  (ge)f0.0  r{R[1]}.0<1>:f  r{R[2]}.0<8;4,1>:f  r{R[2]}.4<8;4,1>:f",
+                  f"{W}sel (8|M0)  (ge)f0.0  r{R[0]}.0<1>:f  r{R[0]}.0<4;2,1>:f  r{R[0]}.2<4;2,1>:f",
+                  f"{W}sel (4|M0)  (ge)f0.0  r{T2}.0<1>:f  r{R[0]}.0<2;1,0>:f  r{R[0]}.1<2;1,0>:f"]
+        v = f"<{RQ};{RQ},1>"
+        o += [f"{W}cmp ({RQ}|M0)  (gt)f1.0  null<1>:f  r{T2}.0{v}:f  r{Mx}.{MO}{v}:f",
+              f"(W&~f1.0{'.any%dh' % RQ if RQ > 1 else ''}) jmpi  LATT_SKIP",
+              f"{W}add ({RQ}|M0)  r{T1}.0<1>:f  r{Mx}.{MO}{v}:f  -r{T2}.0{v}:f",
+              f"{W}math.exp ({RQ}|M0)  r{T1}.0<1>:f  r{T1}.0{v}:f"]
+        for r in range(RQ):
+            o += [f"{W}cmp (1|M0)  (gt)f0.1  null<1>:f  r{T2}.{r}<0;1,0>:f  r{Mx}.{MO + r}<0;1,0>:f",
+                  f"(W&~f0.1) jmpi  LATT_RS{r}"]
+            o += [f"        mul (8|M0)  r{x}.0<1>:f  r{x}.0<8;8,1>:f  r{T1}.{r}<0;1,0>:f"
+                  for x in [M["o"][(r, c)] for c in range(D // 8)] + [L[r]]]
+            o.append(f"LATT_RS{r}:")
+        o += [f"{W}sel ({RQ}|M0)  (ge)f0.0  r{Mx}.{MO}<1>:f  r{Mx}.{MO}{v}:f  r{T2}.0{v}:f",
+              "LATT_SKIP:"]
+        for r in range(RQ):
+            sk = [S[(r, k)] for k in range(NK)]
+            for k in range(NK):
+                o += [f"        add (8|M0)  r{sk[k]}.0<1>:f  r{sk[k]}.0<8;8,1>:f  -r{Mx}.{MO + r}<0;1,0>:f",
+                      f"        math.exp (8|M0)  r{Pe[(r, k)]}.0<1>:f  r{sk[k]}.0<8;8,1>:f"]
+            for k in range(NK):
+                o += [f"        add (8|M0)  r{L[r]}.0<1>:f  r{L[r]}.0<8;8,1>:f  r{Pe[(r, k)]}.0<8;8,1>:f",
+                      f"        mov (8|M0)  r{Po[(r, k)]}.0<1>:f  r{Pe[(r, k)]}.0<8;8,1>:f"]
+        return o
+
     def softmax():
+        if SLIM_SMAX:
+            return softmax_vec()
         o = []
         for r in range(RQ):
             sk = [S[(r, k)] for k in range(NK)]
@@ -568,10 +666,16 @@ def sched(pro, loop, epi, P, NS):
         >= nv are set to -1e30 (exp -> 0). Full blocks cost 3 scalar instructions (add, cmp, jmpi). Uses T1 (lane
         ids, :w) and T2.2 (rem, :d; read as T2.4:w), both free here (the softmax rewrites them; Mx sits in T2.4:f+ as
         dwords 4..7, not dword 2); flag f1.0 (the softmax sets it again before each use)."""
-        o = [f"{W}add (1|M0)  r{T2}.2<1>:d  {lim}<0;1,0>:d  -{cnt}<0;1,0>:d",
-             f"{W}cmp (1|M0)  (lt)f1.0  null<1>:d  r{T2}.2<0;1,0>:d  {8 * NK}:w",
-             "(W&~f1.0) jmpi  LATT_NOMASK",
-             f"{W}mov (8|M0)  r{T1}.0<1>:w  0x76543210:v"]
+        if SLIM_CNT:    # cnt already advanced, f1.1 = (cnt < lim) = another block follows -> this one is full
+            o = ["(W&f1.1) jmpi  LATT_NOMASK",
+                 f"{W}add (1|M0)  r{T2}.2<1>:d  {lim}<0;1,0>:d  -{cnt}<0;1,0>:d",
+                 f"{W}add (1|M0)  r{T2}.2<1>:d  r{T2}.2<0;1,0>:d  {8 * NK}:w",
+                 f"{W}mov (8|M0)  r{T1}.0<1>:w  0x76543210:v"]
+        else:
+            o = [f"{W}add (1|M0)  r{T2}.2<1>:d  {lim}<0;1,0>:d  -{cnt}<0;1,0>:d",
+                 f"{W}cmp (1|M0)  (lt)f1.0  null<1>:d  r{T2}.2<0;1,0>:d  {8 * NK}:w",
+                 "(W&~f1.0) jmpi  LATT_NOMASK",
+                 f"{W}mov (8|M0)  r{T1}.0<1>:w  0x76543210:v"]
         for k in range(NK):
             if k:
                 o.append(f"{W}add (1|M0)  r{T2}.2<1>:d  r{T2}.2<0;1,0>:d  -8:w")
@@ -586,15 +690,23 @@ def sched(pro, loop, epi, P, NS):
     for s in range(NS):
         out += load(s)
     out.append("LATT_LOOP:")
-    out += [f"        mov (8|M0)  r{S[k]}.0<1>:f  0.0:f" for k in sorted(S)]
+    if not SLIM_MUL:    # SLIM_MUL: the block's first K step writes S with mul (S = +0 + p and S = p differ only in
+        # the sign of a zero: exp(s - m) and the max are the same for +0 and -0)
+        out += [f"        mov (8|M0)  r{S[k]}.0<1>:f  0.0:f" for k in sorted(S)]
     for s in range(nsteps):
         out += kmads(s) if s < nks else vmads(s - nks)
         out += load(s + NS)
         if s == nks - 1:
+            if SLIM_CNT:    # loop test moved here; flag f1.1 serves the mask and the loop jump (nothing else writes it)
+                out += [f"{W}add (1|M0)  {cnt}<1>:d  {cnt}<0;1,0>:d  {8 * NK}:w",
+                        f"{W}cmp (1|M0)  (lt)f1.1  null<1>:d  {cnt}<0;1,0>:d  {lim}<0;1,0>:d"]
             out += (mask() if causal else []) + softmax()
-    out += [f"{W}add (1|M0)  {cnt}<1>:d  {cnt}<0;1,0>:d  {8 * NK}:w",
-            f"{W}cmp (8|M0)  (lt)f0.0  null<1>:d  {cnt}<0;1,0>:d  {lim}<0;1,0>:d",
-            "(W&f0.0) jmpi  LATT_LOOP"]
+    if SLIM_CNT:
+        out.append("(W&f1.1) jmpi  LATT_LOOP")
+    else:
+        out += [f"{W}add (1|M0)  {cnt}<1>:d  {cnt}<0;1,0>:d  {8 * NK}:w",
+                f"{W}cmp (8|M0)  (lt)f0.0  null<1>:d  {cnt}<0;1,0>:d  {lim}<0;1,0>:d",
+                "(W&f0.0) jmpi  LATT_LOOP"]
     # after the loop: O /= sum(l) here; IGC's l registers := 1/8 per lane so the epilogue divides by 1
     for r in range(RQ):
         out += [f"{W}add (4|M0)  r{T2}.0<1>:f  r{L[r]}.0<4;4,1>:f  r{L[r]}.4<4;4,1>:f",
@@ -606,7 +718,7 @@ def sched(pro, loop, epi, P, NS):
     # epilogue send headers that the loop may have used (live_in): zero, as IGC leaves the unused fields as found
     out += [f"{W}mov (8|M0)  r{x}.0<1>:ud  0x0:ud" for x in sorted(epi_hdr)]
     # Q is left permuted: nothing after the loop (our tail, IGC's epilogue) may read it before writing it
-    tail = out[out.index("(W&f0.0) jmpi  LATT_LOOP") + 1:]
+    tail = out[out.index("(W&f1.1) jmpi  LATT_LOOP" if SLIM_CNT else "(W&f0.0) jmpi  LATT_LOOP") + 1:]
     assert_not_read_after(qregs, tail + epi, "Q")
     isa.check_all(out, "the generated loop")
     over = max(s * 128 + k * D * 16 for s in range(NS) for k in range(NK)) + 128
@@ -641,6 +753,11 @@ def main():
             i = next(i for i, l in enumerate(loop) if MAD.match(l))
             m = MAD.match(loop[i])
             loop[i] = f"{m.group(1)}{m.group(2)}  {m.group(4)}  {m.group(6)}  -r{m.group(10)}.{m.group(11)}<0>:f"
+        if mode.startswith("sched") and os.environ.get("ATTN_POISON") == "1":
+            # test binary only (with ATTN_LOOPCHECK=0): first S mad of the generated loop with -q -> O must be wrong
+            i = next(i for i, l in enumerate(loop) if MAD.match(l))
+            loop[i] = re.sub(r"(\s)(r\d+\.\d+<0>:f)$", r"\1-\2", loop[i])
+            assert loop[i].endswith("<0>:f") and " -r" in loop[i], loop[i]
         n, c = conflicts(loop)
         if mode == "remap" or mode.startswith("sched"):   # plain/poison: conflicts expected, not checked
             isa.check_generated(loop, dd, KERNEL, f"attn_gen {mode} {opts}")

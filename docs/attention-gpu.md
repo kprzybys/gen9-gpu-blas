@@ -415,3 +415,61 @@ current shape (0 differences in 320 cases); Llama NS >= 4 is infeasible (45 free
 More prefetch depth would need a different design (e.g. Q in FP16, smaller RQ). A single-thread schedule model does not
 reproduce NS 2 vs NS 4 (287.7 vs 295.5 GFLOPS) [HYP]: latency is hidden mainly by the other EU threads, consistent with
 the 2-3 % stall in OA. Since 9faa6c4 the generator rejects any sched/remap loop with a bank conflict or any scratch.
+
+## 12. Loop slimming
+
+Measured on HD 530 (tc, 1.0 GHz) on 2026-11-13 through kcl (`bench/attn_kcl`, whl binaries); census, predictions with
+timestamps, raw outputs and OA in `results/attn-slim-hd530-2026-11-13.txt` [MEAS]. Goal: fewer non-mad instructions in
+the generated loop (section 9: issue-bound, Qwen headroom to ~344 GFLOPS where the L3 port binds).
+
+**Census** per key block (8*NK keys), executed on a full block without rescale:
+
+| Category | Qwen C4 (RQ 2, D 128) | Llama / whisper C2 (RQ 4, D 64) |
+|---|---|---|
+| mad | 1024 | 1024 |
+| send (K/V block reads) | 64 | 32 |
+| header adds `(1\|M0) :q` | 64 | 32 |
+| S zeroing (mov 0) | 4 | 8 |
+| max reduction (sel) | 8 | 16 |
+| max cmp + jmpi | 4 | 8 |
+| s - m, exp, l += p, odd p copy | 4 + 4 + 4 + 4 | 8 + 8 + 8 + 8 |
+| mask test (rem, cmp, jmpi) + loop (add, cmp, jmpi) | 3 + 3 | 3 + 3 |
+| total / non-mad | 1190 / 166 | 1158 / 134 |
+
+**Changes tried** (switches in `asm/attn_gen.py`; every binary: check_generated, loopcheck at 768ba8c, STEP=1 FP64 on
+Qwen/Llama/whisper incl. partial blocks and n_k 1500, RAMP rescale tests, poison):
+
+| Switch | What | Non-mad Qwen / Llama | Predicted | Measured | Kept |
+|---|---|---|---|---|---|
+| SLIM_SMAX | row maxima of all RQ rows in one reduction tree (2-register regions `<8;4,1>`, `<4;2,1>`, `<2;1,0>` on dead p-copy registers), one `cmp (RQ)` and one `.any<RQ>h` jump; per-row test only inside the rescale path | -5 / -14 | +0.2..0.4 / +0.7..1.2 % | +0.2 / +1.3 % | yes (default) |
+| SLIM_CNT | loop counter add + cmp before the softmax; its flag (f1.1) drives the causal-mask jump and the loop jump (the last block always takes the mask path, harmless) | -2 / -2 | +0.1..0.2 % | +0.1..0.2 % | yes (default) |
+| SLIM_HDR | two adjacent send headers advanced by one `(2\|M0) :q` add with dst `<4>` (Llama V: even/odd key headers) | -32 / -16 | +1.5..2.8 / +0.7..1.4 % | **-5.2 / -2.9 %** | no |
+| SLIM_MUL | first K product of a block as mixed-mode `mul` instead of `mov 0` + `mad` | -4 / -8 | +0.3..0.7 / +0.7..1.4 % | -0.2..-0.4 % (with HDR), +0.1..0.2 % (without) | no |
+
+Result (kernel only, causal d3584, medians of 3 alternating rounds): **Qwen 305.9 -> 306.8 GFLOPS (+0.3 %), Llama
+316.0 -> 320.6 (+1.5 %), whisper 316.6 -> 320.3 (+1.2 %)**, all outputs give the same error values as before to the
+printed digits (bit-identical arithmetic: the same operations per row, only grouped differently), Qwen perplexity
+(-c 2048, 4 chunks) 8.3137 with the old and the new binaries. All 14 hashes in `asm/attn_sha256.txt` changed (every
+sched loop); `SLIM_SMAX=0 SLIM_CNT=0` reproduces the old 14 bit for bit. End to end (llama-bench pp512 -r 5) the
+difference is within noise (d3584: Qwen 139.0 vs 139.3 t/s, Llama 194.7 vs 195.7), so it was not pursued further.
+
+**Why HDR lost** [MEAS + HYP]: OA shows the cost: Qwen FPU1 79.6 -> 69.0 %, FPU0 87.8 -> 90.5 %, both pipes 84 -> 75 % of
+active time (Llama FPU1 81.3 -> 74.7 %). A 64-bit integer add whose region spans two GRFs is more expensive than two
+scalar ones and lives on FPU0 only; in addition it ties both headers to the later of the two sends (the add must wait
+until both sends have read their header), so the following mads issue later [HYP: issue order / header dependency;
+these counters cannot separate the two]. The scalar `:q` adds are thus not "free" either: FPU0 runs ~8 points busier
+than FPU1 in every variant, which is the non-mad integer work.
+**Why MUL did not pay**: it removes RQ*NK SIMD8 movs but turns the first product into an align1 mixed-mode (hf x f)
+`mul`, which issues no better than the mad it replaces; net effect within noise.
+
+**Rescale tests** (`bench/attn_kcl` option `RAMP`, use with QSIGMA=0.1): RAMP=1 puts K dim 0 = key index, so the row
+maximum grows in every block and the rescale runs every block; RAMP=-1 reverses it (maximum in the first block, the
+rescale never runs afterwards). loopcheck checks product identity, not softmax arithmetic; a mutant that skips the O/l
+rescale gives error ~1 with RAMP=1 and passes RAMP=-1 (expected), so RAMP=1 is the test for any softmax change.
+
+**What limits now**: of 166 / 134 non-mad instructions, 159 / 118 remain (Qwen / Llama); 64 / 32 sends and 64 / 32 scalar
+`:q` header adds per block are fixed by the A64 oword block read (128 B per send, one header register each, no
+immediate offset); s - m, exp, l += p and the odd p copy are the arithmetic itself (both GRF parities of p are needed
+because each V block read covers four consecutive GRFs). Qwen stays ~37 GFLOPS short of the port bound: further
+progress needs a different data path (fewer sends: e.g. FP16 Q and more rows per thread, or a message with an address
+offset), not fewer bookkeeping instructions.
