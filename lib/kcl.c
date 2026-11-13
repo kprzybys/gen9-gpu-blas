@@ -21,6 +21,7 @@
 #include "gen9_pack.h"
 #include "kcl_desc.h"
 #include <time.h>
+#include <sched.h>
 
 static uint32_t MOCS_WB = 2 << 1;   // [HIP] index 2 of the i915 MOCS table (SKL) = WB, like Mesa; KCL_MOCS=n: a different index (diagnostics)
 #define L3_SLM 0x60000321u          // L3CNTLREG with SLM (NEO gen9/reg_configs.h)
@@ -40,6 +41,8 @@ struct _cl_kernel {
 struct _cl_event { uint64_t seq; int ts, ts_k; int ref; };   // ts, ts_k: start and end timestamps (-1: none)
 
 static int fd = -1; static uint32_t ctx_id; static int kprofile, kprofile_kernels;
+static long eagain_retries;   // execbuffer2 EAGAIN retries (KCL_EAGAIN=1 prints the total at exit)
+static void eagain_print(void) { fprintf(stderr, "kcl: execbuffer2 EAGAIN retries: %ld\n", eagain_retries); }
 // KCL_PROFILE_KERNELS=1: timestamps around each kernel, the sum of times per name is printed at process exit
 typedef struct { const char *name; int ts0, ts1; } meas_t;
 static meas_t meas[TS_MAX / 2]; static int nmeas;
@@ -333,8 +336,18 @@ static int submit(void) {
         .rsvd1 = ctx_id };
     int r;
     PHASE_BEGIN;
-    // EAGAIN: i915 could not bind userptr pages that were being invalidated (swap, compaction); libdrm drmIoctl retries it too.
-    while ((r = ioctl(fd, DRM_IOCTL_I915_GEM_EXECBUFFER2, &eb)) && (errno == EINTR || errno == EAGAIN)) {}
+    // EAGAIN: i915 could not bind userptr pages that were being invalidated (swap, compaction); libdrm drmIoctl retries it
+    // too, but without a bound. Here: yield the CPU after the first tries and give up after EAGAIN_MAX, so the caller's
+    // fallback (pack_b_q retries with a copy instead of userptr) runs instead of a 100 % CPU spin under heavy swapping.
+    // KCL_EAGAIN=1 prints the number of retries at exit.
+    enum { EAGAIN_MAX = 20000 };
+    int tries = 0;
+    while ((r = ioctl(fd, DRM_IOCTL_I915_GEM_EXECBUFFER2, &eb)) && (errno == EINTR || errno == EAGAIN)) {
+        if (errno == EINTR) continue;
+        eagain_retries++;
+        if (++tries >= EAGAIN_MAX) break;
+        if (tries > 16) sched_yield();
+    }
     PHASE_END(F_EXEC); if (phases) fz_objects += n;
     seq_sent = s->seq; cur = -1;
     if (r) {
@@ -381,6 +394,7 @@ static int init(void) {
     ctx_id = cc.ctx_id;
     resets_seen = reset_count();
     kprofile_kernels = getenv("KCL_PROFILE_KERNELS") != NULL;
+    if (getenv("KCL_EAGAIN")) atexit(eagain_print);
     kprofile = getenv("GEN9BLAS_PROFILE") != NULL || kprofile_kernels;
     const char *um = getenv("KCL_USERPTR_MB");
     up_limit = (uint64_t)(um && *um ? atoi(um) : 1024) << 20;   // pinned process memory

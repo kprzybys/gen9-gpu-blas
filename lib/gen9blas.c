@@ -601,7 +601,10 @@ static int pack_b_q_bands(int qt, size_t rb, const void *W, gen9blas_packed *P, 
     // v2 (SLM staging, contiguous 32 B writes; needs K % 256 == 0); GEN9BLAS_DEQ=v1 keeps the first kernel for comparisons
     static int v1 = -1;
     if (v1 < 0) { const char *e = getenv("GEN9BLAS_DEQ"); v1 = e && !strcmp(e, "v1"); }
-    if (k_dequant2 && !v1 && P->K % 256 == 0) {
+    // v2 loads 16 B for Q8_0 / Q4_K: every row start W + n * rb must be 16 B aligned (always so for ggml tensors: 32 B
+    // aligned data, rows of 272 / 144 B multiples); anything else goes to v1. Q6_K loads 2 B.
+    const int aligned = qt == 2 ? !(((uintptr_t)W | rb) & 1) : !(((uintptr_t)W | rb) & 15);
+    if (k_dequant2 && !v1 && P->K % 256 == 0 && aligned) {
         cl_kernel k2 = k_dequant2;
         ARGB(k2, 0, xW); ARG(k2, 1, rbl); ARG(k2, 2, qt); ARG(k2, 3, P->N); ARG(k2, 4, P->Kp); ARGB(k2, 7, xnf);
         ARG(k2, 6, P->buf);
