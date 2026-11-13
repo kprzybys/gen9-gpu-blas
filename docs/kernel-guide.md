@@ -62,7 +62,10 @@ Also check the platform settings that act like a kernel change: EU thread arbitr
    costs ~2 instructions per 16 mads (+12.5 %) on a loop that is already issue-bound with 0-1 free registers, so it
    wins at most +5-14 % and only where weights are dequantized per use (7B); the scales fold into the 32-k carry for
    ~3 % [EST, `results/qgemm-model-2026-11-13.txt`]. Count the added instructions against the loop's non-mad budget
-   and the free registers (solver budget) before writing a fused kernel.
+   and the free registers (solver budget) before writing a fused kernel. The same count decides "memory-bound": a
+   small-batch Q4_K kernel (k <= 8 tokens) was modelled memory-bound at ~49 ms per pass and measured issue-bound at
+   38 % of FP32 peak (decode, broadcasts and activation loads are 45 % of its instructions; FP32 needs one SIMD8 mad
+   per weight at k = 8), only at parity with the FP16 path [MEAS, `results/skinny-q4k-model-2026-11-13.txt`].
 
 ## 2. Rules at the OpenCL C level
 
