@@ -37,6 +37,7 @@ class Machine:
         self.b = {}                     # absolute byte -> (value, k)
         self.flags = {}
         self.attn = attn
+        self.qregs = set()              # attention: registers holding Q at loop entry (igc_maps), see attn_value
         cr, cs = self.loc(counter)
         lr, ls = self.loc(limit)
         self.write(cr * 32 + cs * 4, 4, ("C", 0))
@@ -189,7 +190,7 @@ def run(lines, m, max_steps=200000):
                 srcv.append((v, so[4], sa, sts))
             if m.attn and (dt in FLOAT or op in ("mad", "sel") or op.startswith("math")) and \
                     not (op == "mov" and isa.TS[(srcv[0][1] if srcv else dt)] == dts and srcv and srcv[0][1] == dt):
-                outs.append(("w", da, dts, attn_value(op, srcv, ops[1:], im)))
+                outs.append(("w", da, dts, attn_value(op, srcv, ops[1:], im, m.qregs)))
                 continue
             if op == "mov":
                 if im is not None:
@@ -269,15 +270,16 @@ def product(b, a):
     return tuple(sorted((ident(b), ident(a)), key=repr))
 
 
-def attn_value(op, srcv, src_ops, im):
+def attn_value(op, srcv, src_ops, im, qregs=frozenset()):
     vals = [s[0] for s in srcv]
     if op == "mad":
         c, b, a = vals
         items = c[1] if c[0] == "chain" else ()
         return ("chain", items + (product(b, a),))
-    if op == "mul" and all(v[0] in ("MV", "id") for v in vals):
-        # chain started by mul (no mov 0 + mad): both factors memory-derived (K and Q), none a chain; a mul with a
-        # chain (O * alpha) or with a kernel argument / constant (Q * scale) keeps the identity rule below
+    if op == "mul" and all(v[0] in ("MV", "id") or (v[0] == "I" and v[1] // 32 in qregs) for v in vals):
+        # chain started by mul (no mov 0 + mad): both factors are K / Q elements (memory, or Q's registers at loop
+        # entry), none a chain; a mul with a chain (O * alpha) or with any other entry value / constant keeps the
+        # identity rule below
         return ("chain", (product(vals[0], vals[1]),))
     if op == "mov" and im is not None:
         return ("const",)
@@ -324,6 +326,7 @@ def verify_attn_parts(pro, loop, epi, npro, nloop, P, iterations=2):
     kt = iterations * 8 * P["NK"]
     mi = Machine(M["cnt"], M["lim"], attn=True, k_total=kt)
     mg = Machine(M["cnt"], M["lim"], attn=True, k_total=kt)
+    mi.qregs = mg.qregs = set(M["q"].values())
     run(loop, mi)
     run(extra + nloop, mg)
     bad, lost = [], 0
