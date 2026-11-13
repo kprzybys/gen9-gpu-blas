@@ -352,6 +352,9 @@ __kernel void pkf_b32(__global const float *B, __global float *Bp, int K, int N,
 __kernel void pkf_b32_t(__global const float *B, __global float *Bp, int K, int N, int ldb, int Kp, long sB, int Np) {
     const int k = get_global_id(0), n = get_global_id(1), b = get_global_id(2);
     Bp[(size_t)b * Np * Kp + PKF32_IDX_B(n, k, Kp)] = (n < N && k < K) ? B[b * sB + (size_t)n * ldb + k] : 0.0f; }
+#ifndef GM8
+#define GM8 4   // tile rows per group in the tile order of sgemm8_v32; measured best of 2-64 (docs/gen8.md 6e)
+#endif
 #define S8C(v, i) ((i) == 0 ? (v).s0 : (i) == 1 ? (v).s1 : (i) == 2 ? (v).s2 : (i) == 3 ? (v).s3 : \
                    (i) == 4 ? (v).s4 : (i) == 5 ? (v).s5 : (i) == 6 ? (v).s6 : (v).s7)
 __attribute__((intel_reqd_sub_group_size(8)))
@@ -360,9 +363,9 @@ __kernel void sgemm8_v32(__global const uint *Ap, __global const uint *Bp, __glo
     const int pid0 = get_group_id(0) * get_num_sub_groups() + get_sub_group_id();
     const int npm = M / 16, npn = N / 32;
     const int b = pid0 / (npm * npn), pid = pid0 % (npm * npn);
-    const int group = pid / (GM * npn), m_first = group * GM;
-    const int gsz = min(npm - m_first, GM);
-    const int pm = m_first + (pid % (GM * npn)) % gsz, pn = (pid % (GM * npn)) / gsz;
+    const int group = pid / (GM8 * npn), m_first = group * GM8;
+    const int gsz = min(npm - m_first, GM8);
+    const int pm = m_first + (pid % (GM8 * npn)) % gsz, pn = (pid % (GM8 * npn)) / gsz;
     // 32-bit offsets (a 4 GB address space): the 64-bit (size_t) products miscomputed the batch offset here [MEAS]
     Ap += (uint)b * (uint)(M * Kfull); Bp += (uint)b * (uint)(N * Kfull); C += (uint)b * (uint)(M * ldc);
     float acc[16][4];
