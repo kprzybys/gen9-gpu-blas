@@ -61,3 +61,55 @@ F4. Hybrid sgetrf with lookahead below 0.8x of OpenBLAS sgetrf at n = 4096 -> th
 Order: (1) microbenchmark the rank-nb update shapes (F1, ~10 min GPU); (2) OpenBLAS spotrf/sgetrf/dposv baselines on kp
 at both power states (CPU-heavy: needs the shared-GPU lock); (3) potrf v1 in lib/ (C, OpenBLAS for potf2) with a test against
 LAPACK; (4) posv with refinement; (5) getrf with lookahead.
+
+## Measured, steps 1-2 (kp, 2026-11-13 22:16-22:33, approval, shared-GPU lock)
+Script: bench/lapack_baseline.py. Package power from RAPL (constraints: long_term 200 W / 32 s, short_term 51 W / 2.4 ms as set on kp), coretemp package temperature, OpenBLAS threads default (8).
+
+### Step 1: rank-nb update on the GPU (FP32, beta = 1, ordinary NumPy arrays)
+sgemm m= 2048 nb=256      9.26 ms   231.9 GFLOPS  (median  226.3)  package  18.5 W  82 C
+ssyrk m= 2048 nb=256      6.21 ms   172.9 GFLOPS  (median  169.9)  package  20.0 W  82 C
+sgemm m= 2048 nb=512     14.99 ms   286.5 GFLOPS  (median  286.1)  package  25.2 W  82 C
+ssyrk m= 2048 nb=512     10.17 ms   211.1 GFLOPS  (median  210.7)  package  24.3 W  82 C
+sgemm m= 4096 nb=256     33.01 ms   260.2 GFLOPS  (median  258.9)  package  19.8 W  82 C
+ssyrk m= 4096 nb=256     21.82 ms   196.8 GFLOPS  (median  196.4)  package  18.8 W  62 C
+sgemm m= 4096 nb=512     56.84 ms   302.3 GFLOPS  (median  291.9)  package  21.0 W  62 C
+ssyrk m= 4096 nb=512     37.26 ms   230.5 GFLOPS  (median  229.2)  package  20.2 W  62 C
+sgemm m= 8192 nb=256    137.63 ms   249.7 GFLOPS  (median  246.7)  package  26.9 W  64 C
+ssyrk m= 8192 nb=256     84.06 ms   204.4 GFLOPS  (median  197.0)  package  20.1 W  64 C
+sgemm m= 8192 nb=512    224.60 ms   306.0 GFLOPS  (median  303.4)  package  21.7 W  66 C
+ssyrk m= 8192 nb=512    142.98 ms   240.3 GFLOPS  (median  238.4)  package  21.4 W  67 C
+F1 (update >= 220 GFLOPS): SGEMM passes at nb = 512 (286-306) and fails at nb = 256 for m = 2048 (232 ok, but SYRK
+173-204 at nb = 256 fails); SSYRK nb = 512 211-240 (borderline). -> Cholesky with nb = 512; the potrf prediction moves to
+the bottom of its range: ~170 / ~200 / ~220 GFLOPS at n = 2048 / 4096 / 8192 (SYRK ~230, TRSM ~180-200 assumed).
+
+### Step 2: OpenBLAS LAPACK (scipy 1.11 -> system libopenblas pthread), sustained (after 35 s of spotrf load)
+spotrf n= 2048       69.9 ms    41.0 GFLOPS  package  21.8 W  81 C
+dpotrf n= 2048       99.0 ms    28.9 GFLOPS  package  24.7 W  81 C
+sgetrf n= 2048       89.1 ms    64.3 GFLOPS  package  20.2 W  81 C
+dgetrf n= 2048      141.3 ms    40.5 GFLOPS  package  19.4 W  82 C
+dposv n= 2048       89.3 ms    32.0 GFLOPS  package  21.0 W  82 C
+spotrf n= 4096      380.1 ms    60.3 GFLOPS  package  16.8 W  88 C
+dpotrf n= 4096      697.7 ms    32.8 GFLOPS  package  17.2 W  77 C
+sgetrf n= 4096      515.2 ms    88.9 GFLOPS  package  18.6 W  84 C
+dgetrf n= 4096     1028.8 ms    44.5 GFLOPS  package  18.7 W  74 C
+dposv n= 4096      566.6 ms    40.4 GFLOPS  package  17.5 W  88 C
+spotrf n= 8192     2468.7 ms    74.2 GFLOPS  package  13.3 W  79 C
+dpotrf n= 8192     5205.0 ms    35.2 GFLOPS  package  13.5 W  83 C
+sgetrf n= 8192     3652.6 ms   100.3 GFLOPS  package  13.7 W  88 C
+dgetrf n= 8192     7566.6 ms    48.4 GFLOPS  package  15.8 W  82 C
+dposv n= 8192     5104.6 ms    35.9 GFLOPS  package  13.2 W  67 C
+turbo (first call after 30 s idle), n = 4096:
+spotrf n= 4096      508.7 ms    45.0 GFLOPS  package  11.1 W  71 C
+dpotrf n= 4096      744.3 ms    30.8 GFLOPS  package  14.0 W  79 C
+sgetrf n= 4096      702.1 ms    65.3 GFLOPS  package  13.5 W  62 C
+dgetrf n= 4096     1130.4 ms    40.5 GFLOPS  package  12.9 W  65 C
+dposv n= 4096      782.6 ms    29.3 GFLOPS  package  10.4 W  67 C
+The model's assumption "OpenBLAS LAPACK runs at its SGEMM rate (170-300 GFLOPS)" is FALSIFIED: spotrf 41-74, sgetrf
+64-100, dpotrf/dposv 29-36, dgetrf 40-48 GFLOPS, with package power only 10-25 W (OpenBLAS SGEMM drew 39-41 W) and the
+"turbo" set not faster than the sustained one. So the CPU was not fully busy in OpenBLAS's LAPACK (panel / thread
+scaling) and/or was thermally limited (temperature 62-88 C at the start of calls). CPU utilisation was not recorded: a gap.
+Consequence for the ceilings (to be confirmed by measuring the hybrid, not yet written):
+  hybrid spotrf (~200-220 GFLOPS predicted) vs OpenBLAS spotrf 60-74 at n = 4096-8192: ~3x, not 1.0-1.5x;
+  mixed-precision posv vs OpenBLAS dposv 36-40 GFLOPS: ~4-5x at n = 8192 (refinement included), not 2.7-3.3x.
+Not done (decision 2026-11-13 night: no new tasks): potrf v1 in lib/, posv with refinement, getrf with lookahead, a CPU
+utilisation check of the OpenBLAS baselines.
