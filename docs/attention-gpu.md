@@ -145,7 +145,9 @@ closed at this level (OpenCL C through IGC 24.35).** What limits it:
 - Mixed-mode `mad` (FP16 operand, FP32 accumulator) is not the problem: it runs at the full FP32 rate
   (`k_mix` in `bench/attn_micro.cl`: 323 GFLOPS for both).
 - FP16 arithmetic, the only way past the FP32 ceiling, costs accuracy: 8-dim FP16 partial sums already give
-  2.4-2.6e-3 (> 2e-3), and broadcast-scalar FP16 `mad`s lose the double rate.
+  2.4-2.6e-3 (> 2e-3). The suggested cause "broadcast-scalar FP16 `mad`s lose the double rate" is [HYP]: only
+  two-operand `mul`/`add` were measured that way, and the asm HGEMM runs `mad (16) :hf` with a scalar operand at
+  777 GFLOPS; see [isa-notes.md](isa-notes.md) for the alternative (SIMD8 `:hf` packs 8 halves per instruction).
 
 Implications for stage 3: integration is not started. A 2.0x gain on attention would cut a Qwen 512-token ubatch at
 d = 3584 by about 25 % (6.09 -> ~4.6 s) at the cost of a new ggml op with masks for three model families; by the
@@ -176,7 +178,11 @@ built for `whl`.
 its use, and with ~6 threads per EU the read latency stays exposed; the hand loop keeps the next one to three steps
 in flight (+25 % over the same template in OpenCL C). Removing the conflicts alone gave nothing for Qwen.
 
-What limits it now [EST]: L3 read bandwidth for Qwen. At 2 rows per thread each 128 B block read feeds 16 SIMD8
+What limits it now: the first explanation below ([EST], L3 read bandwidth) is contradicted by the OA counters
+(`results/oa-attention-hd530-2026-11-13.txt`): stalls are 2-3 %, both FPU pipes are busy 86-88 % of active time,
+L3 traffic is 112-118 GB/s, and the loss is ~20 % (Qwen) / 13 % (Llama) of EU time without a thread [MEAS];
+[HYP] work distribution (work-group granularity, grid tail); `LOCAL=24` is 3.5 % faster with less idle time.
+The original estimate, kept for the record: L3 read bandwidth for Qwen. At 2 rows per thread each 128 B block read feeds 16 SIMD8
 mads (8 B per mad), and 296 GFLOPS is 148 GB/s = 148 B per clock, the block-read ceiling measured on UHD 620
 (155-158 GB/s at ~1.1 GHz). More speed would need more query rows per thread, but FP32 Q and O already take 64 of
 128 GRF at d_head 128, and SLM shares the L3 data port. Llama (4 rows, 4 B per mad) is not bandwidth-bound; at 81 %

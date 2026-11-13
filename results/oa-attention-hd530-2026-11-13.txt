@@ -1,0 +1,38 @@
+# i915 OA counters (metric set ComputeBasic) during the attention kernels, desktop HD 530 (i5-6500), 2026-11-13
+# Tools: igt i915-perf-recorder / i915-perf-reader (intel-gpu-tools), needs dev.i915.perf_stream_paranoid = 0.
+# Recording: i915-perf-recorder -m ComputeBasic -p 0.005 around 3 runs of bench/attn (n_q 512, n_k 4096);
+# reader: i915-perf-reader -r -c <counters>; summary = reports with GpuBusy > 95 %, weighted by GpuTime
+# (percentages) or summed bytes / summed GpuTime (throughputs). Reports come only at context switches here
+# (18-21 busy reports, 74-116 ms of GPU time), so each line is an average over whole kernel launches.
+# GPU clock 980-987 MHz in every recording. nice 19 / ionice idle; background service ~31 % of one CPU core.
+
+kernel (GFLOPS during the recording)       EuActive EuStall idle* Occup  BothFPU FPU0  FPU1  Send  IPC   L3 GB/s GTI GB/s
+OpenCL C variant A, Qwen, local 128 (216)   63.2     9.4    27.4   63.3   39.5    53.6  48.9  2.5   1.62   75.5    0.8
+asm C4, Qwen, local 128 (296)                74.3     2.9    22.8   70.4   64.1    71.4  66.9  3.7   1.86  112.2   12.9
+asm C4, Qwen, local 24 (306-307)             74.5     8.0    17.5   64.2   58.3    71.1  61.4  3.6   1.77  107.6    1.7
+asm C2, Llama, local 128 (310)               84.0     3.4    12.6   79.8   73.6    82.1  75.3  2.3   1.87   66.2    4.8
+* idle = 100 - EuActive - EuStall: EU time with neither instructions issuing nor a stalled thread (no thread on the EU).
+
+## Reading
+- The asm kernels are not stall-limited: EuStall 3 % (Qwen) / 3.4 % (Llama). When an EU is active, both FPU
+  pipes are busy 86-88 % of the time (BothFPU / EuActive). The remaining gap to the peak is EU time WITHOUT work:
+  23 % (Qwen) / 13 % (Llama) idle, with thread occupancy 70 % / 80 %.
+- This contradicts the stage 2b explanation "Qwen sits on the L3 read bandwidth": L3 shader throughput is 112 GB/s
+  (the kernel's own estimate was ~148) and stalls are 3 %. [HYP] The idle time comes from work distribution:
+  thread dispatch granularity (a 128-item work-group = 16 SIMD8 threads; 56 thread slots per subslice hold 3
+  work-groups = 48 threads = 86 % at most) and the tail of the grid. local 24 (3 threads per group) is 3.5 %
+  faster with less idle time (17.5 %), consistent with this, though stalls rise to 8 %.
+- The OpenCL C variant A: more idle (27 %) and more stall (9 %), BothFPU only 39.5 % -> its loss is mostly in the
+  instruction stream (fewer dual-issued mads), as stage 2 concluded, plus the same idle share.
+- Llama (4 rows per subgroup, more work per thread) has the highest occupancy and least idle time.
+- GTI read throughput (memory side of L3) varies 0.8-12.9 GB/s between runs of similar kernels; not interpreted
+  until its units/semantics are checked (it may count only part of the traffic).
+Next lever for Qwen, by these counters: the ~20 % idle EU time (work-group size / grid shape / persistent threads),
+not memory.
+
+## Repeatability with the repo scripts (bench/oa.sh + bench/oa_sum.py), asm C4 Qwen local 128, 3 runs (295.3 GFLOPS)
+OA ComputeBasic: 18 busy reports of 45, GPU time 124.3 ms, clock 989 MHz
+EU active 77.1 %  stall 2.1 %  idle 20.8 %  occupancy 73.3 %
+FPU both 67.1 % (87 % of active)  FPU0 74.2 %  FPU1 69.9 %  send 3.9 %  IPC 1.87
+L3ShaderThroughput 117.95 GB/s  GtiReadThroughput 12.46 GB/s  GtiWriteThroughput 0.07 GB/s  SlmBytesRead 0.00 GB/s  SlmBytesWritten 0.00 GB/s
+Against the first recording (74.3 / 2.9 / 22.8 / 70.4, both 86 % of active): repeatable within about 3 points.

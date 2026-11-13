@@ -89,3 +89,6 @@ Other measurement programs in `bench/`: `hgemm.c` / `sgemm.c` (single GEMM kerne
 5. For long GPU runs, record clock and power (`bench/power.sh`); for CPU baselines watch the PL2 to PL1 drop.
 6. Write the conditions (date, power source, memory kind, method) at the top of the result file and tag every
    statement with its evidence class ([MEAS], [SW], [EST], [HYP]).
+7. For a GPU kernel result, add the OA breakdown next to the GFLOPS: `bench/oa.sh -n 3 <command>` (EU active /
+   stall / idle, both FPU pipes, send, L3/GTI/SLM traffic; needs `dev.i915.perf_stream_paranoid=0`). Explain a
+   bottleneck from these numbers, not from the rate alone ([isa-notes.md](isa-notes.md), "OA counters").

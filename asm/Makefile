@@ -10,6 +10,7 @@
 # Per binary: template (OpenCL C) --ocloc--> disassembly dir <name>.d --generator `loop` mode + map--> .bin
 # Library binaries: gen_h, gen_hd, gen_s (embedded by lib/Makefile); older experiments: hgemm_asm, hgemm_kc_asm, sgemm_asm.
 # gen_h and gen_hd share the template gen_h.cl (they patch different kernels: hgemm_v and hgemm_kc_v).
+# Guide to writing a new hand-assembled kernel (rules, workflow, checklist): ../docs/isa-notes.md
 BIN_DIR ?= ../bench
 BINS = gen_h gen_hd gen_s hgemm_asm hgemm_kc_asm sgemm_asm
 MAPS = h hd s hgemm hgemm_kc sgemm

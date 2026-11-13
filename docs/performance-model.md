@@ -7,6 +7,7 @@ not with another kernel variant.
 Hardware facts and their Intel citations are in [hardware.md](hardware.md). Measurement method and how to reproduce
 results is in [benchmarks.md](benchmarks.md). Chronology of how the numbers were obtained is in [history.md](history.md);
 the gotchas behind several rows below are in [pitfalls.md](pitfalls.md).
+How to write hand-assembled Gen9 ISA kernels with these constants: [isa-notes.md](isa-notes.md).
 
 Conventions:
 
