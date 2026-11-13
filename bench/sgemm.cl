@@ -327,3 +327,68 @@ __kernel void trsm_inv3_f(int n, int nb, __global const double *X, __global floa
     if (i >= b || j >= b) return;
     WR(out, (size_t)bi * nb * nb + (size_t)i * b + j, j <= i ? (float)RDD(X, (size_t)bi * nb * nb + (size_t)i * nb + j) : 0.0f);
 }
+
+#ifdef GEN8_CHV
+// ---------- Gen8 Cherryview SGEMM variants (docs/gen8.md 6d; chosen in lib/gen9blas.c) ----------
+// sgemm8_v32: tile 16 rows x 32 columns per subgroup of 8 (sgemm_v: 16 x 16, SIMD16). 3 KB read per 16-k step for
+// 16 384 multiply-adds instead of 2 KB for 8 192 (less traffic per flop; CHV has no LLC). SIMD8 because a per-lane
+// value takes one GRF there (two in SIMD16): 64 accumulators (lane l: columns l, l+8, l+16, l+24) + A for 4 k (8) +
+// B for 2 k (8) fit in the 128 GRF without spilling. Packed layouts:
+//   A (pkf_a8*): 16-row panel, 16-k block = 4 quarters x [16 rows][4 k]; a block read of a quarter (64 values) gives
+//     lane l rows 2i + l/4 (component i) at k = l % 4. Piece offsets as for sgemm_v (i0*Kp + k0*16).
+//   B (pkf_b32*): 32-column panels [n/32][k][32]; a block read of 2 k (64 values) gives lane l columns l + 8j at
+//     k = j / 4 (component j: column l + 8 (j % 4)).
+#define PKF8_IDX_A(m, k, Kp) (((size_t)((m) / 16) * ((Kp) / 16) + (k) / 16) * 256 + ((k) % 16 / 4) * 64 + ((m) % 16) * 4 + (k) % 4)
+#define PKF32_IDX_B(n, k, Kp) (((size_t)((n) / 32) * (Kp) + (k)) * 32 + (n) % 32)
+__kernel void pkf_a8(__global const float *A, __global float *Ap, int M, int K, int lda, int Kp, long sA, int Mp) {
+    const int k = get_global_id(0), m = get_global_id(1), b = get_global_id(2);
+    Ap[(size_t)b * Mp * Kp + PKF8_IDX_A(m, k, Kp)] = (m < M && k < K) ? A[b * sA + (size_t)m * lda + k] : 0.0f; }
+__kernel void pkf_a8_t(__global const float *A, __global float *Ap, int M, int K, int lda, int Kp, long sA, int Mp) {
+    const int m = get_global_id(0), k = get_global_id(1), b = get_global_id(2);
+    Ap[(size_t)b * Mp * Kp + PKF8_IDX_A(m, k, Kp)] = (m < M && k < K) ? A[b * sA + (size_t)k * lda + m] : 0.0f; }
+__kernel void pkf_b32(__global const float *B, __global float *Bp, int K, int N, int ldb, int Kp, long sB, int Np) {
+    const int n = get_global_id(0), k = get_global_id(1), b = get_global_id(2);
+    Bp[(size_t)b * Np * Kp + PKF32_IDX_B(n, k, Kp)] = (n < N && k < K) ? B[b * sB + (size_t)k * ldb + n] : 0.0f; }
+__kernel void pkf_b32_t(__global const float *B, __global float *Bp, int K, int N, int ldb, int Kp, long sB, int Np) {
+    const int k = get_global_id(0), n = get_global_id(1), b = get_global_id(2);
+    Bp[(size_t)b * Np * Kp + PKF32_IDX_B(n, k, Kp)] = (n < N && k < K) ? B[b * sB + (size_t)n * ldb + k] : 0.0f; }
+#define S8C(v, i) ((i) == 0 ? (v).s0 : (i) == 1 ? (v).s1 : (i) == 2 ? (v).s2 : (i) == 3 ? (v).s3 : \
+                   (i) == 4 ? (v).s4 : (i) == 5 ? (v).s5 : (i) == 6 ? (v).s6 : (v).s7)
+__attribute__((intel_reqd_sub_group_size(8)))
+__kernel void sgemm8_v32(__global const uint *Ap, __global const uint *Bp, __global float *C,
+                         int M, int N, int ldc, int K, int Kfull) {
+    const int pid0 = get_group_id(0) * get_num_sub_groups() + get_sub_group_id();
+    const int npm = M / 16, npn = N / 32;
+    const int b = pid0 / (npm * npn), pid = pid0 % (npm * npn);
+    const int group = pid / (GM * npn), m_first = group * GM;
+    const int gsz = min(npm - m_first, GM);
+    const int pm = m_first + (pid % (GM * npn)) % gsz, pn = (pid % (GM * npn)) / gsz;
+    Ap += (size_t)b * M * Kfull; Bp += (size_t)b * N * Kfull; C += (size_t)b * M * ldc;
+    float acc[16][4];
+    for (int r = 0; r < 16; r++) for (int j = 0; j < 4; j++) acc[r][j] = 0;
+    __global const uint *pa = Ap + (size_t)pm * (Kfull / 16) * 256;
+    __global const uint *pb = Bp + (size_t)pn * Kfull * 32;
+    for (int k = 0; k < K; k += 4) {
+        const uint8 a = intel_sub_group_block_read8(pa);   // 16 rows x 4 k
+        pa += 64;
+        __attribute__((opencl_unroll_hint))
+        for (int h = 0; h < 2; h++) {
+            const uint8 bq = intel_sub_group_block_read8(pb);   // 2 k x 32 columns
+            pb += 64;
+            __attribute__((opencl_unroll_hint))
+            for (int kk = 0; kk < 2; kk++) {
+                __attribute__((opencl_unroll_hint))
+                for (int r = 0; r < 16; r++) {
+                    const float av = as_float(sub_group_broadcast(S8C(a, r / 2), (r % 2) * 4 + 2 * h + kk));
+                    __attribute__((opencl_unroll_hint))
+                    for (int j = 0; j < 4; j++) acc[r][j] = fma(av, as_float(S8C(bq, 4 * kk + j)), acc[r][j]);
+                }
+            }
+        }
+    }
+    for (int r = 0; r < 16; r++) {
+        __global uint *c = (__global uint *)(C + (size_t)(pm * 16 + r) * ldc + pn * 32);
+        for (int j = 0; j < 4; j++) intel_sub_group_block_write(c + 8 * j, as_uint(acc[r][j]));
+    }
+}
+#endif

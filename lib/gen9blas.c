@@ -159,6 +159,10 @@ int gen9blas_init(const char *dir) {
         { GEN9BLAS_HS, "gen_hd.bin", "hgemm_kc_v", "pk_a3", "pk_b16", "gen9blas_epilog_b",  "gen9blas_epilog_tri",  2, 16, GEN9BLAS_KC, ph },
         { GEN9BLAS_S,  "gen_s.bin",  "sgemm_v",    "pkf_a", "pkf_b",  "gen9blas_epilog_fb", "gen9blas_epilog_trif", 4, 16, 16, ps },
         { GEN9BLAS_D,  NULL,         "dgemm_v",    "pkd_a", "pkd_b",  "gen9blas_epilog_db", "gen9blas_epilog_trid", 8, 16, 16, pd } };
+    // Gen8 SGEMM: sgemm8_v32 (16 x 32 tile, SIMD8, its own packed layouts; bench/sgemm.cl); GEN9BLAS_SGEMM8=v: the
+    // OpenCL frame sgemm_v of the Gen9 kernel (comparisons, docs/gen8.md 6d)
+    const char *s8 = getenv("GEN9BLAS_SGEMM8");
+    if (gen8 && !(s8 && !strcmp(s8, "v"))) { t[2].k = "sgemm8_v32"; t[2].pa = "pkf_a8"; t[2].pb = "pkf_b32"; t[2].tn = 32; }
     for (int i = 0; i < 4; i++) {
         if (gen8 && t[i].es == 2) continue;   // FP16: not on Gen8 yet
         type_t *r = &types[t[i].r]; char n[64];
