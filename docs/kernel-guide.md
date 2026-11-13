@@ -110,7 +110,10 @@ as the best vendor generators (MaxAs, AMD Tensile, oneDNN's nGEN): parameters pl
    accumulators must hold identical expressions (same products, same order = bit-identical), or, when the template
    assumes another packed layout (h, s), identical expressions up to a consistent bijection of memory elements.
    Self-tests: a swapped register, a wrong load offset and a swapped accumulation order are all rejected.
-   Attention (other order than IGC by design) still needs a multiset mode.
+   Attention (`attn_gen.py` sched, order differs from IGC by design): for every O element the multiset of
+   (V element, identity of p) must equal IGC's, where p's identity is traced through the softmax to the multiset of
+   (K element, Q element) of its score; checks both mad phases on all six shapes (incl. QTOK and CAUSAL), not the
+   softmax arithmetic. Mutations (Q element, V register, K offset) are rejected. `ATTN_LOOPCHECK=0` skips it.
 3. **Pin the tool chain and hash the output** (already done: `ocloc` version check, `make -C asm check`). Hashes
    catch regressions; they do not prove a new variant correct.
 4. **Correctness gate per variant:** FP64 reference over the whole output (`STEP=1` in `bench/attn`), error bound

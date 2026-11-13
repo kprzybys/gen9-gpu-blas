@@ -34,13 +34,14 @@ class Unsupported(Exception):
 
 
 class Machine:
-    def __init__(self, counter, limit):
+    def __init__(self, counter, limit, attn=False, k_total=None):
         self.b = {}                     # absolute byte -> (value, k)
         self.flags = {}
+        self.attn = attn
         cr, cs = self.loc(counter)
         lr, ls = self.loc(limit)
         self.write(cr * 32 + cs * 4, 4, ("C", 0))
-        self.write(lr * 32 + ls * 4, 4, ("C", K_TOTAL))
+        self.write(lr * 32 + ls * 4, 4, ("C", K_TOTAL if k_total is None else k_total))
 
     @staticmethod
     def loc(s):
@@ -126,12 +127,14 @@ def run(lines, m, max_steps=200000):
         if pred and pred.group(3):
             flag = m.flags.get(pred.group(3))
             if flag is None:
-                raise Unsupported(f"unknown flag {pred.group(3)}: {c}")
-            if pred.group(2):
+                if not m.attn:
+                    raise Unsupported(f"unknown flag {pred.group(3)}: {c}")
+                flag = "unknown"            # data-dependent (attention softmax): jumps not taken, other ops executed
+            elif pred.group(2):
                 flag = not flag
         if op in ("jmpi", "while", "break"):
             target = re.findall(r"\b(L\w+)\b", c)
-            taken = True if flag is None else flag
+            taken = True if flag is None else (False if flag == "unknown" else flag)
             if op == "while":
                 if taken:
                     pc = labels[target[-1]]
@@ -145,7 +148,7 @@ def run(lines, m, max_steps=200000):
                     raise Unsupported(f"jump outside the region: {c}")
                 pc = labels[target[0]]
             continue
-        if flag is not None:
+        if flag is not None and not m.attn:
             raise Unsupported(f"predicated {op}: {c}")
         n = isa.exec_size(l)
         ops = isa.operands(l)
@@ -167,7 +170,10 @@ def run(lines, m, max_steps=200000):
                 a2, _ = elem_addr(ops[2], 0, n)
                 y = m.read(a2, ts)
             if x[0] != "C" or y[0] != "C":
-                raise Unsupported(f"cmp on a symbolic value: {c}")
+                if not m.attn:
+                    raise Unsupported(f"cmp on a symbolic value: {c}")
+                m.flags[cm.group(2)] = None
+                continue
             r = {"lt": x[1] < y[1], "eq": x[1] == y[1], "ne": x[1] != y[1], "gt": x[1] > y[1],
                  "ge": x[1] >= y[1], "le": x[1] <= y[1]}[cm.group(1)]
             m.flags[cm.group(2)] = r
@@ -185,6 +191,10 @@ def run(lines, m, max_steps=200000):
                 if so[0] == "-":
                     v = ("neg", v)
                 srcv.append((v, so[4], sa, sts))
+            if m.attn and (dt in FLOAT or op in ("mad", "sel") or op.startswith("math")) and \
+                    not (op == "mov" and isa.TS[(srcv[0][1] if srcv else dt)] == dts and srcv and srcv[0][1] == dt):
+                outs.append(("w", da, dts, attn_value(op, srcv, ops[1:], im)))
+                continue
             if op == "mov":
                 if im is not None:
                     outs.append(("w", da, dts, ("const", dt, float(im[0]) if dt in FLOAT else im[0])))
@@ -223,6 +233,15 @@ def run(lines, m, max_steps=200000):
                 outs.append(("w", da, dts, ("mul", dt, srcv[0][0], srcv[1][0])))
             else:
                 raise Unsupported(f"opcode {op}: {c}")
+        if flag == "unknown":           # predicated on data (attention): merge, keeping the value that carries identity
+            keep = []
+            for o in outs:
+                if o[0] == "w":
+                    old_v = m.read(o[1], o[2])
+                    if old_v[0] in ("chain", "id") and o[3][0] not in ("chain", "id"):
+                        continue
+                keep.append(o)
+            outs = keep
         for o in outs:                  # all lanes read before any lane writes
             if o[0] == "w":
                 m.write(o[1], o[2], o[3])
@@ -234,6 +253,99 @@ def run(lines, m, max_steps=200000):
         for da, parts in cps:
             for k, p in enumerate(parts):
                 m.b[da + k] = p
+
+
+# ---- attention mode: products as multisets, identity through softmax (see verify_attn) ----
+def ident(v):
+    if v[0] == "chain":
+        return ("S", tuple(sorted(v[1], key=repr)))
+    if v[0] == "id":
+        return v[1]
+    return v
+
+
+def scalar_region(region):
+    return region in ("<0>", "<0;1,0>") or region.startswith("<0;")
+
+
+def attn_value(op, srcv, src_ops, im):
+    vals = [s[0] for s in srcv]
+    if op == "mad":
+        c, b, a = vals
+        items = c[1] if c[0] == "chain" else ()
+        return ("chain", items + ((ident(b), ident(a)),))
+    if op == "mov" and im is not None:
+        return ("const",)
+    cands = [v for v, so in zip(vals, src_ops) if not scalar_region(so[3])] or vals
+    for v in cands:
+        if v[0] in ("chain", "id"):
+            return v                    # exp(S - max), O * alpha, copies of p: keep the identity of the vector operand
+    for v in cands:
+        if v[0] in ("MV", "I"):
+            return ("id", v)
+    return ("other",)
+
+
+def verify_attn(opts, NS, mode="sched", iterations=2, mutate=None, src=None):
+    """Attention mode: generated loop (attn_gen sched<NS>/remap) vs IGC's loop. For every O element the multiset of
+    (V element, identity of p) must match, where identity of p = multiset of (K element, Q element) of its score.
+    Checks the mapping of both mad phases (which register, lane, address meets which); does not check the softmax
+    arithmetic or the order (the generated loop uses another order by design)."""
+    import tempfile
+    import attn_gen as A
+    d = tempfile.mkdtemp()
+    dd = os.path.join(d, "d")
+    A.disassemble(src or os.path.join(HERE, "attn.cl"), opts, dd)
+    t = open(os.path.join(dd, f".text.{A.KERNEL}.asm")).read().splitlines()
+    shutil_rm(d)
+    pro, loop, epi = A.split_loop(t)
+    P = A.params(opts)
+    if mode == "remap":
+        raise Unsupported("remap (variant R on bench/attn.cl) is not covered: igc_maps does not accept that loop form")
+    npro, nloop, nepi, _ = A.sched(list(pro), list(loop), list(epi), P, NS)
+    if mutate:
+        nloop = mutate(list(nloop))
+    return verify_attn_parts(pro, loop, epi, npro, nloop, P, iterations)
+
+
+def verify_attn_parts(pro, loop, epi, npro, nloop, P, iterations=2):
+    """verify_attn on already split code (attn_gen.main calls this before assembling)."""
+    import collections
+    import attn_gen as A
+    M = A.igc_maps(pro, loop, epi, P)
+    extra = npro[len(pro):] if npro[:len(pro)] == pro else None
+    if extra is None:
+        raise Unsupported("generated prologue is not IGC's prologue plus additions")
+    kt = iterations * 8 * P["NK"]
+    mi = Machine(M["cnt"], M["lim"], attn=True, k_total=kt)
+    mg = Machine(M["cnt"], M["lim"], attn=True, k_total=kt)
+    run(loop, mi)
+    run(extra + nloop, mg)
+    bad, lost = [], 0
+    for r in sorted(set(M["o"].values())):
+        for i in range(8):
+            vi, vg = mi.read(r * 32 + i * 4, 4), mg.read(r * 32 + i * 4, 4)
+            ci = collections.Counter(vi[1]) if vi[0] == "chain" else None
+            cg = collections.Counter(vg[1]) if vg[0] == "chain" else None
+            if ci is None or cg is None:
+                bad.append((r, i, "O is not a product chain"))
+                continue
+            lost += sum(1 for it in vg[1] if it[1] == ("other",))
+            if ci != cg:
+                bad.append((r, i, f"{sum((ci - cg).values())} products only in IGC, {sum((cg - ci).values())} only generated"))
+    n = len(set(M["o"].values())) * 8
+    if bad:
+        return False, f"{len(bad)} of {n} O elements differ; first r{bad[0][0]} lane {bad[0][1]}: {bad[0][2]}"
+    if lost:
+        return False, f"{lost} products whose p lost its score identity (propagation rule too weak)"
+    per = len(mi.read(sorted(set(M['o'].values()))[0] * 32, 4)[1])
+    return True, (f"{n} O elements: same (V, p) products as IGC's loop, p traced to the same (K, Q) products; "
+                  f"{per} products per element over {iterations} iterations (order not compared)")
+
+
+def shutil_rm(d):
+    import shutil
+    shutil.rmtree(d, ignore_errors=True)
 
 
 def acc_values(m, h, f):
@@ -325,6 +437,13 @@ def verify(kind, loop_k, h, f, body, mutate=False):
 
 
 def main():
+    if sys.argv[1] == "attn":       # attn <sched<NS>|remap> "<build options>" [template.cl]
+        mode, opts = sys.argv[2], sys.argv[3]
+        src = sys.argv[4] if len(sys.argv) > 4 else None
+        ok, msg = verify_attn(opts, int(mode[5:] or 3) if mode.startswith("sched") else 0,
+                              "remap" if mode == "remap" else "sched", src=src)
+        print(("OK   " if ok else "FAIL ") + msg)
+        sys.exit(0 if ok else 1)
     kinds = ["h", "hd", "s"] if sys.argv[1] == "all" else [sys.argv[1]]
     mutate = "--mutate" in sys.argv
     ok_all = True

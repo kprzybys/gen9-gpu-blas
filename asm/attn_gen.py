@@ -619,6 +619,7 @@ def main():
         disassemble(src, opts, dd)
         t = open(os.path.join(dd, f".text.{KERNEL}.asm")).read().splitlines()
         pro, loop, epi = split_loop(t)
+        pro0, loop0, epi0 = list(pro), list(loop), list(epi)
         n, c = conflicts(loop)
         print(f"IGC loop: {len(loop)} lines, mad {n}, bank conflicts {c}")
         if mode == "analyze":
@@ -636,6 +637,15 @@ def main():
         n, c = conflicts(loop)
         if mode == "remap" or mode.startswith("sched"):   # plain/poison: conflicts expected, not checked
             isa.check_generated(loop, dd, KERNEL, f"attn_gen {mode} {opts}")
+        if mode.startswith("sched") and os.environ.get("ATTN_LOOPCHECK", "1") == "1":
+            import loopcheck   # noqa: E402  (product-level equivalence with IGC's loop, docs/kernel-guide.md section 3)
+            try:
+                ok, msg = loopcheck.verify_attn_parts(pro0, loop0, epi0, pro, loop, params(opts))
+            except loopcheck.Unsupported as e:
+                ok, msg = False, f"cannot check: {e}"
+            if not ok:
+                raise SystemExit(f"attn_gen {mode} {opts}: generated loop rejected by loopcheck: {msg}")
+            print(f"loopcheck: {msg}")
         if mode == "remap":
             print([x for x in pro if x.startswith("// --- attn_gen")][0])
         if mode == "remap":
