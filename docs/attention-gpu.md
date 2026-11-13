@@ -1,6 +1,7 @@
 # Attention on the Gen9 GPU: performance model (stage 1)
 
-Status: model (sections 1-7) and stage 2 result (section 8: criterion not met, direction closed). Evidence tags as in [performance-model.md](performance-model.md)
+Status: model (sections 1-7), stage 2 result (section 8: criterion not met in OpenCL C) and stage 2b result
+(section 9: criterion met by a hand-scheduled assembly kernel, 296 GFLOPS = 2.8x the CPU). Evidence tags as in [performance-model.md](performance-model.md)
 ([SPEC], [MEAS], [SW], [EST], [HYP]). Stage 2 (a standalone kernel in `bench/`) starts only from this prediction,
 and its result is judged against the stop criterion in section 6.
 
@@ -151,3 +152,48 @@ d = 3584 by about 25 % (6.09 -> ~4.6 s) at the cost of a new ggml op with masks 
 rule of section 6 that is below the threshold. The direction could be reopened only by a hand-scheduled assembly
 kernel (bank-conflict-free register allocation, as `asm/` does for GEMM, with 4 rows per thread via Q in SLM), whose
 ceiling from the `ADV=0` diagnostic plus the conflict share is about 300-330 GFLOPS — or on a GPU with more registers.
+
+## 9. Stage 2b result (assembly)
+
+Measured on HD 530 (desktop, 1.0 GHz) with the same host and error test as stage 2; generator `asm/attn_gen.py`
+(with `asm/isa.py`), template `asm/attn.cl`, `make -C asm attn` (`DEVICE=skl` for HD 530, `whl` for UHD 620);
+`bench/attn.c` loads the binary with `CL=<file>.bin`. Full table, predictions and instruction counts in
+`results/attn-asm-hd530-2026-11-13.txt` [MEAS].
+
+| Variant | Qwen shape | Llama shape | Error | Note |
+|---|---|---|---|---|
+| R: IGC's loop of variant A, operands remapped (Q permuted, p copies), conflicts 512 -> 0 per 1024 mads | 218 (+0 %) | 247 (+5 %) | 2e-6 | conflicts are not the Qwen limit |
+| template `asm/attn.cl` (OpenCL C: Q/O via block reads/writes, frees registers) | 231 | 246 | 2e-6 | base of S and C |
+| S2: whole loop generated on IGC's prologue/epilogue, K/V ring of 2 slots (loads 1 step = 32 mads ahead), conflict-free | 288 | (no registers) | 2e-6 | criterion met |
+| S2e / S4e: exp in place to free registers, ring of 2 / 4 slots | 273 / 281 | 305 | 2e-6 | exp in place costs 5 %, NS 4 +3 % |
+| **C: separate p copies, l and m moved to idle registers; ring 4 (Qwen) / 2 (Llama)** | **295-296** (2.8x CPU) | **310** (2.9x) | 2.1e-6 / 2.0e-6 | best |
+
+The laptop UHD 620 confirms it: 308 GFLOPS (Qwen, at ~1046 MHz) and 342 (Llama, 1100 MHz) with the same binaries
+built for `whl`.
+
+**Verdict: the stop criterion (>= 265 GFLOPS, 2.5x the CPU, error <= 2e-3) is met** with 296 GFLOPS and error
+2.1e-6. What made the difference is scheduling, not bank conflicts: IGC issues each K/V block read right before
+its use, and with ~6 threads per EU the read latency stays exposed; the hand loop keeps the next one to three steps
+in flight (+25 % over the same template in OpenCL C). Removing the conflicts alone gave nothing for Qwen.
+
+What limits it now [EST]: L3 read bandwidth for Qwen. At 2 rows per thread each 128 B block read feeds 16 SIMD8
+mads (8 B per mad), and 296 GFLOPS is 148 GB/s = 148 B per clock, the block-read ceiling measured on UHD 620
+(155-158 GB/s at ~1.1 GHz). More speed would need more query rows per thread, but FP32 Q and O already take 64 of
+128 GRF at d_head 128, and SLM shares the L3 data port. Llama (4 rows, 4 B per mad) is not bandwidth-bound; at 81 %
+of peak it is held by the non-mad instructions (~15 %) and the softmax of 4 rows.
+
+Implications for stage 3: by the rule of section 6 the integration is now justified. With 296 GFLOPS instead of
+106 the attention of a Qwen 512-token ubatch at d = 3584 (3.4e11 FLOP) takes ~1.1 s instead of ~3.2 s, so the
+ubatch would go from 6.09 s to about 4.0 s (-33 %) [EST], more on the laptop where the CPU also loses clock to
+the GPU. Open points that the standalone kernel does not cover:
+- causal mask inside the ubatch (only the last key blocks of each query block; a masked tail or the CPU for the
+  in-ubatch part), and the K layout: the kernel reads K transposed in 8-key groups (`k_kt`, 0.28 ms per layer at
+  n_k 4096, under 1 %); a transposed K cache would avoid the pass;
+- one binary per shape (D, G, H_kv, rows per thread) and per device, built from the template by the generator; the
+  generator reads IGC's own loop (symbolic pass with asserts), so a new IGC/NEO version must be re-checked (pinned
+  24.35 here);
+- launch length: Qwen 1.5B at d = 3584 is ~40 ms per layer, far from the 640 ms preemption limit; long contexts
+  and larger models need the per-launch FLOP rule of section 5;
+- Llama and Gemma shapes need their own row count and ring depth (Llama: 4 rows, ring 2; Gemma d_head 256 does not
+  fit 2 FP32 rows and needs a different split).
+

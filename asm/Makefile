@@ -2,6 +2,7 @@
 #   make -C asm          rebuild all binaries into ../bench from the frozen templates (*.cl) and tracked maps (*_map.txt)
 #   make -C asm check    rebuild into a temporary directory (from scratch) and cmp with the binaries in ../bench
 #   make -C asm maps     regenerate the accumulator maps on the GPU (needs ../bench/hgemm and ../bench/sgemm: make -C ../bench)
+#   make -C asm attn     hand-scheduled attention kernels (one binary per shape; DEVICE=skl for HD 530), not in `all`
 # Per binary: template (OpenCL C) --ocloc--> disassembly dir <name>.d --generator `loop` mode + map--> .bin
 # Library binaries: gen_h, gen_hd, gen_s (embedded by lib/Makefile); older experiments: hgemm_asm, hgemm_kc_asm, sgemm_asm.
 # gen_h and gen_hd share the template gen_h.cl (they patch different kernels: hgemm_v and hgemm_kc_v).
@@ -10,7 +11,7 @@ BINS = gen_h gen_hd gen_s hgemm_asm hgemm_kc_asm sgemm_asm
 MAPS = h hd s hgemm hgemm_kc sgemm
 DIRS = gen_h.d gen_hd.d gen_s.d hgemm.d hgemm_kc.d sgemm.d
 
-.PHONY: all check maps clean
+.PHONY: all check maps clean attn
 all: $(addprefix $(BIN_DIR)/,$(addsuffix .bin,$(BINS)))
 
 # disassembly dirs (the generators read asm/<dir>/.text.<kernel>.asm)
@@ -39,6 +40,16 @@ $(BIN_DIR)/hgemm_kc_asm.bin: hgemm_kc.d hgemm_kc_map.txt hgemm_kc_asm.py
 	python3 -I hgemm_kc_asm.py loop $@
 $(BIN_DIR)/sgemm_asm.bin: sgemm.d sgemm_map.txt sgemm_asm.py
 	python3 -I sgemm_asm.py loop $@
+
+# Attention, stage 2b (docs/attention-gpu.md section 9): template attn.cl -> attn_gen.py sched<NS> -> .bin for
+# bench/attn.c (CL=<bin>). No map step: attn_gen.py reads the register maps from IGC's own loop.
+DEVICE ?= whl
+ATTN_OPTS = -cl-fast-relaxed-math -cl-mad-enable
+attn: $(BIN_DIR)/attn_qwen.bin $(BIN_DIR)/attn_llama.bin
+$(BIN_DIR)/attn_qwen.bin: attn.cl attn_gen.py isa.py
+	DEVICE=$(DEVICE) python3 -I attn_gen.py sched4 attn.cl "$(ATTN_OPTS) -DD=128 -DG=6 -DHKV=2 -DRQ=2 -DNK=2" $@
+$(BIN_DIR)/attn_llama.bin: attn.cl attn_gen.py isa.py
+	DEVICE=$(DEVICE) python3 -I attn_gen.py sched2 attn.cl "$(ATTN_OPTS) -DD=64 -DG=4 -DHKV=8 -DRQ=4 -DNK=2" $@
 
 check:
 	@tmp=$$(mktemp -d); \

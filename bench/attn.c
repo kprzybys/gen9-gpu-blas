@@ -1,5 +1,5 @@
 // attn: standalone test of the fused attention kernel in attn.cl (docs/attention-gpu.md, stage 2).
-// Usage: attn <H> <HKV> <D> <n_q> <n_k> <RQ> <NK> [extra build options]
+// Usage: attn <H> <HKV> <D> <n_q> <n_k> <RQ> <NK> [extra build options]   (env CL=<source.cl or binary.bin>)
 // Random Q (float), K, V (half) as llama.cpp flash_attn_ext gives them; one layer, non-causal.
 // Prints: build parameters, SIMD width, spill / private bytes, best time of the K transpose and of the attention
 // kernel (REPS runs after a warm-up), effective rate 4 * n_q * n_k * H * D / time, GPU clock during the best run,
@@ -16,10 +16,12 @@
 #define CHECK(x) do { cl_int e_ = (x); if (e_ != CL_SUCCESS) { fprintf(stderr, "%s:%d: %s = %d\n", __FILE__, __LINE__, #x, e_); exit(1); } } while (0)
 #define CL_KERNEL_SPILL_MEM_SIZE_INTEL 0x4109
 
-static char *read_file(const char *p) {
+static char *read_file(const char *p, size_t *len) {
     FILE *f = fopen(p, "rb"); if (!f) { perror(p); exit(1); }
     fseek(f, 0, SEEK_END); long n = ftell(f); rewind(f);
-    char *s = malloc(n + 1); if (fread(s, 1, n, f) != (size_t)n) exit(1); s[n] = 0; fclose(f); return s;
+    char *s = malloc(n + 1); if (fread(s, 1, n, f) != (size_t)n) exit(1); s[n] = 0; fclose(f);
+    if (len) *len = n;
+    return s;
 }
 
 static int read_freq(void) {
@@ -82,8 +84,18 @@ int main(int argc, char **argv) {
     char opts[1024];
     snprintf(opts, sizeof opts, "-cl-fast-relaxed-math -cl-mad-enable -DD=%d -DG=%d -DHKV=%d -DRQ=%d -DNK=%d %s",
              D, G, HKV, RQ, NK, extra);
-    char *src = read_file(src_file);
-    cl_program prog = clCreateProgramWithSource(ctx, 1, (const char **)&src, NULL, &err); CHECK(err);
+    // CL=<file>.bin: a binary from ocloc (hand-patched assembly, asm/attn_gen.py; built for one shape, the
+    // -D options are then ignored and must match the arguments).
+    size_t src_len; char *src = read_file(src_file, &src_len);
+    int is_bin = strlen(src_file) > 4 && !strcmp(src_file + strlen(src_file) - 4, ".bin");
+    cl_program prog;
+    if (is_bin) {
+        cl_int bst;
+        prog = clCreateProgramWithBinary(ctx, 1, &dev, &src_len, (const unsigned char **)&src, &bst, &err);
+        CHECK(err); CHECK(bst);
+    } else {
+        prog = clCreateProgramWithSource(ctx, 1, (const char **)&src, NULL, &err); CHECK(err);
+    }
     if (clBuildProgram(prog, 1, &dev, opts, NULL, NULL) != CL_SUCCESS) {
         static char log[1 << 20]; clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, sizeof log, log, NULL);
         fprintf(stderr, "build error:\n%s\n", log); return 1;

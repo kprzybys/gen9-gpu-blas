@@ -1,0 +1,102 @@
+# Fused attention kernel in hand-scheduled Gen9 assembly, stage 2b of docs/attention-gpu.md (section 9)
+# Desktop HD 530 (i5-6500; Gen9 GT2, 24 EU, max 1050 MHz), NEO 24.35.30872.36 (user space), nice 19 + ionice idle,
+# 2026-11-13; background service ~30 % of one CPU core. GPU clock 1000 MHz in every run (sampled during the kernel).
+# Same problem, host and error test as stage 2 (results/attn-kernel-hd530-2026-11-13.txt): one layer, non-causal,
+# n_q 512, n_k 4096; Qwen2.5-1.5B shape H 12, H_kv 2, d_head 128; Llama-3.2-1B shape H 32, H_kv 8, d_head 64.
+# Rate = 4 * n_q * n_k * H * d_head / time of the attention kernel (best of 5 after a warm-up); "incl. kt" adds the
+# K-transpose pre-pass. Error = max |O - O_ref| / max |O_ref| vs FP64 (33 query tokens, all heads).
+# Stop criterion (section 6): >= 265 GFLOPS on the Qwen shape (2.5x CPU 106) with error <= 2e-3.
+# Build: asm/attn_gen.py (generator), asm/isa.py (operand parser), template asm/attn.cl, `make -C asm attn`
+# (DEVICE=skl for HD 530, whl for UHD 620: a binary for one device is CL_INVALID_BINARY on the other).
+# Run: CL=<file>.bin bench/attn <H> <HKV> <D> 512 4096 <RQ> <NK> (bench/attn.c now loads .bin with
+# clCreateProgramWithBinary; the build parameters are baked into the binary and must match the arguments).
+# All runs SIMD8, work-group 128, no spill. Bank conflict = src1 and src2 of a `mad` with the same register parity
+# (asm/loop_analysis.py), counted per loop iteration (16 keys, 1024 mads).
+# Note on the method: the predictions below were fixed before each measurement in the working notes; this file was
+# assembled after the runs.
+
+## Checks
+- The driver runs our ISA: "poison" binary (one S mad with -q, otherwise IGC's code) -> error 7.75e-01 at the same
+  speed; "plain" binary (IGC's code without .spv) -> same rate as the source (218.5 vs 215.5; 231.4 vs 230.8).
+- Every generated binary below: error 1.96e-06 .. 2.14e-06 (FP32 accumulation as in stage 2).
+
+## Baselines (OpenCL C, measured today)
+kernel                                   Qwen GFLOPS   Llama GFLOPS   error      conflicts/1024 mad
+bench/attn.cl variant A (RQ 2/4, NK 2)   215.5         234.6          2.1e-06    512
+asm/attn.cl template (A with Q/O block   230.8         245.9          2.1e-06    512
+  reads/writes instead of per-dim scattered accesses)
+Reading: the template only changes the Q load and O store (one a64 pointer per row instead of 16 per-dim offset
+vectors kept live across the loop); IGC then has more free registers and keeps 4 K buffers instead of 2: +7 % / +5 %
+already in OpenCL C. It is the base of variants S and C.
+
+## Variant 1 R: remap only (IGC's loop of bench/attn.cl variant A, operands changed)
+Design: permute Q elements before the loop (64 single-float swaps) so every q element sits in a register of the
+parity opposite to the K register it meets; p read from a copy of the other parity where V and p would conflict
+(4 mov(8) per block, Qwen). Instruction stream otherwise IGC's.
+Prediction: removes the conflict penalty (x0.8 on half the mads) -> at most +12.5 %: Qwen ~240, Llama ~260, if mad
+issue is the limit; less if the loss is memory-side.
+shape  conflicts before -> after   GFLOPS               error      clock
+Qwen   512 -> 0                     218.3, 217.5 (plain 218.5)   2.05e-06   1000
+Llama  512 -> 0                     245.2, 247.5 (source 234.6)  1.62e-06   1000
+Reading: Qwen +0 %, Llama +5 %. Bank conflicts are not what holds Qwen; the stall is elsewhere (next variant).
+ADV=0 diagnostic could not be remapped (IGC's ADV=0 build leaves no free register of the needed parity).
+
+## Variant 2 S2: whole loop generated, ring of NS = 2 slots (template asm/attn.cl, PE_IN_S=0 COMPACT=0 sched2)
+Design: IGC's prologue (Q load and scale, pointers, O = 0) and epilogue (O store) kept; IGC's loop is read by a
+symbolic pass (registers of Q[r][c], O[r][c], K/V pointers, l sums, counter) and replaced. Per block of 16 keys:
+16 K steps (2 block reads of 128 B -> 32 mads) then 16 V steps (2 block reads -> 32 mads), each into a slot of
+8 GRF; the load for step s+NS is issued right after the mads of step s (1 step = 32 mads ahead, IGC: ~0). Softmax
+between the phases: max by sel (8, 4, 2, 1), one uniform branch per row for the rescale, exp2 via math.exp, l in
+FP32 lanes, p kept in an even and an odd copy; O /= sum(l) after the loop (IGC's l registers set to 1/8 so the
+epilogue divides by 1). Conflict-free: slots start at even registers; Q permuted as in R.
+Instruction budget per block (Qwen): 1024 mad, 64 send, 66 scalar :q header adds, 4 mov(8) S = 0, softmax per row
+1 sel(8) + 3 scalar sel + cmp + jmpi + 2 add(8) + 2 math.exp(8) + 2 add(8) + 2 mov(8) (the 17 mul(8) + exp(1) of the
+rescale run only when a row maximum grows), loop control 3: ~1190 issued instructions, 86 % mads.
+Prediction: the IGC loop waits for each K/V load right before use; with ~6 threads per EU this leaves the EU idle
+(ADV=0 268 vs 384 peak). Loads one step ahead should hide most of it. Ceiling: L3 read bandwidth, 8 B per SIMD8 mad
+at RQ 2 (128 B feeds 16 mads); block reads with >= 2 in flight reach 155-158 GB/s on UHD 620 at ~1.1 GHz
+(results/memory-bandwidth-2026-11-11.txt) = ~140-150 B/clk -> 280-300 GFLOPS at 1.0 GHz. Expected 250-290.
+shape  conflicts   GFLOPS          error      clock
+Qwen   0           287.7, 287.4    2.14e-06   1000
+Llama  -           (does not fit: 16 even + 16 odd p registers for RQ 4)
+Reading: +25 % over the template, criterion met (2.7x CPU). Prefetch was the missing piece; the C attempt (A2)
+could not express it without spilling.
+
+## Variant 3 S2e / S4e: exp in place, the score registers are the even p copies (PE_IN_S=1 COMPACT=0)
+Purpose: free RQ*NK registers for a deeper ring (NS 4 = loads 3 steps ahead) and to fit Llama.
+Prediction: NS 4 adds a few % if latency is still partly exposed; exp in place itself neutral.
+shape  NS  GFLOPS          error      clock
+Qwen   2   273.3, 273.2    2.14e-06   1000
+Qwen   4   280.8, 281.3    2.14e-06   1000
+Llama  2   305.6, 305.2    1.96e-06   1000
+Reading: exp in place costs 5 % (273 vs 288 at NS 2; the softmax-to-PV dependency through the same registers, not
+analysed further); NS 4 gives +3 % over NS 2. Llama passes 300 (2.9x CPU 107).
+
+## Variant 4 C: separate p copies again, registers saved elsewhere (COMPACT=1: l sums in IGC's l registers, row
+## maxima in spare lanes of a temporary) -> NS 4 fits for Qwen (0 registers left), NS 2 for Llama
+Prediction: Qwen NS 4 = S2 + 3 % (variant 3) = ~295; Llama NS 2 with separate p = S2e Llama + ~2-5 %.
+shape  NS  GFLOPS                  incl. kt   error      clock
+Qwen   2   287.7, 287.1            285.9      2.14e-06   1000   (same as S2)
+Qwen   4   294.9, 296.2  BEST      293.0-294.3 2.14e-06  1000
+Llama  2   310.2, 310.1  BEST      307.0      1.96e-06   1000   (exp in place: 304.7, 305.5)
+Llama  4   -                                                    (does not fit)
+Instruction mix of the generated Qwen loop (asm/loop_analysis.py on the C4 code): 1229 instructions, 1024 mad,
+0 conflicts, 64 send, 67 add(1) :q headers, 34 mul(8) of the rescale branch; IGC's loop for the same template:
+1248 instructions, 512 conflicts, 72 add(8) SIMD8 :q address adds, 64 send.
+
+## Confirmation on the laptop UHD 620 (whl binaries of C4 / C2, nice 19, nothing else running)
+shape  kernel            GFLOPS   error      clock
+Qwen   template (C)      247.9    2.05e-06   1100
+Qwen   C4                307.6    2.14e-06   ~1046 (clock fell during the run; 294 per GHz, as on HD 530)
+Llama  template (C)      268.6    1.62e-06   1100
+Llama  C2                342.4    1.96e-06   1100
+
+## Verdict
+Criterion MET. Best on HD 530 at 1.0 GHz: Qwen 295-296 GFLOPS (2.8x CPU 106), Llama 310 GFLOPS (2.9x CPU 107),
+error 2.1e-6 / 2.0e-6. Predictions: R overestimated (no Qwen gain), S met at its upper end (288 vs 250-290),
+C met (296 vs ~295).
+What limits the best Qwen kernel: L3 read bandwidth. 296 GFLOPS = 18.5e9 SIMD8 mads/s x 8 B = 148 GB/s = 148 B/clk,
+the block-read ceiling measured on UHD 620 (~140-150 B/clk) [EST: per-clock transfer to HD 530]. More speed needs
+fewer bytes per mad, i.e. more query rows per thread; at d_head 128 FP32 Q and O already take 64 of 128 GRF for 2
+rows, and SLM shares the same data port, so this is about the end for this design. Llama (4 B/mad, 78 B/clk) is not
+bandwidth-bound; it is at 81 % of peak, limited by the non-mad instructions (~15 %) and the 4-row softmax.
