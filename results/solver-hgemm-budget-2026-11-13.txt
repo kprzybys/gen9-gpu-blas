@@ -3,6 +3,13 @@
 # (gemm_extract.py, gemm_epi.py on kp-laptop, read-only use of asm/gemm_gen.py and asm/attn_gen.live_in;
 # gemm_solve.py: CP-SAT on the 32-thread desktop, OR-Tools 9.15.6755, 144 configurations, 0.4 s). No GPU run; nothing measured.
 #
+# CORRECTION (same day, after implementing liveness in asm/gemm_gen.py): the E = 9 / 7 scenarios came from
+# attn_gen.live_in, which assumes full SIMD8 masks. A sound analysis for the SIMD16 GEMM epilogues (only (W) full writes
+# kill, multi-register operands counted, e.g. r86.0<8;8,1>:d also reads r87) frees: h 68, hd 57, s 74 registers vs
+# 71 / 62 / 79 under the old text rule, which was itself unsound (it freed registers the epilogue reads). Even with a
+# full-dispatch-mask assumption hd gains only 1 register (63). => the accurate 16x32 tile does NOT become feasible this
+# way; the E = 9 / 7 rows below are optimistic and should not be used.
+#
 # Overhead taken from the existing kernels (gemm_extract.py / gemm_epi.py):
 #   kind  acc GRF  ptr  cnt/lim  epilogue regs mentioned (free_regs blocks them)  live into the epilogue (of them headers)
 #   h     32       4    1        17                                               9 (2)

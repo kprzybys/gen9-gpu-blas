@@ -119,9 +119,66 @@ class Registers:
         return self.w.pop(0)
 
 
-def free_regs(prologue, epilogue, taken):
-    used = {int(x) for l in epilogue for x in re.findall(r"\br(\d+)", l.split("//")[0])}
+# Free registers for the loop (env GEMM_FREE): "livein" (default) blocks the registers the epilogue may read before a
+# definite write (epilogue_live: sound by construction); "conservative" (the rule before 2026-11-13) blocks every
+# register the epilogue's text mentions -- NOT sound: a SIMD16 :d operand r86.0<8;8,1> also reads r87, so it freed
+# registers the epilogue reads (h: r87 r89 r121, hd: r3 r5 r9 r29 r31 r65, s: r5 r9 r11 r69 r71 r73; loop_h used r87
+# and r89 as headers). Poison test 2026-11-13 (GEMM_POISON_FREED=1, gemm_bits_all on 12 edge shapes + gemm_pb_f16w +
+# ffn_f16w): results bit-identical, i.e. those lanes did not matter -- by chance. "auto" = conservative with a fallback.
+FREE_MODE = os.environ.get("GEMM_FREE", "livein")
+CF = re.compile(r"^\s*(?:\([^)]*\)\s*)?(jmpi|if|else|endif|goto|join|brc|brd|while|break|cont|halt|call|calla|ret)\b")
+
+
+def epilogue_live(epilogue):
+    """Registers the epilogue may read before a definite write, or None when the analysis is not safe here.
+    Conservative on purpose: only (W) (NoMask) full writes kill (a masked SIMD16 write at a tile edge may be partial);
+    predicated and partial writes never kill (isa.full_writes); after the first control-flow instruction no write kills
+    (sound for every path); send lengths from the comment or the descriptor (isa.send_regs); any indirect operand
+    r[a0..] -> None; any line isa.py does not understand -> None."""
+    if any("r[" in isa.code(l) for l in epilogue):
+        return None
+    try:
+        isa.check_all([l for l in epilogue if not CF.match(isa.code(l))], "epilogue")
+    except SystemExit:
+        return None
+    killed, live, cf = set(), set(), False
+    for l in epilogue:
+        c = isa.code(l)
+        if not c.strip() or isa.LABEL.match(c.strip()):
+            continue
+        if CF.match(c):
+            cf = True
+            continue
+        w, r = isa.defs_uses(l)
+        live |= set(r) - killed
+        if not cf and re.match(r"^\s*\(W\)", c):
+            killed |= set(isa.full_writes(l))
+    return live
+
+
+def free_regs(prologue, epilogue, taken, mode=None):
+    mode = mode or ("conservative" if FREE_MODE == "auto" else FREE_MODE)
+    used = {int(x) for l in epilogue for x in re.findall(r"\br(\d+)", isa.code(l))}
+    if mode == "livein":
+        live = epilogue_live(epilogue)
+        if live is None:
+            print("gemm_gen: epilogue liveness not safe here, using the conservative register set")
+        else:
+            used = live
     return [r for r in range(2, 127) if r not in used | taken | {0, 1, 127}]
+
+
+def poison_freed(prologue, epilogue, taken):
+    """GEMM_POISON_FREED=1 test: after the loop write 0xDEADBEEF into every register that livein frees beyond the
+    conservative set; a correct liveness analysis leaves the results bit-identical."""
+    if os.environ.get("GEMM_POISON_FREED") != "1":
+        return []
+    li = set(free_regs(prologue, epilogue, taken, "livein"))
+    co = set(free_regs(prologue, epilogue, taken, "conservative"))
+    # livein - conservative: freed only by the liveness analysis; conservative - livein: free under today's rule although
+    # the epilogue reads them through a multi-register operand (e.g. r86.0<8;8,1>:d in SIMD16 also reads r87)
+    print(f"gemm_gen: poisoning livein-only {sorted(li - co)} and conservative-but-live {sorted(co - li)}")
+    return [f"{W}mov (8|M0)  r{x}.0<1>:ud  0xDEADBEEF:ud" for x in sorted(li ^ co)]
 
 
 def loads(H, cele):
@@ -171,7 +228,8 @@ def loop_h(prologue, loop_k, epilogue, acc_map):
                     a = acc_map[(r, c)]
                     o.append(f"        mad (16|M0)  r{a}.0<1>:hf  r{a}.0<2;1>:hf  r{Bc + kl}.0<2;1>:hf  r{ga}.{sub}<0>:hf")
         return o
-    return out + load_q(0) + load_q(1) + ["LGEN:"] + mads(0) + load_q(0) + mads(1) + load_q(1) + loop_end(counter, limit, 16, "LGEN")
+    return out + load_q(0) + load_q(1) + ["LGEN:"] + mads(0) + load_q(0) + mads(1) + load_q(1) + loop_end(counter, limit, 16, "LGEN") + \
+        poison_freed(prologue, epilogue, busy)
 
 
 def loop_quarters(prologue, loop_k, epilogue, acc_map, dtype, kc=None, acc_map_f=None):
@@ -239,7 +297,7 @@ def loop_quarters(prologue, loop_k, epilogue, acc_map, dtype, kc=None, acc_map_f
     out += loop_end(counter, limit, step, "LGEN")
     if kc:
         out += [f"        mov (16|M0)  r{acc_map[r]}.0<1>:hf  0.0:hf" for r in range(16)]
-    return out
+    return out + poison_freed(prologue, epilogue, busy)
 
 
 def load_map(kind):
@@ -253,6 +311,16 @@ def load_map(kind):
         else:
             acc_map[int(p[2])] = int(p[1])
     return acc_map, acc_map_f
+
+
+
+def gen_body(kind, prologue, loop_k, epilogue, h, f, idx_map, idx_map_f):
+    if kind == "h":
+        return loop_h(prologue, loop_k, epilogue, {k: h[v] for k, v in idx_map.items()})
+    if kind == "hd":
+        return loop_quarters(prologue, loop_k, epilogue, {k: h[v] for k, v in idx_map.items()}, "hf", kc=32,
+                             acc_map_f={k: f[v] for k, v in idx_map_f.items()})
+    return loop_quarters(prologue, loop_k, epilogue, {k: f[v] for k, v in idx_map.items()}, "f")
 
 
 if __name__ == "__main__":
@@ -270,15 +338,18 @@ if __name__ == "__main__":
                epilogue, result)
     else:
         idx_map, idx_map_f = load_map(kind)
-        if kind == "h":
-            acc_map = {k: h[v] for k, v in idx_map.items()}
-            body = loop_h(prologue, loop_k, epilogue, acc_map)
-        elif kind == "hd":
-            body = loop_quarters(prologue, loop_k, epilogue, {k: h[v] for k, v in idx_map.items()}, "hf", kc=32,
-                                 acc_map_f={k: f[v] for k, v in idx_map_f.items()})
-        else:
-            body = loop_quarters(prologue, loop_k, epilogue, {k: f[v] for k, v in idx_map.items()}, "f")
+
+        def generate():
+            return gen_body(kind, prologue, loop_k, epilogue, h, f, idx_map, idx_map_f)
+        try:
+            body = generate()
+        except SystemExit as e:
+            if FREE_MODE != "auto":
+                raise
+            print(f"gemm_gen: {e}; retrying with the epilogue live-in register set")
+            FREE_MODE = "livein"
+            body = generate()
         isa.check_generated(body, kind_dir(kind), KINDS[kind]["kernel"], f"gemm_gen {kind}")
         build(kind, prologue, body, epilogue, result)
         print(body[0])
-        print(f"instructions: {len(body)}, mad: {sum('mad (' in l for l in body)}")
+        print(f"instructions: {len(body)}, mad: {sum('mad (' in l for l in body)}, register set: {FREE_MODE}")
