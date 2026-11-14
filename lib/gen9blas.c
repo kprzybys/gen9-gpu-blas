@@ -120,7 +120,7 @@ static int init_l12(const char *dir) {
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
 static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8, k_epi_8x;
-static cl_kernel k_rms, k_binop, k_rope, k_lnorm, k_gelu, k_lnorm_pack, k_gelu_erf, k_cvt_heads;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
+static cl_kernel k_rms, k_binop, k_rope, k_lnorm, k_gelu, k_lnorm_pack, k_gelu_erf, k_cvt_heads, k_im2col, k_relu;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
 int gen9blas_init(const char *dir) {
     static int inited;
     if (inited) return 0;
@@ -156,7 +156,9 @@ int gen9blas_init(const char *dir) {
       { cl_int e9; k_lnorm_pack = clCreateKernel(ph, "gen9blas_layer_norm_pack", &e9); if (e9) k_lnorm_pack = NULL; }
       k_gelu = clCreateKernel(ph, "gen9blas_gelu", &e8); if (e8) k_gelu = NULL;
       k_gelu_erf = clCreateKernel(ph, "gen9blas_gelu_erf", &e8); if (e8) k_gelu_erf = NULL;
-      k_cvt_heads = clCreateKernel(ph, "gen9blas_cvt_f16_heads", &e8); if (e8) k_cvt_heads = NULL; }
+      k_cvt_heads = clCreateKernel(ph, "gen9blas_cvt_f16_heads", &e8); if (e8) k_cvt_heads = NULL;
+      k_im2col = clCreateKernel(ph, "gen9blas_im2col", &e8); if (e8) k_im2col = NULL;
+      k_relu = clCreateKernel(ph, "gen9blas_relu", &e8); if (e8) k_relu = NULL; }
     // "v" kernels: (Ap, Bp, C, M, N, ldc, K, Kfull) -- also for chunks of data packed once (sub-buffers)
     // bin = NULL: main kernel from source (FP64: dgemm.cl, OpenCL C), not from an asm binary
     struct { int r; const char *bin, *k, *pa, *pb, *epi, *tri; int es, tn, km; cl_program pr; } t[4] = {
@@ -1054,6 +1056,38 @@ int gen9blas_cvt_f16_heads(int rows, int H, int D, const float *X, long s_row, l
     size_t g[3] = { (size_t)D, (size_t)H, (size_t)rows };
     CHECK(clEnqueueNDRangeKernel(q, k_cvt_heads, 3, NULL, g, NULL, 0, NULL, NULL));
     return ew_done(sync, xY, zY, bY, Y);
+}
+
+int gen9blas_im2col(int N, int IC, int IH, int IW, const float *X, long ofs0, long ofs1, int KH, int KW, int OH, int OW,
+                    int s0, int s1, int p0, int p1, int d0, int d1, void *Y, int f16, int sync) {
+    NEW_OPERATION();
+    if (!k_im2col) FAIL("im2col: kernel not in this build");
+    if (N <= 0 || IC <= 0 || OH <= 0 || OW <= 0 || KH <= 0 || KW <= 0) return 0;
+    size_t bX = ((size_t)(N - 1) * ofs0 + (size_t)(IC - 1) * ofs1 + (size_t)IH * IW) * 4;
+    size_t bY = (size_t)N * OH * OW * IC * KH * KW * (f16 ? 2 : 4);
+    bf_t xX, xY; int zX, zY;
+    if (get_obj(X, bX, &uA, 1, 0, &xX, &zX) || get_obj(Y, bY, &uC, 0, 1, &xY, &zY)) return -1;
+    ARGB(k_im2col, 0, xX); ARG(k_im2col, 1, ofs0); ARG(k_im2col, 2, ofs1); ARG(k_im2col, 3, IH); ARG(k_im2col, 4, IW);
+    ARG(k_im2col, 5, KH); ARG(k_im2col, 6, KW); ARG(k_im2col, 7, OH); ARG(k_im2col, 8, s0); ARG(k_im2col, 9, s1);
+    ARG(k_im2col, 10, p0); ARG(k_im2col, 11, p1); ARG(k_im2col, 12, d0); ARG(k_im2col, 13, d1); ARG(k_im2col, 14, f16);
+    ARGB(k_im2col, 15, xY);
+    size_t g[3] = { (size_t)IC * KH * KW, (size_t)OW, (size_t)N * OH };
+    CHECK(clEnqueueNDRangeKernel(q, k_im2col, 3, NULL, g, NULL, 0, NULL, NULL));
+    return ew_done(sync, xY, zY, bY, Y);
+}
+
+int gen9blas_relu(size_t n, const float *X, float *Y, int sync) {
+    NEW_OPERATION();
+    if (!k_relu) FAIL("relu: kernel not in this build");
+    if (!n) return 0;
+    bf_t xX, xY; int zX, zY;
+    if (X == Y) {
+        if (get_obj(Y, n * 4, &uC, 1, 1, &xY, &zY)) return -1;
+        xX = xY;
+    } else if (get_obj(X, n * 4, &uA, 1, 0, &xX, &zX) || get_obj(Y, n * 4, &uC, 0, 1, &xY, &zY)) return -1;
+    ARGB(k_relu, 0, xX); ARGB(k_relu, 1, xY);
+    CHECK(clEnqueueNDRangeKernel(q, k_relu, 1, NULL, &n, NULL, 0, NULL, NULL));
+    return ew_done(sync, xY, zY, n * 4, Y);
 }
 
 int gen9blas_gelu_erf(size_t n, const float *X, float *Y, int sync) {

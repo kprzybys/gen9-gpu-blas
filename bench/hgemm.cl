@@ -1150,6 +1150,25 @@ __kernel void gen9blas_cvt_f16_heads(__global const float *x, long s_row, long s
     const float v = clamp(x[r * s_row + h * s_head + d], -65504.0f, 65504.0f);
     vstore_half_rte(v, (r * H + h) * D + d, y);
 }
+// ggml IM2COL as ggml-cpu (ggml_compute_forward_im2col_f32/_f16): src [N, IC, IH, IW] (rows of IW contiguous; image n at
+// x + n * ofs0, channel c at + c * ofs1, offsets in floats) -> dst [N, OH, OW, IC*KH*KW], zero padding; f16: dst in FP16
+// (RTE, as GGML_CPU_FP32_TO_FP16). 1-D: IH = KH = OH = 1. One work-item per output element, grid (IC*KH*KW, OW, N*OH).
+__kernel void gen9blas_im2col(__global const float *x, long ofs0, long ofs1, int IH, int IW, int KH, int KW, int OH,
+                              int s0, int s1, int p0, int p1, int d0, int d1, int f16, __global float *yf) {
+    const int k = get_global_id(0), ow = get_global_id(1), nh = get_global_id(2);
+    const int K = get_global_size(0), OW = get_global_size(1);
+    const int n = nh / OH, oh = nh % OH, KK = KH * KW, c = k / KK, kh = (k % KK) / KW, kw = k % KW;
+    const int iw = ow * s0 + kw * d0 - p0, ih = oh * s1 + kh * d1 - p1;
+    const float v = (ih < 0 || ih >= IH || iw < 0 || iw >= IW) ? 0.0f : x[n * ofs0 + c * ofs1 + (long)ih * IW + iw];
+    const size_t o = ((size_t)nh * OW + ow) * K + k;
+    if (f16) vstore_half_rte(v, o, (__global half *)yf); else yf[o] = v;
+}
+// ggml RELU: y = max(x, 0) (x > 0 ? x : 0, as ggml_vec_relu_f32). n elements, contiguous. Grid (n).
+__kernel void gen9blas_relu(__global const float *x, __global float *y) {
+    const size_t i = get_global_id(0);
+    const float v = x[i];
+    y[i] = v > 0.0f ? v : 0.0f;
+}
 // ggml GELU_ERF as ggml-cpu (ggml_vec_gelu_erf_f32): 0.5 x (1 + erf(x / sqrt 2)), F32. n elements, contiguous. Grid (n).
 __kernel void gen9blas_gelu_erf(__global const float *x, __global float *y) {
     const size_t i = get_global_id(0);

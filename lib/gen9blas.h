@@ -86,6 +86,12 @@ int gen9blas_layer_norm(int M, int K, const float *X, int ldx, const float *w, c
 int gen9blas_gelu(size_t n, const float *X, float *Y, int sync);
 // ggml GELU_ERF (exact erf form, F32 as ggml-cpu) over n contiguous floats; X == Y allowed.
 int gen9blas_gelu_erf(size_t n, const float *X, float *Y, int sync);
+// ggml IM2COL (as ggml-cpu): X [N, IC, IH, IW] (image / channel offsets ofs0 / ofs1 in floats, rows of IW contiguous)
+// -> Y [N, OH, OW, IC*KH*KW], F32 or FP16 (f16, RTE); zero padding. 1-D convolution: IH = KH = OH = 1.
+int gen9blas_im2col(int N, int IC, int IH, int IW, const float *X, long ofs0, long ofs1, int KH, int KW, int OH, int OW,
+                    int s0, int s1, int p0, int p1, int d0, int d1, void *Y, int f16, int sync);
+// ggml RELU over n contiguous floats; X == Y allowed.
+int gen9blas_relu(size_t n, const float *X, float *Y, int sync);
 // F32 rows x H heads x D (element (r, h, d) at X[r * s_row + h * s_head + d]) -> FP16 [r][h][d] contiguous, RTE, saturated.
 int gen9blas_cvt_f16_heads(int rows, int H, int D, const float *X, long s_row, long s_head, uint16_t *Y, int sync);
 int gen9blas_binop_rows(int op, int M, int K, const float *A, int lda, const float *B, int ldb, float *C, int ldc, int sync);
