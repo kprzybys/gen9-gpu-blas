@@ -119,6 +119,7 @@ static int init_l12(const char *dir) {
 
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
+static cl_kernel k_skp[3];   // gen9blas_skinny_pb16_4 / _8 / _16
 static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8, k_epi_8x;
 static cl_kernel k_rms, k_binop, k_rope, k_lnorm, k_gelu, k_lnorm_pack, k_gelu_erf, k_cvt_heads, k_im2col, k_relu;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
 int gen9blas_init(const char *dir) {
@@ -146,6 +147,10 @@ int gen9blas_init(const char *dir) {
     KER(ph, "pk_a3_f32", k_pa3_f32); KER(ph, "gen9blas_epilog_hf", k_epi_hf); KER(ph, "gen9blas_swiglu_pack_a3", k_swiglu);   // F16 weights x F32 activations
     { cl_int e4; k_dequant = clCreateKernel(ph, "gen9blas_dequant_b16", &e4); if (e4) k_dequant = NULL; }
     { cl_int e5; k_dequant2 = clCreateKernel(ph, "gen9blas_dequant_b16s", &e5); if (e5) k_dequant2 = NULL; }
+    for (int i = 0; i < 3; i++) {   // skinny products on HS-packed weights (gen9blas_gemm_pb_skinny); NULL if the binary lacks them
+        char n[40]; cl_int e9; snprintf(n, sizeof n, "gen9blas_skinny_pb16_%d", 4 << i);
+        k_skp[i] = clCreateKernel(ph, n, &e9); if (e9) k_skp[i] = NULL;
+    }
     { cl_int e6; k_pa3_v = clCreateKernel(ph, "pk_a3_f32v", &e6); if (e6) k_pa3_v = NULL; }
     { cl_int e7; k_epi_8 = clCreateKernel(ph, "gen9blas_epilog_hf8", &e7); if (e7) k_epi_8 = NULL; }
     { cl_int e8; k_epi_8x = clCreateKernel(ph, "gen9blas_epilog_hf8x", &e8); if (e8) k_epi_8x = NULL; }   // fused bias/GELU/residual
@@ -803,6 +808,31 @@ int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed 
 // The same with FP16 activations (ggml conv_1d: im2col result as src0, F16 kernel as src1): packed by the HS pa kernel.
 int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
     return gemm_pb_f16w_any(1, M, A, lda, P, C, ldc, nonfinite, NULL, NULL);
+}
+
+// Small batches (M <= 16) on HS-packed weights without packing A: gen9blas_skinny_pb16_<MT> (bench/hgemm.cl), F32 products
+// and sums, F32 result straight into C. Returns 1 (nothing done) when the kernel is missing or M is out of range.
+int gen9blas_skinny_pb_supported(void) { return k_skp[0] && k_skp[1] && k_skp[2]; }
+int gen9blas_gemm_pb_skinny(int M, const float *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
+    static int *nf;
+    NEW_OPERATION();
+    if (!P || P->type != GEN9BLAS_HS) FAIL("gemm_pb_skinny: needs B packed as GEN9BLAS_HS");
+    if (M < 1 || M > 16 || !gen9blas_skinny_pb_supported()) return 1;
+    if (!nf && !(nf = gen9blas_alloc(64))) return -1;
+    *nonfinite = 0; *nf = 0;
+    const int N = P->N, K = P->K, Kp = P->Kp, Np = P->Np;
+    const size_t bA = ((size_t)(M - 1) * lda + K) * 4, bC = ((size_t)(M - 1) * ldc + N) * 4;
+    bf_t xA, xC; int zA, zC;
+    if (get_obj(A, bA, &uA, 1, 0, &xA, &zA) || get_obj(C, bC, &uC, 0, 1, &xC, &zC)) return -1;
+    cl_kernel k = k_skp[M <= 4 ? 0 : M <= 8 ? 1 : 2];
+    bf_t xnf = { NULL, nf };
+    ARGB(k, 0, xA); ARG(k, 1, lda); ARG(k, 2, M); ARG(k, 3, K); ARG(k, 4, P->buf); ARG(k, 5, Kp);
+    ARGB(k, 6, xC); ARG(k, 7, ldc); ARG(k, 8, N); ARGB(k, 9, xnf);
+    size_t g = (size_t)(Np / 16) * 256, l = 256;
+    CHECK(clEnqueueNDRangeKernel(q, k, 1, NULL, &g, &l, 0, NULL, NULL));
+    if (to_host(xC, zC, bC, C)) return -1;
+    *nonfinite = *nf != 0;
+    return 0;
 }
 static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite,
                             const epi_ext_t *ext, cl_mem preA) {

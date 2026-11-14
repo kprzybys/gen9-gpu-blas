@@ -1176,3 +1176,47 @@ __kernel void gen9blas_gelu_erf(__global const float *x, __global float *y) {
     y[i] = 0.5f * v * (1.0f + erf(v * 0.70710678118654752440f));
 }
 #pragma OPENCL FP_CONTRACT ON
+
+// ggml backend, small batches (several sequences decoded together, kp-docsearch PaddleOCR-VL): C[m][n] = sum_k A[m][k] *
+// B[k][n] for M <= MT rows of F32 activations against GEN9BLAS_HS packed weights (PK_IDX_B16: panels of 16 columns, for
+// every k the 16 halves of the panel contiguous), FP32 products and sums, F32 result written straight into C (no packing
+// of A, no FP16 intermediate, no epilogue kernel). Work-group = SKP_S SIMD16 subgroups on one panel, lane = column; subgroup
+// s takes the 16-k steps s, s + S, ... (two 256 B block reads per step, S x 512 B contiguous per group step: the
+// contiguity lesson of docs/skinny-gemm.md (e)); partial sums reduced in local memory by subgroup m for row m.
+// Rows of A past K read as 0 (the packed B is zero there anyway). *nonfinite |= 1 for an inf / NaN result.
+// Grid: (Np / 16) x (16 * SKP_S), local 16 * SKP_S.
+#define SKP_S 16
+#define SKP_ROW(m) if ((m) < M) { const float a = k + l < K ? A[(size_t)(m) * lda + k + l] : 0.0f; \
+    _Pragma("unroll") for (int j = 0; j < 8; j++) acc##m = fma(sub_group_broadcast(a, j), w0[j], acc##m); \
+    _Pragma("unroll") for (int j = 0; j < 8; j++) acc##m = fma(sub_group_broadcast(a, 8 + j), w1[j], acc##m); }
+#define SKP_DECL(m) float acc##m = 0.0f;
+#define SKP_PART(m) part[s][m][l] = acc##m;
+#define SKP_R4(X) X(0) X(1) X(2) X(3)
+#define SKP_R8(X) SKP_R4(X) X(4) X(5) X(6) X(7)
+#define SKP_R16(X) SKP_R8(X) X(8) X(9) X(10) X(11) X(12) X(13) X(14) X(15)
+#define SKINNY_PB16(MT) \
+__attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_size(16 * SKP_S, 1, 1))) \
+__kernel void gen9blas_skinny_pb16_##MT(__global const float *A, int lda, int M, int K, __global const ushort *Bp, int Kp, \
+                                         __global float *C, int ldc, int N, __global int *nonfinite) { \
+    __local float part[SKP_S][MT][16]; \
+    const int p = get_group_id(0), s = get_sub_group_id(), l = get_sub_group_local_id(); \
+    const __global ushort *bp = Bp + (size_t)p * Kp * 16; \
+    SKP_R##MT(SKP_DECL) \
+    for (int k = s * 16; k < Kp; k += SKP_S * 16) { \
+        const float8 w0 = convert_float8(as_half8(intel_sub_group_block_read_us8(bp + (size_t)k * 16))); \
+        const float8 w1 = convert_float8(as_half8(intel_sub_group_block_read_us8(bp + (size_t)k * 16 + 128))); \
+        SKP_R##MT(SKP_ROW) \
+    } \
+    SKP_R##MT(SKP_PART) \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    const int n = p * 16 + l; \
+    if (s < MT && s < M && n < N) { \
+        float v = 0.0f; \
+        _Pragma("unroll") for (int i = 0; i < SKP_S; i++) v += part[i][s][l]; \
+        if (!isfinite(v)) atomic_or(nonfinite, 1); \
+        C[(size_t)s * ldc + n] = v; \
+    } \
+}
+SKINNY_PB16(4)
+SKINNY_PB16(8)
+SKINNY_PB16(16)

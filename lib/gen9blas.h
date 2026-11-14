@@ -48,6 +48,10 @@ void gen9blas_packed_free(gen9blas_packed *Bp);
 int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
 // the same with FP16 activations (lda in elements)
 int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
+// Small batches, 1 <= M <= 16 (several sequences decoded together): C = A . Bp with F32 activations read directly (no packing),
+// FP32 products and sums, F32 result. Returns 1 (nothing done) if the kernels are missing or M is out of range.
+int gen9blas_gemm_pb_skinny(int M, const float *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
+int gen9blas_skinny_pb_supported(void);
 // gen9blas_gemm_pb_f16w with the following ops fused into the epilogue (whisper encoder): C = [gelu](A.Bp + bias) [+ R].
 // bias: N floats or NULL; gelu: 0/1 (ggml GELU, tanh form with FP16 rounding as ggml-cpu); R: M x N (row stride ldr) or
 // NULL, may be C itself with ldr == ldc. Bit-identical to gemm_pb_f16w followed by the separate ADD / GELU kernels.
