@@ -84,6 +84,8 @@ int gen9blas_binop_rows2(int op, int M, int K, const float *A, int lda, const fl
 int gen9blas_layer_norm(int M, int K, const float *X, int ldx, const float *w, const float *b, float eps, float *Y, int ldy, int sync);
 // ggml GELU (tanh form, FP16 table semantics of ggml-cpu) over n contiguous floats.
 int gen9blas_gelu(size_t n, const float *X, float *Y, int sync);
+// ggml GELU_ERF (exact erf form, F32 as ggml-cpu) over n contiguous floats; X == Y allowed.
+int gen9blas_gelu_erf(size_t n, const float *X, float *Y, int sync);
 int gen9blas_binop_rows(int op, int M, int K, const float *A, int lda, const float *B, int ldb, float *C, int ldc, int sync);
 // ggml ROPE forward, modes NORMAL (neox 0) / NEOX (neox 1), rotating all n_dims = head size elements: X, Y element
 // (i, h, t) at t * s2 + h * s1 + i floats; pos[n_tok]; ff: freq factors (n_dims/2) or NULL; corr: ggml_rope_yarn_corr_dims.

@@ -1142,4 +1142,10 @@ __kernel void gen9blas_gelu(__global const float *x, __global float *y) {
     const size_t i = get_global_id(0);
     y[i] = epi_gelu(x[i]);   // shared with gen9blas_epilog_hf8x (bit-identical fused and unfused paths)
 }
+// ggml GELU_ERF as ggml-cpu (ggml_vec_gelu_erf_f32): 0.5 x (1 + erf(x / sqrt 2)), F32. n elements, contiguous. Grid (n).
+__kernel void gen9blas_gelu_erf(__global const float *x, __global float *y) {
+    const size_t i = get_global_id(0);
+    const float v = x[i];
+    y[i] = 0.5f * v * (1.0f + erf(v * 0.70710678118654752440f));
+}
 #pragma OPENCL FP_CONTRACT ON

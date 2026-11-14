@@ -120,7 +120,7 @@ static int init_l12(const char *dir) {
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
 static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8, k_epi_8x;
-static cl_kernel k_rms, k_binop, k_rope, k_lnorm, k_gelu, k_lnorm_pack;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
+static cl_kernel k_rms, k_binop, k_rope, k_lnorm, k_gelu, k_lnorm_pack, k_gelu_erf;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
 int gen9blas_init(const char *dir) {
     static int inited;
     if (inited) return 0;
@@ -154,7 +154,8 @@ int gen9blas_init(const char *dir) {
       k_rope = clCreateKernel(ph, "gen9blas_rope", &e8); if (e8) k_rope = NULL;
       k_lnorm = clCreateKernel(ph, "gen9blas_layer_norm", &e8); if (e8) k_lnorm = NULL;
       { cl_int e9; k_lnorm_pack = clCreateKernel(ph, "gen9blas_layer_norm_pack", &e9); if (e9) k_lnorm_pack = NULL; }
-      k_gelu = clCreateKernel(ph, "gen9blas_gelu", &e8); if (e8) k_gelu = NULL; }
+      k_gelu = clCreateKernel(ph, "gen9blas_gelu", &e8); if (e8) k_gelu = NULL;
+      k_gelu_erf = clCreateKernel(ph, "gen9blas_gelu_erf", &e8); if (e8) k_gelu_erf = NULL; }
     // "v" kernels: (Ap, Bp, C, M, N, ldc, K, Kfull) -- also for chunks of data packed once (sub-buffers)
     // bin = NULL: main kernel from source (FP64: dgemm.cl, OpenCL C), not from an asm binary
     struct { int r; const char *bin, *k, *pa, *pb, *epi, *tri; int es, tn, km; cl_program pr; } t[4] = {
@@ -1038,6 +1039,20 @@ int gen9blas_gelu(size_t n, const float *X, float *Y, int sync) {
     if (get_obj(X, n * 4, &uA, 1, 0, &xX, &zX) || get_obj(Y, n * 4, &uC, 0, 1, &xY, &zY)) return -1;
     ARGB(k_gelu, 0, xX); ARGB(k_gelu, 1, xY);
     CHECK(clEnqueueNDRangeKernel(q, k_gelu, 1, NULL, &n, NULL, 0, NULL, NULL));
+    return ew_done(sync, xY, zY, n * 4, Y);
+}
+
+int gen9blas_gelu_erf(size_t n, const float *X, float *Y, int sync) {
+    NEW_OPERATION();
+    if (!k_gelu_erf) FAIL("gelu_erf: kernel not in this build");
+    if (!n) return 0;
+    bf_t xX, xY; int zX, zY;
+    if (X == Y) {   // in place: one object
+        if (get_obj(Y, n * 4, &uC, 1, 1, &xY, &zY)) return -1;
+        xX = xY;
+    } else if (get_obj(X, n * 4, &uA, 1, 0, &xX, &zX) || get_obj(Y, n * 4, &uC, 0, 1, &xY, &zY)) return -1;
+    ARGB(k_gelu_erf, 0, xX); ARGB(k_gelu_erf, 1, xY);
+    CHECK(clEnqueueNDRangeKernel(q, k_gelu_erf, 1, NULL, &n, NULL, 0, NULL, NULL));
     return ew_done(sync, xY, zY, n * 4, Y);
 }
 
