@@ -29,6 +29,7 @@ static attn_bin_t bins[] = {
     { 128, 7, 4, 2, 2, 1, 0, "attn_qwen7b_tokc.bin", NULL, NULL, 0 },  // Qwen2.5-7B (sched4, ROWVIS; docs/attention-gpu.md section 13)
     { 128, 2, 8, 2, 2, 0, 0, "attn_qwen3_tokc.bin", NULL, NULL, 0 },   // Qwen3 0.6B/1.7B, Qwen3-Embedding-0.6B (sched4; section 14)
     { 72, 1, 16, 2, 2, 0, 0, "attn_paddle_tokc.bin", NULL, NULL, 0 },  // PaddleOCR-VL vision encoder (SigLIP 16 x 72, sched5; G < RQ: dvis 0 only)
+    { 128, 8, 2, 2, 2, 0, 0, "attn_ernie_tokc.bin", NULL, NULL, 0 },   // PaddleOCR-VL text model (ERNIE 4.5 0.3B, sched4)
 };
 static cl_mem dKt; static size_t sKt;
 static char aerr[512];

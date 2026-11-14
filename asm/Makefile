@@ -95,6 +95,11 @@ $(BIN_DIR)/attn_qwen3_tokc.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-devi
 attn-paddle: $(BIN_DIR)/attn_paddle_tokc.bin
 $(BIN_DIR)/attn_paddle_tokc.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-device
 	DEVICE=$(DEVICE) python3 -I attn_gen.py sched5 attn.cl "$(ATTN_OPTS) -DD=72 -DG=1 -DHKV=16 -DRQ=2 -DNK=2 -DQTOK -DCAUSAL=1" $@
+# PaddleOCR-VL text model (ERNIE 4.5 0.3B): 16 query heads of 128 over 2 KV heads, G 8; RQ 2 keeps both rows of a
+# subgroup in one token (G % RQ == 0), so the plain causal template applies (as Qwen3); 16 K + 16 V steps: sched4.
+attn-paddle: $(BIN_DIR)/attn_ernie_tokc.bin
+$(BIN_DIR)/attn_ernie_tokc.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-device
+	DEVICE=$(DEVICE) python3 -I attn_gen.py sched4 attn.cl "$(ATTN_OPTS) -DD=128 -DG=8 -DHKV=2 -DRQ=2 -DNK=2 -DQTOK -DCAUSAL=1" $@
 FORCE:
 
 attn-check:

@@ -1,0 +1,41 @@
+PaddleOCR-VL text model (ERNIE 4.5 0.3B) attention on the GPU, branch paddle-gen9. Binary attn_ernie_tokc.bin:
+asm/attn.cl -DD=128 -DG=8 -DHKV=2 -DRQ=2 -DNK=2 -DQTOK -DCAUSAL=1, attn_gen.py sched4 (16 K + 16 V steps).
+
+1. SHARE OF THE PASS [MEAS, earlier today]: ggml-cpu, 4 threads, test_attn 128 16 2 1273 0 1280 nonpad (causal,
+   one page's prompt in one node): 62.9 ms per layer x 18 layers = ~1.1 s of a ~43 s page (2.6 %). In llama-server the
+   prompt runs in ubatches of 512 (-ub 512): nodes n_q 512/512/249 at depths 0/512/1024; decode (n_q 1) stays on
+   the CPU (n_q < 32). Upper bound of the gain: ~1 s per page plus fewer CPU/GPU alternations in the prefill.
+2. PREDICTION (written before building, see timestamp above) [EST]:
+   - generator: loopcheck OK and 0 bank conflicts as for Qwen3 (same D, RQ, NK; only G and HKV differ: G 8 -> 4 query
+     rows-pairs per KV head, HKV 2 -> V row 512 B);
+   - kernel (bench/attn_kcl, gp, n_q 1273 causal from depth 0, 18 layers): 280-310 GFLOPS on visible keys
+     (Qwen3 304-310 at d3584, 282 at d0: short causal prompts run fewer full blocks per row);
+   - FP64 STEP=1 error <= 5e-6, RAMP +-1 <= 1e-4, poison (one S mad negated) error ~1;
+   - test_attn through the backend: NMSE <= 1e-11 for causal d0, d512, d1024, n_q 249/512;
+   - end to end (kp, 6 pages one at a time): FA nodes of the text model on the GPU, page time -0.5 .. -1.0 s
+     (42.9 s before), text vs BF16/CPU unchanged (>= 0.996).
+   Falsification: any error above the bounds, any FA node of the text model still on ggml-cpu at n_q >= 32, or a page
+   time not below the previous run's spread.
+
+3. MEASURED [MEAS]
+Generator (kp, ocloc 24.35.30872.36): IGC loop 1260 lines, 1024 mad, 512 bank conflicts -> sched4 1503 lines, 1024 mad,
+0 conflicts; loopcheck: 256 O elements, same (V, p) products as IGC's loop. asm attn-check: 18 pinned binaries unchanged.
+Kernel, gp (UHD 620), bench/attn_kcl (own table: ernie, ernie poison, qwen3), 18 layers x 5 passes, two rounds:
+  ernie causal n_q 1280 from depth 0 (VIS0 1, DVIS 1):  314.6 / 313.8 GFLOPS kernel, 309.3 / 308.4 incl. k_kt + submit
+  qwen3 binary, same n (control, H_kv 8):               315.2 / 313.6 GFLOPS kernel, 302.4 / 300.9 incl.
+  FP64 STEP=1: n_q 512 at depth 768: 2.9-3.2e-6; n_q 250, visible from 1032: 2.6-2.9e-6
+  RAMP=1 6.0e-6, RAMP=-1 1.75e-5 (QSIGMA 0.1); POISON (one S mad negated) 0.924 -> our ISA runs.
+Backend (ggml-backend/test_attn, gp): FIRST RUN FAILED for every shape, also D 72 and Qwen3 that passed earlier:
+  "attention on the GPU failed (GPU execution error (kcl ...))", nodes recomputed by ggml-cpu (NMSE exactly 0).
+  Cause: lib/kernels.c had 17 programs, lib/kcl.c kept per-program state in consts[16] / isa_off[16] without a check:
+  the 17th program (attn_ernie_tokc.bin) wrote past both arrays. bench/attn_kcl (3 programs) was not affected.
+  Fix: KCL_MAX_PROGRAMS 64 and kcl_init refuses a larger table. Main has 15 programs: the next two additions there
+  would have hit the same silent corruption.
+  After the fix, all on the GPU: D128 HKV2 causal n_q 512 d0 NMSE 4.7e-14, 4.40 vs 8.95 ms ggml-cpu; d512 1.9e-13,
+  10.8 vs 22.5 ms; n_q 249 d1024 2.4e-13, 8.1 vs 16.3 ms; n_q 75 0.72 vs 0.73 ms; qrange 20 2.4e-12; kv_rows 4.7e-14;
+  hole (general masks) 4.5e-14; Qwen3 shape and D 72 again on the GPU (NMSE 2.2e-13 / 5.7e-13).
+End to end (kp, PaddleOCR-VL Q8_0, -mmdev GEN9, 6 pages one at a time): 486 FA nodes on the GPU (162 vision + 324
+text: 18 layers x 3 ubatches x 6 pages), 272 GFLOPS overall; n_q < 32 (decode) 108 declined as designed.
+  prefill 21.9 -> 21.25 s/page (-0.6 s), page 42.9 -> 42.7 s (decode varies by more than that); text 0.995-1.0.
+Against the prediction: kernel 314 GFLOPS (predicted 280-310: slightly above); errors within bounds; backend NMSE within
+bound after the kcl fix; end to end -0.6 s of prefill inside the predicted -0.5..-1.0 s, the page total within noise.
