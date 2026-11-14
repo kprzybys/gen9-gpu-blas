@@ -23,6 +23,7 @@ static attn_bin_t bins[] = {
     { 128, 6, 2, 2, 2, 0, "attn_qwen_tokc.bin", NULL, NULL, 0 },    // Qwen2.5-1.5B (sched4)
     { 64, 4, 8, 4, 2, 0, "attn_llama_tokc.bin", NULL, NULL, 0 },    // Llama-3.2-1B (sched2)
     { 64, 1, 20, 4, 2, 0, "attn_whisper_tokc.bin", NULL, NULL, 0 }, // whisper large-v3(-turbo) encoder (sched2); G < RQ: dvis 0 only
+    { 64, 1, 8, 4, 2, 0, "attn_nemo_tokc.bin", NULL, NULL, 0 },     // NeMo Nemotron 3 Diarization encoder (whisper's kernel, 8 heads)
     { 128, 7, 4, 2, 2, 1, "attn_qwen7b_tokc.bin", NULL, NULL, 0 },  // Qwen2.5-7B (sched4, ROWVIS; docs/attention-gpu.md section 13)
     { 128, 2, 8, 2, 2, 0, "attn_qwen3_tokc.bin", NULL, NULL, 0 },   // Qwen3 0.6B/1.7B, Qwen3-Embedding-0.6B (sched4; section 14)
 };
