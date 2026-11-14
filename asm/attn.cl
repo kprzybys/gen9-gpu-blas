@@ -15,6 +15,10 @@ typedef float16 OV;
 typedef float8 OV;
 #define BR(p) as_float8(intel_sub_group_block_read8(p))
 #define BW(p, v) intel_sub_group_block_write8((p), as_uint8(v));
+#elif D == 72   // PaddleOCR-VL vision encoder (SigLIP, 16 heads): 9 dims per lane, .s0-.s7 from one 8-row block, .s8 one row
+typedef float16 OV;   // .s9-.sf unused (never stored; IGC drops them)
+#define BR(p) ((OV)(as_float8(intel_sub_group_block_read8(p)), as_float(intel_sub_group_block_read((p) + 64)), 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f))
+#define BW(p, v) { intel_sub_group_block_write8((p), as_uint8((v).lo)); intel_sub_group_block_write((p) + 64, as_uint((v).s8)); }
 #endif
 
 #if NK == 1
@@ -65,15 +69,23 @@ __kernel void k_kt(__global const ushort *K, __global ushort *Kt, int nk) {
 #define SOFT(r) { float mn = sub_group_reduce_max(SMAX(s##r)); \
     if (mn > m##r) { float a = native_exp2(m##r - mn); o##r *= a; l##r *= a; m##r = mn; } \
     s##r = native_exp2(s##r - m##r); l##r += SSUM(s##r); }
+#if D == 72
+#define PV72(r) o##r[8] = fma(p, (float)as_half(v8), o##r[8]);
+#else
+#define PV72(r)
+#endif
 #define PVK(r, k) { float p = sub_group_broadcast(SK(s##r, k), j); \
     _Pragma("unroll") for (int c = 0; c < 8; c++) o##r[c] = fma(p, (float)as_half(v0[c]), o##r[c]); \
-    if (D == 128) { _Pragma("unroll") for (int c = 0; c < 8; c++) o##r[8 + c] = fma(p, (float)as_half(v1[c]), o##r[8 + c]); } }
+    if (D == 128) { _Pragma("unroll") for (int c = 0; c < 8; c++) o##r[8 + c] = fma(p, (float)as_half(v1[c]), o##r[8 + c]); } \
+    PV72(r) }
 #define PV0(r) PVK(r, 0)
 #define PV1(r) PVK(r, 1)
 #define STORE(r) { float il = 1.f / sub_group_reduce_add(l##r); int row = ROWOF(r), t = row / G, hh = row - t * G; \
     __global uint *op = (__global uint *)(O + (t * (HKV * G) + hkv * G + hh) * D); BW(op, o##r * il) }
 #if D == 128
 #define READV ushort8 v0 = intel_sub_group_block_read_us8(vp), v1 = intel_sub_group_block_read_us8(vp + 64);
+#elif D == 72
+#define READV ushort8 v0 = intel_sub_group_block_read_us8(vp), v1; ushort v8 = intel_sub_group_block_read_us(vp + 64);
 #else
 #define READV ushort8 v0 = intel_sub_group_block_read_us8(vp), v1;
 #endif

@@ -18,14 +18,17 @@
 
 // rowvis: binary built with -DROWVIS=1 (asm/attn.cl): per-row visible key counts (the RQ rows of a subgroup may span two
 // consecutive tokens, so dvis 1 is right for any G when RQ <= 2) and clamped row indices (n_q*G need not divide by RQ)
-typedef struct { int D, G, HKV, RQ, NK, rowvis; const char *bin; cl_kernel kt, attn; int state; } attn_bin_t;   // state: 0 untried, 1 ok, -1 failed
+// plain: IGC-compiled loop (attn_gen.py plain), no masking of a partial last key block: only n_v = min(n_k, vis0) a
+// multiple of 8*NK keys and dvis 0 (the same count for every token)
+typedef struct { int D, G, HKV, RQ, NK, rowvis, plain; const char *bin; cl_kernel kt, attn; int state; } attn_bin_t;   // state: 0 untried, 1 ok, -1 failed
 static attn_bin_t bins[] = {
-    { 128, 6, 2, 2, 2, 0, "attn_qwen_tokc.bin", NULL, NULL, 0 },    // Qwen2.5-1.5B (sched4)
-    { 64, 4, 8, 4, 2, 0, "attn_llama_tokc.bin", NULL, NULL, 0 },    // Llama-3.2-1B (sched2)
-    { 64, 1, 20, 4, 2, 0, "attn_whisper_tokc.bin", NULL, NULL, 0 }, // whisper large-v3(-turbo) encoder (sched2); G < RQ: dvis 0 only
-    { 64, 1, 8, 4, 2, 0, "attn_nemo_tokc.bin", NULL, NULL, 0 },     // NeMo Nemotron 3 Diarization encoder (whisper's kernel, 8 heads)
-    { 128, 7, 4, 2, 2, 1, "attn_qwen7b_tokc.bin", NULL, NULL, 0 },  // Qwen2.5-7B (sched4, ROWVIS; docs/attention-gpu.md section 13)
-    { 128, 2, 8, 2, 2, 0, "attn_qwen3_tokc.bin", NULL, NULL, 0 },   // Qwen3 0.6B/1.7B, Qwen3-Embedding-0.6B (sched4; section 14)
+    { 128, 6, 2, 2, 2, 0, 0, "attn_qwen_tokc.bin", NULL, NULL, 0 },    // Qwen2.5-1.5B (sched4)
+    { 64, 4, 8, 4, 2, 0, 0, "attn_llama_tokc.bin", NULL, NULL, 0 },    // Llama-3.2-1B (sched2)
+    { 64, 1, 20, 4, 2, 0, 0, "attn_whisper_tokc.bin", NULL, NULL, 0 }, // whisper large-v3(-turbo) encoder (sched2); G < RQ: dvis 0 only
+    { 64, 1, 8, 4, 2, 0, 0, "attn_nemo_tokc.bin", NULL, NULL, 0 },     // NeMo Nemotron 3 Diarization encoder (whisper's kernel, 8 heads)
+    { 128, 7, 4, 2, 2, 1, 0, "attn_qwen7b_tokc.bin", NULL, NULL, 0 },  // Qwen2.5-7B (sched4, ROWVIS; docs/attention-gpu.md section 13)
+    { 128, 2, 8, 2, 2, 0, 0, "attn_qwen3_tokc.bin", NULL, NULL, 0 },   // Qwen3 0.6B/1.7B, Qwen3-Embedding-0.6B (sched4; section 14)
+    { 72, 1, 16, 2, 2, 0, 1, "attn_paddle_tokc.bin", NULL, NULL, 0 },  // PaddleOCR-VL vision encoder (SigLIP 16 x 72, no mask; plain)
 };
 static cl_mem dKt; static size_t sKt;
 static char aerr[512];
@@ -82,6 +85,7 @@ int gen9blas_attn_f16kv(int D, int H, int HKV, int nq, int nk, const float *Q, c
     // causal: unsupported. ROWVIS binaries take each row's own count (rows differ by at most dvis * (RQ - 1) keys,
     // all in the last block: RQ <= 2 asserted by attn_gen.py).
     if (G % b->RQ && dvis != 0 && !b->rowvis) return 1;
+    if (b->plain && (dvis != 0 || (vis0 < nk ? vis0 : nk) % (8 * NK))) return 1;
     const size_t row = (size_t)HKV * D * 2;
     if (k_bytes < (size_t)nk * row || v_bytes < (size_t)nk * row) return 1;
     if (((uintptr_t)Q | (uintptr_t)K | (uintptr_t)V | (uintptr_t)O) & 15) return 1;   // OWord block reads / writes
