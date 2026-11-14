@@ -382,7 +382,28 @@ static int submit(void) {
     PHASE_END(F_EXEC); if (phases) fz_objects += n;
     seq_sent = s->seq; cur = -1;
     if (r) {
-        fprintf(stderr, "kcl: execbuffer2: %s\n", strerror(errno));
+        int err = errno;
+        fprintf(stderr, "kcl: execbuffer2: %s\n", strerror(err));
+        if (getenv("KCL_DEBUG_FAULT")) {   // which userptr objects of this batch are not (fully) mapped now
+            for (int i = 0; i < nup; i++) {
+                int inlist = 0;
+                for (int j = 0; j < nbo_list; j++) inlist |= bo_list[j] == up[i].bo;
+                if (!inlist) continue;
+                size_t mapped = 0;
+                FILE *f = fopen("/proc/self/maps", "r"); char line[512];
+                while (f && fgets(line, sizeof line, f)) {
+                    unsigned long a, b; char perm[8];
+                    if (sscanf(line, "%lx-%lx %7s", &a, &b, perm) != 3) continue;
+                    unsigned long lo = a > up[i].s ? a : up[i].s, hi = b < up[i].e ? b : up[i].e;
+                    if (hi > lo && perm[0] == 'r' && (up[i].bo->ro || perm[1] == 'w')) mapped += hi - lo;
+                    if (hi > lo) fprintf(stderr, "kcl:     map %s", line);
+                }
+                if (f) fclose(f);
+                fprintf(stderr, "kcl:   userptr %#lx-%#lx (%lu KB) %s span %d: %s\n", (unsigned long)up[i].s, (unsigned long)up[i].e,
+                        (unsigned long)(up[i].e - up[i].s) >> 10, up[i].bo->ro ? "ro" : "rw", up[i].span,
+                        mapped == up[i].e - up[i].s ? "mapped" : "NOT FULLY MAPPED");
+            }
+        }
         return -1;
     }
     return 0;
