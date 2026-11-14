@@ -525,13 +525,14 @@ runs (k_kt is 4x larger with 8 KV heads, ~4 % of the layer); 282 GFLOPS at d0. F
 | Qwen3-1.7B pp512 d2048 | 78.9 | 158.2 | -50 % |
 | Qwen3-1.7B pp512 d3584 | 67.9 | 131.3 | -48 % |
 | Qwen3-Embedding, one text per request | 363-380 tok/s | 491-496 | +30 % |
-| Qwen3-Embedding, 64 texts per request | 377-408 tok/s | 394-408 | ~0 |
+| Qwen3-Embedding, 64 texts per request | 362-403 tok/s | 489 (after a3d52dd) | +21-35 % |
 
-Embeddings match (cosine >= 0.999995 between GPU and CPU attention). **Open:** llama-server packs several texts into
-one ubatch; the mask is then block-diagonal (each sequence sees only its own keys), which the library declines, so
-batched embedding requests keep attention on the CPU. Supporting it needs a per-row first visible key next to the
-last (a start offset per sequence), the same kind of change as ROWVIS. Until then a client gets the best rate by
-sending one text per request.
+Embeddings match (cosine >= 0.999995 between GPU and CPU attention). **General masks** (a60baa5, a3d52dd): llama-server packs several texts into one ubatch, and its ring KV cache
+wraps, so a row sees e.g. cells [500, 511] plus [0, t], listed through kv_rows. Since softmax attention ignores key
+order, the backend splits the mask into runs whose rows each add one visible column, orders the keys as "first row's
+columns, then each new one", reads K/V in place when they are consecutive cache rows and otherwise gathers them into a
+reused pinned staging buffer, and launches the unchanged kernel per run. Batched embeddings: 362-403 -> 489 tok/s
+(+21-35 %), all FA nodes on the GPU, mask analysis ~3 % of the run, cosine >= 0.99999 (`results/attn-qwen3-2026-11-14.txt`).
 
 **Build note:** the second laptop now builds byte-identical kernels with IGC 1.0.17537.24 copied into the user's home
 and `LD_LIBRARY_PATH` (its distro IGC 1.0.17791.18 spills): all 16 attention binaries match `asm/attn_sha256.txt` and
