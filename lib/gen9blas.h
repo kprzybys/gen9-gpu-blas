@@ -48,6 +48,13 @@ void gen9blas_packed_free(gen9blas_packed *Bp);
 int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
 // the same with FP16 activations (lda in elements)
 int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
+// gen9blas_gemm_pb_f16w with the following ops fused into the epilogue (whisper encoder): C = [gelu](A.Bp + bias) [+ R].
+// bias: N floats or NULL; gelu: 0/1 (ggml GELU, tanh form with FP16 rounding as ggml-cpu); R: M x N (row stride ldr) or
+// NULL, may be C itself with ldr == ldc. Bit-identical to gemm_pb_f16w followed by the separate ADD / GELU kernels.
+// *nonfinite as gemm_pb_f16w (raw GEMM value): then recompute unfused. gen9blas_epilog_ext_supported(): kernel present.
+int gen9blas_gemm_pb_f16w_ex(int M, const float *A, int lda, const gen9blas_packed *Bp, float *C, int ldc,
+                             const float *bias, int gelu, const float *R, int ldr, int *nonfinite);
+int gen9blas_epilog_ext_supported(void);
 // ggml backend, gated FFN with FP16 weights kept on the GPU: Y = (silu(X Wg) * (X Wu)) Wd (F32 X: M x K, Y: M x Nd);
 // Pg, Pu: K -> N, Pd: N -> Nd, all packed as GEN9BLAS_HS. Intermediates stay FP16 on the GPU; *nonfinite as above.
 // ggml backend, per-layer elementwise ops on host F32 memory. Queued without a wait (sync = 0) when every operand is

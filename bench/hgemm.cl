@@ -621,6 +621,48 @@ __kernel void gen9blas_epilog_hf8(__global const half *Cp, int ldp, int Mp, __gl
     }
     if (bad) atomic_or(nonfinite, 1);
 }
+// gen9blas_epilog_hf8 with the ops that follow a MUL_MAT in whisper's encoder fused in (one pass over C instead of
+// separate ADD / GELU kernels): v = fp32(Cp); flags & 1: v += bias[j]; flags & 2: v = gelu(v) (gen9blas_gelu's formula);
+// flags & 4: v += R[i * ldr + j]. Same F32 operations in the same order as the separate kernels -> bit-identical.
+// R may be C itself (in-place residual: each work-item reads its 4 elements before writing them). The nonfinite check
+// is on the raw GEMM value, as gen9blas_epilog_hf8 (FP16 overflow -> the caller recomputes unfused in F32).
+// One GELU for gen9blas_gelu and the fused epilogue: FP contraction off, so the result does not depend on the kernel
+// it is inlined into (with contraction on, IGC fused differently in the vector epilogue: 0.5 % of values 1 ulp apart).
+static inline float epi_gelu(float v) {
+    #pragma OPENCL FP_CONTRACT OFF
+    if (v <= -10.0f) return 0.0f;
+    if (v >= 10.0f) return v;
+    const float h = convert_float(convert_half_rte(v));
+    const float g = 0.5f * h * (1.0f + tanh(0.79788456080286535587989211986876f * h * (1.0f + 0.044715f * h * h)));
+    return convert_float(convert_half_rte(g));
+}
+__kernel void gen9blas_epilog_hf8x(__global const half *Cp, int ldp, int Mp, __global float *C, int ldc, int N,
+                                   __global int *nonfinite, __global const float *bias, __global const float *R, int ldr,
+                                   int flags) {
+    const int j0 = get_global_id(0) * 4, i = get_global_id(1);
+    __global const half *cp = Cp + (size_t)i * ldp + j0;
+    __global float *c = C + (size_t)i * ldc + j0;
+    __global const float *r = R + (size_t)i * ldr + j0;
+    int bad = 0;
+    if (j0 + 4 <= N) {
+        float4 v = convert_float4(as_half4(vload2(0, (__global const uint *)cp)));
+        bad = any(!isfinite(v));
+        if (flags & 1) v += vload4(0, bias + j0);
+        if (flags & 2) v = (float4)(epi_gelu(v.s0), epi_gelu(v.s1), epi_gelu(v.s2), epi_gelu(v.s3));
+        if (flags & 4) v += vload4(0, r);
+        vstore4(v, 0, c);
+    } else {
+        for (int t = 0; t < 4 && j0 + t < N; t++) {
+            float v = vload_half(0, cp + t);
+            bad |= !isfinite(v);
+            if (flags & 1) v += bias[j0 + t];
+            if (flags & 2) v = epi_gelu(v);
+            if (flags & 4) v += r[t];
+            c[t] = v;
+        }
+    }
+    if (bad) atomic_or(nonfinite, 1);
+}
 // Epilogue FP16 work buffer -> F32 C; *nonfinite |= 1 if any result is inf or NaN (FP16 overflow: recompute in F32).
 __kernel void gen9blas_epilog_hf(__global const half *Cp, int ldp, int Mp, __global float *C, int ldc, long sC, float alpha,
                                  float beta, __global int *nonfinite) {
@@ -1051,15 +1093,6 @@ void gen9blas_layer_norm(__global const float *x, int ldx, __global const float 
 // fp16(gelu(fp16(x))). n elements, contiguous. Grid (n).
 __kernel void gen9blas_gelu(__global const float *x, __global float *y) {
     const size_t i = get_global_id(0);
-    const float v = x[i];
-    float r;
-    if (v <= -10.0f) r = 0.0f;
-    else if (v >= 10.0f) r = v;
-    else {
-        const float h = convert_float(convert_half_rte(v));
-        const float g = 0.5f * h * (1.0f + tanh(0.79788456080286535587989211986876f * h * (1.0f + 0.044715f * h * h)));
-        r = convert_float(convert_half_rte(g));
-    }
-    y[i] = r;
+    y[i] = epi_gelu(x[i]);   // shared with gen9blas_epilog_hf8x (bit-identical fused and unfused paths)
 }
 #pragma OPENCL FP_CONTRACT ON

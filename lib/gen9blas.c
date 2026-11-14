@@ -119,7 +119,7 @@ static int init_l12(const char *dir) {
 
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
-static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8;
+static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8, k_epi_8x;
 static cl_kernel k_rms, k_binop, k_rope, k_lnorm, k_gelu;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
 int gen9blas_init(const char *dir) {
     static int inited;
@@ -148,6 +148,7 @@ int gen9blas_init(const char *dir) {
     { cl_int e5; k_dequant2 = clCreateKernel(ph, "gen9blas_dequant_b16s", &e5); if (e5) k_dequant2 = NULL; }
     { cl_int e6; k_pa3_v = clCreateKernel(ph, "pk_a3_f32v", &e6); if (e6) k_pa3_v = NULL; }
     { cl_int e7; k_epi_8 = clCreateKernel(ph, "gen9blas_epilog_hf8", &e7); if (e7) k_epi_8 = NULL; }
+    { cl_int e8; k_epi_8x = clCreateKernel(ph, "gen9blas_epilog_hf8x", &e8); if (e8) k_epi_8x = NULL; }   // fused bias/GELU/residual
     { cl_int e8; k_rms = clCreateKernel(ph, "gen9blas_rms_norm", &e8); if (e8) k_rms = NULL;
       k_binop = clCreateKernel(ph, "gen9blas_binop_rows", &e8); if (e8) k_binop = NULL;
       k_rope = clCreateKernel(ph, "gen9blas_rope", &e8); if (e8) k_rope = NULL;
@@ -753,15 +754,38 @@ static int epilog_hf(cl_mem dCp, int ldp, int Mp, bf_t xC, int ldc, int N, int M
     return 0;
 }
 
-static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite);
+// Epilogue with bias / GELU / residual fused in (gen9blas_epilog_hf8x), banded like epilog_hf.
+static int epilog_hfx(cl_mem dCp, int ldp, int Mp, bf_t xC, int ldc, int N, int M, bf_t xnf, bf_t xb, bf_t xR, int ldr, int flags) {
+    cl_kernel k = k_epi_8x;
+    ARG(k, 0, dCp); ARG(k, 1, ldp); ARG(k, 2, Mp); ARGB(k, 3, xC); ARG(k, 4, ldc); ARG(k, 5, N); ARGB(k, 6, xnf);
+    ARGB(k, 7, xb); ARGB(k, 8, xR); ARG(k, 9, ldr); ARG(k, 10, flags);
+    size_t mb = pack_band_bytes() / ((size_t)N * 6);
+    if (mb < 1) mb = 1;
+    for (size_t i0 = 0; i0 < (size_t)M; i0 += mb) {
+        size_t o[3] = { 0, i0, 0 }, ge[3] = { (size_t)(N + 3) / 4, (size_t)M - i0 < mb ? (size_t)M - i0 : mb, 1 };
+        CHECK(clEnqueueNDRangeKernel(q, k, 3, o, ge, NULL, 0, NULL, NULL));
+    }
+    return 0;
+}
+typedef struct { const float *bias; int gelu; const float *R; int ldr; } epi_ext_t;
+static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite,
+                            const epi_ext_t *ext);
+int gen9blas_epilog_ext_supported(void) { return k_epi_8x != NULL; }
+int gen9blas_gemm_pb_f16w_ex(int M, const float *A, int lda, const gen9blas_packed *P, float *C, int ldc,
+                             const float *bias, int gelu, const float *R, int ldr, int *nonfinite) {
+    if (!k_epi_8x) FAIL("gemm_pb_f16w_ex: the binary lacks gen9blas_epilog_hf8x");
+    const epi_ext_t e = { bias, gelu, R, ldr };
+    return gemm_pb_f16w_any(0, M, A, lda, P, C, ldc, nonfinite, &e);
+}
 int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
-    return gemm_pb_f16w_any(0, M, A, lda, P, C, ldc, nonfinite);
+    return gemm_pb_f16w_any(0, M, A, lda, P, C, ldc, nonfinite, NULL);
 }
 // The same with FP16 activations (ggml conv_1d: im2col result as src0, F16 kernel as src1): packed by the HS pa kernel.
 int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
-    return gemm_pb_f16w_any(1, M, A, lda, P, C, ldc, nonfinite);
+    return gemm_pb_f16w_any(1, M, A, lda, P, C, ldc, nonfinite, NULL);
 }
-static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
+static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite,
+                            const epi_ext_t *ext) {
     static int *nf;   // USM flag word (coherent with the GPU through the LLC)
     NEW_OPERATION();
     if (!P || P->type != GEN9BLAS_HS || !types[GEN9BLAS_HS].ready || !k_pa3_f32) FAIL("gemm_pb_f16w: needs B packed as GEN9BLAS_HS");
@@ -788,7 +812,19 @@ static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9
         CHECK(clEnqueueNDRangeKernel(q, r->main, 1, NULL, &gm, &lm, 0, NULL, NULL));
     } else if (launch(r, dAp, 0, P->buf, 0, dCp, 0, Mp, Np, Np, Kp, Kp, 0)) return -1;
     bf_t xnf = { NULL, nf };
-    if (epilog_hf(dCp, Np, Mp, xC, ldc, N, M, xnf)) return -1;
+    if (ext) {   // bias (row vector, N floats) / GELU / residual R (M x N, row stride ldr; may be C itself)
+        static work_t uBias, uR;
+        static float dummy[4];
+        bf_t xb, xR; int zb, zR;
+        const int flags = (ext->bias ? 1 : 0) | (ext->gelu ? 2 : 0) | (ext->R ? 4 : 0);
+        if (get_obj(ext->bias ? ext->bias : dummy, ext->bias ? (size_t)N * 4 : sizeof dummy, &uBias, 1, 0, &xb, &zb)) return -1;
+        if (ext->R && ext->R == C && ext->ldr == ldc) {   // in place: the same object as C
+            xR = xC;
+            if (!zC) memcpy(xC.p, C, bC);                  // work-buffer path: C's current values are the residual
+        }
+        else if (get_obj(ext->R ? ext->R : dummy, ext->R ? ((size_t)(M - 1) * ext->ldr + N) * 4 : sizeof dummy, &uR, 1, 0, &xR, &zR)) return -1;
+        if (epilog_hfx(dCp, Np, Mp, xC, ldc, N, M, xnf, xb, xR, ext->R ? ext->ldr : 0, flags)) return -1;
+    } else if (epilog_hf(dCp, Np, Mp, xC, ldc, N, M, xnf)) return -1;
     if (to_host(xC, zC, bC, C)) return -1;
     *nonfinite = *nf != 0;
     return 0;
