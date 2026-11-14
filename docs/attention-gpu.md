@@ -533,6 +533,12 @@ order, the backend splits the mask into runs whose rows each add one visible col
 columns, then each new one", reads K/V in place when they are consecutive cache rows and otherwise gathers them into a
 reused pinned staging buffer, and launches the unchanged kernel per run. Batched embeddings: 362-403 -> 489 tok/s
 (+21-35 %), all FA nodes on the GPU, mask analysis ~3 % of the run, cosine >= 0.99999 (`results/attn-qwen3-2026-11-14.txt`).
+The mask analysis now compares each row with the previous one 8-32 bytes at a time and checks values only in the
+changed columns (identical runs, 20000 random masks): 3.0 -> 0.31 s per server run, **489 -> 516 tok/s (+5.6 %)**.
+Profile of that run (`GEN9_PROF=1`): GEMMs 74 % at 554-626 GFLOPS, attention 17-18 %, elementwise ops a few %;
+`-ub 1024/2048` is slower (488/476 tok/s); a larger pinned-memory limit gives +1 %
+(`results/attn-qwen3-prof-gp-2026-11-14.txt`). Short sequences (one per node, tc): fixed ~0.6 ms per node, the CPU is
+faster below ~150 tokens (`results/attn-qwen3-short-tc-2026-11-14.txt`).
 
 **Build note:** the second laptop now builds byte-identical kernels with IGC 1.0.17537.24 copied into the user's home
 and `LD_LIBRARY_PATH` (its distro IGC 1.0.17791.18 spills): all 16 attention binaries match `asm/attn_sha256.txt` and
