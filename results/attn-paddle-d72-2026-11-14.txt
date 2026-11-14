@@ -1,0 +1,32 @@
+PaddleOCR-VL vision encoder attention (SigLIP, D 72, 16 heads, H_kv 16, G 1, no mask), branch paddle-gen9.
+Shape per layer: n_q = n_k = 5040 (A4 page at 150 DPI -> 840x1176 px after mtmd's max_pixels -> 60x84 patches), 27 layers.
+Binaries (asm/attn.cl -DD=72 -DG=1 -DHKV=16 -DNK=2 -DQTOK -DCAUSAL=1, whl, ocloc 24.35.30872.36 on kp):
+  attn_p72_plain  attn_gen.py plain (IGC's loop), RQ 2            (= bench/attn_paddle_tokc.bin, in the library table)
+  attn_p72_s5r2   sched5, RQ 2: ring 5 (nsteps 9 K + 16 V = 25)  loopcheck OK, 0 bank conflicts, 79 free registers
+  attn_p72_s1r2   sched1, RQ 2: ring 1                           loopcheck OK, 0 conflicts
+  attn_p72_s1r4   sched1, RQ 4: ring 1 (RQ 4 leaves 42 free, NS 5 does not fit)   loopcheck OK, 0 conflicts
+Generator change: V row tail for D % 64 == 8 (A64 oword block read x1, IGC's own message 0x021D08FF) into slot b+4.
+
+PREDICTION (written before the run, 2026-11-14 23:54) [EST], gp (UHD 620), bench/attn_kcl_p72, kernel GFLOPS:
+  plain 215-235 (template / IGC level, docs/attention-gpu.md sections 8-9; test_attn on gp gave 234 incl. k_kt)
+  s5r2  280-310 (Qwen C4: 296-308 at RQ 2; 9 K steps of 2 sends + 16 V steps of 1+1 sends: more sends per mad than Qwen)
+  s1r2  255-290 (NS 1 exposes read latency; Qwen NS 2 vs 4: 288 vs 296)
+  s1r4  280-330 (RQ 4 doubles the reuse of each K/V read, like Llama 310-340, but ring 1)
+  Error vs FP64 (STEP sampling) <= 1e-5 for all; criterion to replace plain: >= +15 % kernel GFLOPS and error <= 2e-3.
+
+MEASURED [MEAS], gp (UHD 620, 1036-1100 MHz), bench/attn_kcl_p72 (attn_kcl.c + kernel table of the four binaries),
+VIS0=5040 DVIS=0, 27 layers x 3 passes, two alternating rounds, kernel GFLOPS (incl. k_kt + submit/wait):
+  n_q 5040 (one launch per layer, 400-690 ms: near / past the 640 ms preemption limit, timing only):
+    plain 232.7 / 232.2   s5r2 280.9 / (round 2 lost)   s1r2 169.6   s1r4 289.4 / 289.5
+  n_q 1008 (~100 ms launches, as the library splits them), STEP=1 (whole output vs FP64), 2 layers:
+    plain 238.4 (err 2.5-2.8e-6)   s5r2 290.5 (2.9-3.1e-6)   s1r2 159.0 (2.9-3.1e-6)   s1r4 267.1 (2.9-3.1e-6)
+  RAMP=1 QSIGMA=0.1 (rescale every block): s5r2 and s1r4 err 1.7e-4 (bound 2e-3).
+Against the prediction: plain in range; s5r2 280-290 at the low end of 280-310; s1r2 far below (160-170: ring 1 with
+RQ 2 leaves every read exposed); s1r4 at full layers 289 but 267 in 100 ms launches. Chosen: s5r2 (library slices).
+Library + backend (ggml-backend/test_attn on gp, sched5 as attn_paddle_tokc.bin, now masked: any n_k):
+  5040: GEN9 409.8 ms vs ggml-cpu 809.1 ms (2.0x), NMSE 5.7e-13, 284.6 GFLOPS incl. pinning/submit/wait
+  3136: 159.7 vs 368.0 ms; 4980 (n_k % 16 != 0, rounded up and masked): 406.5 vs 751.0 ms, NMSE 5.6e-13;
+  1024 qrange 20: NMSE 2.5e-12; whispernan (V tail NaN): ggml-cpu, exact.
+asm attn-check: 18 pinned binaries unchanged by the generator change (attn_nemo_tokc has no pinned hash on main).
+End to end (kp, PaddleOCR-VL Q8_0, -mmdev GEN9, 6 pages one at a time): 162 attention nodes on the GPU at 270 GFLOPS
+(69.8 s vs 85.0 s with plain), prefill 24.5 -> 21.9 s/page, page 46.0 -> 42.9 s; text vs BF16/CPU 0.996-1.0.

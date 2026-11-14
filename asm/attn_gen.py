@@ -60,6 +60,7 @@ import isa  # noqa: E402
 W = "(W)     "
 KERNEL = "k_attn"
 RD4 = "// wr:1h+0, rd:4; hdc.dc1; a64 aligned oword block read x8"   # as ocloc disasm decodes it (isa.send_regs)
+RD1 = "// wr:1h+0, rd:1; hdc.dc1; a64 aligned oword block read x1"   # D % 64 == 8: the V row tail (16 B)
 # ocloc device: whl = UHD 620 (laptop), skl = HD 530 (desktop); a binary for one is CL_INVALID_BINARY on the other.
 DEVICE = os.environ.get("DEVICE", "whl")
 # PE_IN_S=1: exp in place, the score registers serve as the even p copies (saves RQ*NK registers)
@@ -496,6 +497,11 @@ def sched(pro, loop, epi, P, NS):
         Mx, T1, T2 = A.one(), A.one(), A.one()
         MO = 0
     nv = D // 64                                        # V block reads per row
+    # D % 64 == 8 (PaddleOCR-VL's vision encoder, D 72): dims 64..71 of a V row are read by a second message, an A64
+    # oword block read x1 (16 B into one GRF, IGC's own form for intel_sub_group_block_read_us) into slot register b + 4
+    # (free: a V step uses b..b+3 for nv 1), which vmads already address for chunk c = 8 (h 1, cc 0)
+    nvt = (D % 64) // 8
+    assert D % 64 in (0, 8) and (nvt == 0 or nv == 1), ("V row tail other than 8 dims after one 64-dim block", D)
     # SLIM_HDR: header pairs in adjacent registers, advanced together by one (2|M0) :q add with dst <4> (32 B apart);
     # with one V block read per step (D 64) two V headers serve the even and odd key steps (advanced by 2 rows).
     hdr2 = SLIM_HDR and NK == 2
@@ -509,6 +515,8 @@ def sched(pro, loop, epi, P, NS):
         return [b, b + 1]
     hK = pair() if hdr2 else [A.one() for _ in range(NK)]
     hV = pair() if vpair else [A.one() for _ in range(nv)]
+    hVt = A.one() if nvt else None
+    assert not (nvt and (vpair or hdr2)), "SLIM_HDR with a V row tail: not implemented"
     rs = HKV * D * 2                                    # V row stride (bytes)
     # SLIM_SMAX: RQ consecutive registers that are dead during the row-max reduction (odd p copies, even p copies
     # unless they are the score registers, T1, unallocated): Pe/Po are last read by the previous block's V mads and
@@ -545,12 +553,14 @@ def sched(pro, loop, epi, P, NS):
     # Send headers: the A64 oword block read uses only the address in DW0-1 (IGC's own headers set only .0:uq
     # too), but the whole header is zeroed once here so no field holds a prologue leftover; inside the loop only
     # .0:q is updated, the other 6 dwords stay zero.
-    for h in hK + hV:
+    for h in hK + hV + ([hVt] if nvt else []):
         out.append(f"{W}mov (8|M0)  r{h}.0<1>:ud  0x0:ud")
     for k in range(NK):
         out.append(f"{W}add (1|M0)  r{hK[k]}.0<1>:q  r{kp[0]}.{kp[1]}<0;1,0>:q  {k * D * 16}:w")
     for h in range(len(hV)):    # nv 2: the two halves of a V row; vpair with nv 1: rows j and j + 1
         out.append(f"{W}add (1|M0)  r{hV[h]}.0<1>:q  r{vp[0]}.{vp[1]}<0;1,0>:q  {h * (128 if nv == 2 else rs)}:w")
+    if nvt:     # the row tail: dims 64.. start 128 B into the row
+        out.append(f"{W}add (1|M0)  r{hVt}.0<1>:q  r{vp[0]}.{vp[1]}<0;1,0>:q  128:w")
     nks, nvs = D // 8, 8 * NK
     nsteps = nks + nvs
 
@@ -580,6 +590,9 @@ def sched(pro, loop, epi, P, NS):
             for h in range(nv):
                 o += [f"{W}send (16|M0)  r{b + 4 * h}:w  r{hV[h]}  0xC  0x024D0CFF  {RD4}",
                       f"{W}add (1|M0)  r{hV[h]}.0<1>:q  r{hV[h]}.0<0;1,0>:q  {rs}:w"]
+            if nvt:
+                o += [f"{W}send (4|M0)  r{b + 4}  r{hVt}  0xC  0x021D08FF  {RD1}",
+                      f"{W}add (1|M0)  r{hVt}.0<1>:q  r{hVt}.0<0;1,0>:q  {rs}:w"]
         return o
     # slot of global step s: s % NS over a continuous step counter -> needs nsteps % NS == 0 for a fixed code body
     assert nsteps % NS == 0, f"steps per block {nsteps} must divide by NS {NS}"

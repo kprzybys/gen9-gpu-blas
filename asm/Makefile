@@ -89,12 +89,12 @@ $(BIN_DIR)/attn_qwen7b_tokc.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-dev
 $(BIN_DIR)/attn_qwen3_tokc.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-device
 	DEVICE=$(DEVICE) python3 -I attn_gen.py sched4 attn.cl "$(ATTN_OPTS) -DD=128 -DG=2 -DHKV=8 -DRQ=2 -DNK=2 -DQTOK -DCAUSAL=1" $@
 # PaddleOCR-VL vision encoder (SigLIP: 16 heads of 72, no GQA, no mask; kp-docsearch docs/plan-paddle-gen9.md, branch
-# paddle-gen9): 9 dims per lane, which sched<NS> does not handle (loopcheck rejects the 9th), so IGC's loop as is (plain).
-# The plain loop does not mask a partial last key block: the library takes it only for n_k a multiple of 16 and dvis 0.
+# paddle-gen9): 9 dims per lane (attn.cl D 72); attn_gen.py reads the V row tail (dims 64..71) with an oword block read x1.
+# nsteps = 9 + 16 = 25, so the ring is 1 or 5 deep: sched5 RQ 2 measured best (results/attn-paddle-d72-2026-11-14.txt).
 # Not in ATTN_BINS (no pinned hash yet): make attn-paddle.
 attn-paddle: $(BIN_DIR)/attn_paddle_tokc.bin
 $(BIN_DIR)/attn_paddle_tokc.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-device
-	DEVICE=$(DEVICE) python3 -I attn_gen.py plain attn.cl "$(ATTN_OPTS) -DD=72 -DG=1 -DHKV=16 -DRQ=2 -DNK=2 -DQTOK -DCAUSAL=1" $@
+	DEVICE=$(DEVICE) python3 -I attn_gen.py sched5 attn.cl "$(ATTN_OPTS) -DD=72 -DG=1 -DHKV=16 -DRQ=2 -DNK=2 -DQTOK -DCAUSAL=1" $@
 FORCE:
 
 attn-check:
