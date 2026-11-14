@@ -1,5 +1,7 @@
 # Writing fast Gen9 kernels: the whole path
 
+List of every existing kernel, with its purpose and measured result: [kernel-catalog.md](kernel-catalog.md).
+
 How to get a kernel for the UHD 620 / HD 530 (Gen9 / Gen9.5) as close to its ceiling as possible, from the model to
 the instruction level. This file is the map; the details live in:
 
