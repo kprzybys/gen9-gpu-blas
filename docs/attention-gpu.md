@@ -506,3 +506,33 @@ tokens. The model plus the packed-weight cache is the real limit on a 16 GB mach
 other sessions open ended in an OOM kill. Measure 7B in a memory-capped scope (`systemd-run --user --scope -p
 MemoryMax=9G -p MemorySwapMax=0`) with GEN9_CACHE_MB set explicitly.
 
+
+## 14. Qwen3 (G = 2): Qwen3-Embedding-0.6B, Qwen3-0.6B, Qwen3-1.7B
+
+All three have 16 query heads of 128 over 8 KV heads (G 2, 28 layers). With RQ 2 both rows of a subgroup are one
+token, so the plain causal template applies (no ROWVIS), scheduled like Qwen2.5-1.5B (sched4): binary
+`attn_qwen3_tokc.bin` ({128,2,8,2,2}), 0 bank conflicts, no scratch, loopcheck OK (`results/attn-qwen3-2026-11-14.txt`).
+
+**Kernel** [MEAS, UHD 620, kcl + userptr]: 304-310 GFLOPS at d3584 vs 318 for the Qwen2.5-1.5B binary in the same
+runs (k_kt is 4x larger with 8 KV heads, ~4 % of the layer); 282 GFLOPS at d0. FP64 STEP=1 error <= 4.1e-6, RAMP
++-1 3.6-6.5e-5, poison 0.83; test_attn through the backend NMSE <= 6e-13 (d0, d3584, n_q 75, kv_rows).
+
+**End to end** [MEAS, UHD 620, -ngl 0, -t 4]:
+
+| | GEN9_ATTN=0 | default (GPU) | change |
+|---|---|---|---|
+| Qwen3-1.7B pp512 d0 | 158.8 t/s | 211.0 | -25 % time |
+| Qwen3-1.7B pp512 d2048 | 78.9 | 158.2 | -50 % |
+| Qwen3-1.7B pp512 d3584 | 67.9 | 131.3 | -48 % |
+| Qwen3-Embedding, one text per request | 363-380 tok/s | 491-496 | +30 % |
+| Qwen3-Embedding, 64 texts per request | 377-408 tok/s | 394-408 | ~0 |
+
+Embeddings match (cosine >= 0.999995 between GPU and CPU attention). **Open:** llama-server packs several texts into
+one ubatch; the mask is then block-diagonal (each sequence sees only its own keys), which the library declines, so
+batched embedding requests keep attention on the CPU. Supporting it needs a per-row first visible key next to the
+last (a start offset per sequence), the same kind of change as ROWVIS. Until then a client gets the best rate by
+sending one text per request.
+
+**Build note:** the second laptop now builds byte-identical kernels with IGC 1.0.17537.24 copied into the user's home
+and `LD_LIBRARY_PATH` (its distro IGC 1.0.17791.18 spills): all 16 attention binaries match `asm/attn_sha256.txt` and
+`lib/kernels.c` has the same sha256 as on the first laptop.
