@@ -48,8 +48,12 @@ typedef struct { const char *name; int ts0, ts1; } meas_t;
 static meas_t meas[TS_MAX / 2]; static int nmeas;
 static struct { const char *name; double ms; long n; } sums[256]; static int nsum;
 static uint64_t next_addr = 1ull << 32;
-static kbo *isa, *consts[16], *priv_bo, *ts_bo;
-static uint32_t *isa_off[16];   // [program][kernel] -> offset in isa
+// Programs in the kernel table (kernels.c from gen_kernels.py): 17 since the PaddleOCR-VL attention binaries (2026-11-15).
+// Was 16 without a check: a 17th program wrote past consts[] / isa_off[] and every attention launch then failed with a
+// GPU execution error (gp, test_attn); kcl_init now refuses a larger table instead.
+#define KCL_MAX_PROGRAMS 64
+static kbo *isa, *consts[KCL_MAX_PROGRAMS], *priv_bo, *ts_bo;
+static uint32_t *isa_off[KCL_MAX_PROGRAMS];   // [program][kernel] -> offset in isa
 static uint32_t ts_n;
 
 static uint64_t kbo_addr(uint64_t size);
@@ -452,6 +456,10 @@ static int init(void) {
     up_limit = (uint64_t)(um && *um ? atoi(um) : 1024) << 20;   // pinned process memory
     if (getenv("KCL_MOCS")) MOCS_WB = atoi(getenv("KCL_MOCS")) << 1;
     if (getenv("KCL_L3") && !strcmp(getenv("KCL_L3"), "slm")) l3_always_slm = 1;
+    if (kcl_nprograms > KCL_MAX_PROGRAMS) {
+        fprintf(stderr, "kcl: %d programs in the kernel table, at most %d (KCL_MAX_PROGRAMS)\n", kcl_nprograms, KCL_MAX_PROGRAMS);
+        return -1;
+    }
     uint64_t sz = 0;
     for (int i = 0; i < kcl_nprograms; i++)
         for (uint32_t j = 0; j < kcl_programs[i].nkernels; j++) sz += (kcl_programs[i].kernels[j].isa_len + 1024 + 63) & ~63u;
