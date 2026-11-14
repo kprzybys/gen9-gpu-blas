@@ -86,6 +86,8 @@ int gen9blas_layer_norm(int M, int K, const float *X, int ldx, const float *w, c
 int gen9blas_gelu(size_t n, const float *X, float *Y, int sync);
 // ggml GELU_ERF (exact erf form, F32 as ggml-cpu) over n contiguous floats; X == Y allowed.
 int gen9blas_gelu_erf(size_t n, const float *X, float *Y, int sync);
+// F32 rows x H heads x D (element (r, h, d) at X[r * s_row + h * s_head + d]) -> FP16 [r][h][d] contiguous, RTE, saturated.
+int gen9blas_cvt_f16_heads(int rows, int H, int D, const float *X, long s_row, long s_head, uint16_t *Y, int sync);
 int gen9blas_binop_rows(int op, int M, int K, const float *A, int lda, const float *B, int ldb, float *C, int ldc, int sync);
 // ggml ROPE forward, modes NORMAL (neox 0) / NEOX (neox 1), rotating all n_dims = head size elements: X, Y element
 // (i, h, t) at t * s2 + h * s1 + i floats; pos[n_tok]; ff: freq factors (n_dims/2) or NULL; corr: ggml_rope_yarn_corr_dims.

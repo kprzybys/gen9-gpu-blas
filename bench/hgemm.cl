@@ -1142,6 +1142,14 @@ __kernel void gen9blas_gelu(__global const float *x, __global float *y) {
     const size_t i = get_global_id(0);
     y[i] = epi_gelu(x[i]);   // shared with gen9blas_epilog_hf8x (bit-identical fused and unfused paths)
 }
+// F32 rows of H heads x D (row r, head h at x + r * s_row + h * s_head, strides in floats) -> FP16 [r][h][d] contiguous,
+// round to nearest even, saturated to +-65504 (no Inf: a key/value beyond FP16 range is clamped, not turned into NaN).
+// Grid (D, H, rows). For attention inputs given as F32 views (NeMo-Speech.cpp: RoPE output / fused QKV projection).
+__kernel void gen9blas_cvt_f16_heads(__global const float *x, long s_row, long s_head, __global half *y) {
+    const size_t d = get_global_id(0), h = get_global_id(1), r = get_global_id(2), D = get_global_size(0), H = get_global_size(1);
+    const float v = clamp(x[r * s_row + h * s_head + d], -65504.0f, 65504.0f);
+    vstore_half_rte(v, (r * H + h) * D + d, y);
+}
 // ggml GELU_ERF as ggml-cpu (ggml_vec_gelu_erf_f32): 0.5 x (1 + erf(x / sqrt 2)), F32. n elements, contiguous. Grid (n).
 __kernel void gen9blas_gelu_erf(__global const float *x, __global float *y) {
     const size_t i = get_global_id(0);
