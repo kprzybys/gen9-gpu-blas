@@ -43,6 +43,34 @@ static int run_case(const char *name, int M, int K, int N, int use_bias, int gel
     return nd != 0 || nf0 != nf1;
 }
 
+// LayerNorm -> GEMM(s): gen9blas_layer_norm + gemm_pb_f16w_ex (packs Y itself) vs gen9blas_layer_norm_pack +
+// gemm_pa_f16w_ex (Y packed by the norm). Both Y and the GEMM outputs must be bit-identical.
+static int run_norm_case(const char *name, int M, int K, int N, int gelu) {
+    uint16_t *W = malloc((size_t)N * K * 2);
+    float *X = malloc((size_t)M * K * 4), *w = malloc((size_t)K * 4), *b = malloc((size_t)K * 4), *bias = malloc((size_t)N * 4);
+    float *Y0 = malloc((size_t)M * K * 4), *Y1 = malloc((size_t)M * K * 4), *C0 = malloc((size_t)M * N * 4), *C1 = malloc((size_t)M * N * 4);
+    for (size_t i = 0; i < (size_t)N * K; i++) { _Float16 h = (_Float16)(0.08f * rnd()); memcpy(&W[i], &h, 2); }
+    for (size_t i = 0; i < (size_t)M * K; i++) X[i] = 3.0f * rnd() + 0.5f;
+    for (int i = 0; i < K; i++) { w[i] = 1.0f + rnd(); b[i] = 0.2f * rnd(); }
+    for (int j = 0; j < N; j++) bias[j] = rnd();
+    gen9blas_packed *P = gen9blas_pack_b(GEN9BLAS_HS, 1, K, N, W, K);
+    gen9blas_packed_a *pa = gen9blas_packed_a_new();
+    int nf0 = 0, nf1 = 0;
+    if (!P || !pa) { printf("%s: alloc failed: %s\n", name, gen9blas_error()); return 1; }
+    if (gen9blas_layer_norm(M, K, X, K, w, b, 1e-5f, Y0, K, 1) ||
+        gen9blas_gemm_pb_f16w_ex(M, Y0, K, P, C0, N, bias, gelu, NULL, 0, &nf0)) { printf("%s: ref: %s\n", name, gen9blas_error()); return 1; }
+    if (gen9blas_layer_norm_pack(M, K, X, K, w, b, 1e-5f, Y1, K, pa, 1) ||
+        gen9blas_gemm_pa_f16w_ex(pa, P, C1, N, bias, gelu, NULL, 0, &nf1)) { printf("%s: pack: %s\n", name, gen9blas_error()); return 1; }
+    long dy = 0, dc = 0;
+    for (size_t i = 0; i < (size_t)M * K; i++) dy += memcmp(&Y0[i], &Y1[i], 4) != 0;
+    for (size_t i = 0; i < (size_t)M * N; i++) dc += memcmp(&C0[i], &C1[i], 4) != 0;
+    printf("%-34s M %d K %d N %d: Y %s (%ld), C %s (%ld)\n", name, M, K, N, dy ? "DIFFERENT" : "bit-identical", dy,
+           dc ? "DIFFERENT" : "bit-identical", dc);
+    gen9blas_packed_a_free(pa); gen9blas_packed_free(P);
+    free(W); free(X); free(w); free(b); free(bias); free(Y0); free(Y1); free(C0); free(C1);
+    return dy != 0 || dc != 0 || nf0 != nf1;
+}
+
 int main(int argc, char **argv) {
     const int M = argc > 1 ? atoi(argv[1]) : 600;
     if (gen9blas_init(GEN9_BENCH_DIR)) { printf("init: %s\n", gen9blas_error()); return 1; }
@@ -53,6 +81,12 @@ int main(int argc, char **argv) {
     bad |= run_case("bias + residual (out, fc2)", M, 1280, 1280, 1, 0, 1, 0);
     bad |= run_case("bias + residual in place (R = C)", M, 5120, 1280, 1, 0, 1, 1);
     bad |= run_case("odd N (tail of 4)", 37, 1280, 1283, 1, 1, 1, 0);
+    if (gen9blas_norm_pack_supported()) {
+        bad |= run_norm_case("norm -> pack -> GEMM + bias (Q)", M, 1280, 1280, 0);
+        bad |= run_norm_case("norm -> pack -> GEMM + bias + GELU (fc1)", M, 1280, 5120, 1);
+        bad |= run_norm_case("norm -> pack, partial 16-row band", 37, 1280, 1280, 0);
+        bad |= run_norm_case("norm -> pack, K not a multiple of 32", 40, 1000, 512, 0);
+    } else { printf("FAIL: gen9blas_layer_norm_pack not in the library\n"); bad = 1; }
     printf("%s\n", bad ? "FAIL" : "PASS: all cases bit-identical");
     return bad;
 }

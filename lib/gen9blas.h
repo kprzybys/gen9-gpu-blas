@@ -55,6 +55,17 @@ int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_pa
 int gen9blas_gemm_pb_f16w_ex(int M, const float *A, int lda, const gen9blas_packed *Bp, float *C, int ldc,
                              const float *bias, int gelu, const float *R, int ldr, int *nonfinite);
 int gen9blas_epilog_ext_supported(void);
+// A GEMM input packed once (FP16 A3 tiles) and used by several gen9blas_gemm_pa_f16w_ex calls: whisper's LayerNorm
+// writes it while normalising (gen9blas_layer_norm_pack: same Y as gen9blas_layer_norm, plus the packed copy that
+// pk_a3_f32v would make of Y), Q / K / V / fc1 then skip their own packing. Bit-identical GEMM inputs.
+typedef struct gen9blas_packed_a gen9blas_packed_a;
+gen9blas_packed_a *gen9blas_packed_a_new(void);
+void gen9blas_packed_a_free(gen9blas_packed_a *pa);
+int gen9blas_norm_pack_supported(void);
+int gen9blas_layer_norm_pack(int M, int K, const float *X, int ldx, const float *w, const float *b, float eps, float *Y, int ldy,
+                             gen9blas_packed_a *pa, int sync);
+int gen9blas_gemm_pa_f16w_ex(const gen9blas_packed_a *pa, const gen9blas_packed *Bp, float *C, int ldc,
+                             const float *bias, int gelu, const float *R, int ldr, int *nonfinite);
 // ggml backend, gated FFN with FP16 weights kept on the GPU: Y = (silu(X Wg) * (X Wu)) Wd (F32 X: M x K, Y: M x Nd);
 // Pg, Pu: K -> N, Pd: N -> Nd, all packed as GEN9BLAS_HS. Intermediates stay FP16 on the GPU; *nonfinite as above.
 // ggml backend, per-layer elementwise ops on host F32 memory. Queued without a wait (sync = 0) when every operand is

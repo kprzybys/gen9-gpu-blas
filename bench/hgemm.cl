@@ -1089,6 +1089,53 @@ void gen9blas_layer_norm(__global const float *x, int ldx, __global const float 
         yr[i] = v;
     }
 }
+// gen9blas_layer_norm that also writes its output as the FP16 A3 tiles of the next GEMM (what pk_a3_f32v would make of
+// y): the GEMMs reading this norm skip their own packing. Same arithmetic for y; FP16 by convert_half_rte as
+// pk_a3_f32v; rows M..Mp-1 and columns K..Kp-1 of the tiles are zero. Grid (128, Mp).
+// A3 tile (16 x 16, 256 halves, tile (m / 16, k / 16) at ((m / 16) * (Kp / 16) + k / 16) * 256): element (mi, ki) of the
+// tile sits in 8-half chunk c = (ki / 4) * 8 + (mi / 8) * 4 + (ki % 2 == 0) * 2 + (mi / 4) % 2, position
+// (mi % 4) * 2 + (ki % 4) / 2 (the inverse of pk_a3_f32v's store loop).
+static inline size_t a3_index(int m, int k, int Kp) {
+    const int mi = m & 15, ki = k & 15;
+    const int c = (ki >> 2) * 8 + (mi >> 3) * 4 + ((ki & 1) == 0) * 2 + ((mi >> 2) & 1);
+    return ((size_t)(m >> 4) * (Kp >> 4) + (k >> 4)) * 256 + c * 8 + (mi & 3) * 2 + ((ki & 3) >> 1);
+}
+__kernel __attribute__((reqd_work_group_size(128, 1, 1)))
+void gen9blas_layer_norm_pack(__global const float *x, int ldx, __global const float *w, int has_w, __global const float *b,
+                              int has_b, float eps, __global float *y, int ldy, int K, __global half *Ap, int Kp, int M) {
+    __local float part[128];
+    const int t = get_local_id(0);
+    const int r = get_global_id(1);
+    if (r >= M) {   // padding row of the last 16-row band
+        for (int i = t; i < Kp; i += 128) Ap[a3_index(r, i, Kp)] = (half)0.0f;
+        return;     // the whole work-group (one row) takes this branch: no barrier is skipped unevenly
+    }
+    __global const float *xr = x + (size_t)r * ldx;
+    float s = 0.0f;
+    for (int i = t; i < K; i += 128) s += xr[i];
+    part[t] = s;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int h = 64; h > 0; h >>= 1) { if (t < h) part[t] += part[t + h]; barrier(CLK_LOCAL_MEM_FENCE); }
+    const float mean = part[0] / (float)K;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    s = 0.0f;
+    for (int i = t; i < K; i += 128) { const float d = xr[i] - mean; s += d * d; }
+    part[t] = s;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int h = 64; h > 0; h >>= 1) { if (t < h) part[t] += part[t + h]; barrier(CLK_LOCAL_MEM_FENCE); }
+    const float scale = 1.0f / sqrt(part[0] / (float)K + eps);
+    __global float *yr = y + (size_t)r * ldy;
+    for (int i = t; i < Kp; i += 128) {
+        float v = 0.0f;
+        if (i < K) {
+            v = (xr[i] - mean) * scale;
+            if (has_w) v = v * w[i];
+            if (has_b) v = v + b[i];
+            yr[i] = v;
+        }
+        Ap[a3_index(r, i, Kp)] = convert_half_rte(v);
+    }
+}
 // ggml GELU (tanh form) as ggml-cpu with GGML_GELU_FP16: x <= -10 -> 0, x >= 10 -> x, otherwise the table value
 // fp16(gelu(fp16(x))). n elements, contiguous. Grid (n).
 __kernel void gen9blas_gelu(__global const float *x, __global float *y) {
