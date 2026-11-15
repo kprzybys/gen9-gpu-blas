@@ -63,3 +63,13 @@ removed ggml-backend/ directory), and the flag summary warned "no optimization f
    ~42 % of the time is host CPU, but in ggml-cpu / whisper.cpp, already built with -march=native: compiler options are
    exhausted there too. The levers are algorithmic: decoder weights Q8_0 (-13 %, earlier), fewer windows (-mc 0:
    32 -> 25), beam size, and the decoder steps themselves (memory-bound, the GPU shares the same DRAM).
+
+4. Whisper, decoder weights Q8_0 (ggml-large-v3-turbo-q8_0.bin, whole model; the encoder weights are dequantized on the
+   GPU once), same settings, one run each:
+                 total    encode (windows)     batchd (runs, per run)      sample   prompt   user CPU   WER pl60
+     F16         260.0 s  144.8 s (31)         91.6 s (12153, 7.54 ms)     10.0 s   7.9 s    605.5 s    17.46 % (208/1191)
+     Q8_0        249.9 s  166.8 s (36)         59.7 s (11381, 5.24 ms)      8.5 s   9.1 s    506.1 s    18.39 % (219/1191)
+   A decoder step is 30 % faster and CPU time -16 %, but the run took 36 encoder windows instead of 31 (window boundaries
+   follow the decoded text and timestamps), so the total gained only 4 %. WER +0.9 pp, likely from the different windows.
+   Note: these runs used whisper-cli's defaults (beam search 5, best-of 5, fallback); the earlier benchmark
+   (whisper-large-v3-turbo-gp-2026-11-13, WER 14.4 %) used greedy decoding (-bs 1 -bo 1) with fallback.
