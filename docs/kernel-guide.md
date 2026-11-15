@@ -218,7 +218,9 @@ None of them produces competitive Gen9 code (state November 2026, details in the
 
 Use them as a source of ideas (sections 2-4), not of code.
 
-## 6. Vendor LLM libraries: IPEX-LLM
+## 6. LLM libraries with their own GPU kernels: IPEX-LLM, MLC-LLM
+
+### IPEX-LLM
 
 IPEX-LLM (formerly BigDL-LLM, Intel) ran LLMs on Intel CPU, iGPU, Arc/Flex/Max and NPU on top of PyTorch + IPEX and
 SYCL/oneAPI (Level Zero, not OpenCL). The repository was **archived on 2026-01-28** and is read-only; Intel gives no
@@ -255,6 +257,44 @@ further support. Its ideas live on in llama.cpp's SYCL backend and PyTorch's `xp
 Lessons for this project: split kernels by row count (GEMV-like vs packed GEMM) and repack weights once, as we
 already do; choose the crossover by measurement on Gen9, not by copying an XMX library's threshold; candidate idea:
 FP8 (or Q8) KV cache, model it first ([performance-model.md](performance-model.md)) before writing a kernel.
+
+### MLC-LLM (TVM)
+
+MLC-LLM (`github.com/mlc-ai/mlc-llm`, active) compiles a model ahead of time with TVM (its fork
+`github.com/mlc-ai/relax`) into kernels for CUDA, ROCm, Metal, Vulkan, OpenCL and WebGPU. All kernel code is open:
+the kernels are generated from TIR by **DLight** schedule rules (`python/tvm/s_tir/dlight/gpu/`). Read on 2026-11-16
+at mlc-llm `3b7663a` and relax `45221f267` (both 2026-11-14) [EXT]:
+
+- **No tuning, no Intel preset.** The pipeline (`python/mlc_llm/compiler_pass/pipeline.py`) applies fixed rules in
+  order `Matmul`, `GEMV`, `Reduction`, `GeneralReduction`, `Fallback`; no MetaSchedule search. The ready targets
+  (`support/auto_target.py`) are `vulkan:generic` (256 threads, 32 KB shared) and OpenCL only for Android (Adreno,
+  Mali). The DLight rules contain no Intel branch, no sub-group or block-read path.
+- **Constants per target kind, picked on one device.** `GEMV` has branches for `cuda`, `metal` ("tuned on M2 Ultra
+  for 7B"), `rocm`, Adreno, `vulkan` and Mali; an Intel GPU through OpenCL falls into the generic branch:
+  `VEC_C = 1` (scalar loads), no shared memory, `TS, TR = 1, 64`, unroll 64. Through Vulkan: `VEC_C = 4`, vector in
+  shared memory, `TS, TR` 4x32 or 16x32. `Matmul` has its own constants only for CUDA/ROCm and Adreno; elsewhere the
+  default: 8x8 threads, 4x4 micro-tile, k-step 8, `vector_size = 1`, shared memory, unroll 256. On Gen9 MLC would
+  therefore run untuned generic schedules; expect results in the class of llama.cpp's Vulkan backend (37 t/s pp512
+  against 107-109 for the GEN9 backend, Qwen2.5-1.5B F32; `ggml-intel-igpu` repository,
+  `results/llama-cpp-blas-2026-11-12.txt` and `results/ggml-backend-step1-f32-2026-11-13.txt`) [HYP, not measured].
+- **Small batches go to a GEMV schedule** (`compiler_pass/low_batch_specialization.py`): for a dynamic row count
+  n <= 2 a `LowBatchGEMV` with bucket 2, n <= 8 bucket 4, larger n `Matmul`. Same crossover (8) as our backend,
+  reached independently; IPEX-LLM's 48-64 is the XMX outlier.
+- **Weights `q4f16_1`** (`quantization/quantization.py`): symmetric int4, groups of 32 along K, 8 values per
+  `uint32`, one FP16 scale per group (4.5 bits per weight, like Q4_0), layout NK; embedding and final FC quantized
+  too.
+- **Dequantization fused into the consumer, every call.** `FuseDequantizeMatmulEwise` and `FuseDequantizeTake` merge
+  the dequantize TIR into the following matmul (with its elementwise epilogue) and into the embedding lookup;
+  weights stay int4 in memory and are unpacked inside each GEMV/GEMM. Our backend instead dequantizes once to an FP16
+  cache (fast prefill, 3.6x more bytes per token). Measured on Gen9: a fused small-batch Q4_K kernel (k <= 8) is
+  issue-bound, not memory-bound, and only reaches parity with the FP16 path (section 1, lessons of 2026-11-13). The
+  fused route pays on Gen9 only for k = 1 (pure GEMV, token generation) if the decode fits the non-mad budget; count
+  instructions first.
+
+Lessons for this project: the GEMV/GEMM crossover at 8 rows is confirmed by an independent design; the fixed
+rule-plus-constants model is what our generators already do, but with Gen9 constants found by our sweeps (section 4)
+instead of generic defaults. Possible use: one measurement of MLC on Vulkan as "compiler vs hand-written kernels",
+only on request, because building TVM + MLC is a large job (see also section 5).
 
 ## 7. Open items
 

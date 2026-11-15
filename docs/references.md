@@ -138,6 +138,14 @@ themselves are closed binaries (`bigdl-core-xe-*` wheels) and were not inspected
 [kernel-guide.md](kernel-guide.md) section 6. License: Apache-2.0, nothing copied.
 Related user report (Gen9.5 UHD 630 not supported): `https://nikolasent.github.io/hardware/deeplearning/2025/02/09/iGPU-Benchmark-VLM.html`.
 
+### MLC-LLM (`mlc-llm`, commit `3b7663a`, 2026-11-14) and its TVM fork (`relax`, commit `45221f267`, 2026-11-14)
+
+Sources: `https://github.com/mlc-ai/mlc-llm` (`python/mlc_llm/compiler_pass/pipeline.py`,
+`compiler_pass/low_batch_specialization.py`, `compiler_pass/fuse_dequantize_*.py`, `quantization/`,
+`support/auto_target.py`) and `https://github.com/mlc-ai/relax` (`python/tvm/s_tir/dlight/gpu/`: `matmul.py`,
+`gemv.py`, `low_batch_gemv.py`). Read 2026-11-16 for schedules, small-batch dispatch and quantization format.
+Summary: [kernel-guide.md](kernel-guide.md) section 6. License: Apache-2.0, nothing copied.
+
 ## 4. Software compared against (not part of the repository)
 
 | Software | Version | Role |
