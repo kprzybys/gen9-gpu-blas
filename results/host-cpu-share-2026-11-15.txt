@@ -73,3 +73,10 @@ removed ggml-backend/ directory), and the flag summary warned "no optimization f
    follow the decoded text and timestamps), so the total gained only 4 %. WER +0.9 pp, likely from the different windows.
    Note: these runs used whisper-cli's defaults (beam search 5, best-of 5, fallback); the earlier benchmark
    (whisper-large-v3-turbo-gp-2026-11-13, WER 14.4 %) used greedy decoding (-bs 1 -bo 1) with fallback.
+
+5. Whisper F16, greedy decoding (-bs 1 -bo 1, fallback on), otherwise as in 3:
+     total 234.8 s, encode 153.3 s (33 windows), decode 67.3 s (2884 tokens, 23.3 ms each), prompt 8.8 s,
+     sample 2.8 s, batchd 0.1 s, 3 fallbacks; user CPU 478.3 s; WER 14.44 % (172/1191) -- the earlier benchmark value.
+   Against beam search 5 (whisper-cli default, section 3): -10 % time, -21 % CPU time, WER 17.46 -> 14.44 %.
+   On this set beam search costs time and quality. The decoder (now 29 %, one token per 23 ms, memory-bound) is where
+   Q8_0 should pay off (-13 % measured earlier with greedy decoding).
