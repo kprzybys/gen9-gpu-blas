@@ -1,0 +1,68 @@
+hgemm 64x64x64                   99ce0b5bfead1e88
+hgemm a/b 64x64x64               788b295648280d4f
+hgemm 129x77x300                 bc6e978ab9f3d94b
+hgemm a/b 129x77x300             124dfe44016f994d
+hgemm 512x384x1000               de08ed59205dc4cb
+hgemm a/b 512x384x1000           2049eef9c093b87f
+hgemm 1024x1024x1024             f5023cffa7c16179
+hgemm a/b 1024x1024x1024         0d9bbd33cb75272f
+hgemm 8x4096x1024                aadb191340397b1a
+hgemm a/b 8x4096x1024            de96a8bf5e34d451
+hgemm 2048x16x512                31da6aab9277c7dc
+hgemm a/b 2048x16x512            46e63bb2f0b67653
+hsymm 300                        f6d432f079550a03
+hsyrk 300                        160b86f5f88801f0
+hsyr2k 300                       d2e753a1e5788966
+htrmm 300                        f6cb7281b254d8bc
+htrsm 300                        a3c17c02edd57a31
+hgemm_batched 4x96               2890da2076d026a4
+sgemm 64x64x64                   5a6c5265c663dfd8
+sgemm a/b 64x64x64               815456fec79042d7
+sgemm 129x77x300                 977e3edc0ec9f9a4
+sgemm a/b 129x77x300             164677b6d8ce769d
+sgemm 512x384x1000               6ea57bcb94989bd8
+sgemm a/b 512x384x1000           845621b0ac2374d4
+sgemm 1024x1024x1024             b8c6b3881a7fb269
+sgemm a/b 1024x1024x1024         92f866fd61eb9553
+sgemm 8x4096x1024                65c7145d302949c8
+sgemm a/b 8x4096x1024            f39cf5ff904c4570
+sgemm 2048x16x512                4862c09fc4d3b126
+sgemm a/b 2048x16x512            b57d10a253c6c0ac
+ssymm 300                        c2541c32902eff96
+ssyrk 300                        18d01db0284fc383
+ssyr2k 300                       25a8261d33804e6d
+strmm 300                        20da96d917e173c6
+strsm 300                        cbccd7c495f43007
+sgemm_batched 4x96               f58fef1fbe298559
+hgemm accurate 512x384x1000      1330cdaa06efe47a
+saxpy                            4849cd1497378a95
+sdot                             dca805d1c8c5fedd
+snrm2                            93a772df55a09294
+sasum                            45f9e6862fa0de84
+siamax                           9e1fe575d3f4f9dd
+sgemv                            0b69d7ae55dfce60
+sgemv T                          3f6b310fb404cddb
+ssymv                            74fe13dccea022f4
+strmv                            82a9097529212e71
+strsv                            fcc0542e1af12bea
+sger                             bd10d7193e48af9b
+daxpy                            202b644a33e8ea2a
+ddot                             19d45117726db950
+dnrm2                            0f0c64197fd2af40
+dasum                            ad5ddd29013d391c
+diamax                           9e1fe575d3f4f9dd
+dgemv                            805685412841da50
+dgemv T                          d016af29b016e725
+dsymv                            10fab5b199211a2e
+dtrmv                            3e15df4078605043
+dtrsv                            4ec78d295d7165ed
+dger                             7a18f405afd74286
+test_basic         RESULT: all OK
+test_level3        RESULT: all OK
+test_level12       RESULT: all OK
+test_blas          RESULT: all OK
+test_blas_d        RESULT: all OK
+test_blas_banded   RESULT: all OK
+test_skinny        RESULT: all OK
+test_userptr       RESULT: all OK
+test_packed        errors: 0
