@@ -274,6 +274,13 @@ See section 6. Fixed cost, mains power: 48 us wall / 14-17 us CPU for a small ax
 the rest is i915 (execbuf 8 us, wait). The hypothesis "too many objects in `execbuf`" was rejected (15 -> 7
 objects, no change). Source: `results/overhead-2026-11-12.txt`.
 
+**Do not queue more than a few seconds of GPU work at once (2026-11-14).**
+i915 expires requests that wait in its queue longer than ~20 s ("Fence expiration time out" in the kernel log); the
+expired tail is cancelled silently and the results are garbage, while later submissions run correctly. Raising kcl's
+batch slots `KSLOT` from 8 to 64 (about 34 s of work in flight) cut the waits per file to 2 but broke every long file
+[MEAS, `results/ina-kslot-kp-2026-11-14.txt`; code archived as tag `archive/ina-kslot`]. The bounded queue (`KSLOT` = 8,
+~1-2 s in flight) is back-pressure, not data transfer, and stays.
+
 ---
 
 ## 5. Kernel-writing lessons
