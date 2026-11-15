@@ -104,6 +104,19 @@ int gen9blas_binop_rows(int op, int M, int K, const float *A, int lda, const flo
 int gen9blas_rope(int n_dims, int nh, int n_tok, const float *X, long xs1, long xs2, float *Y, long ys1, long ys2,
                   const int *pos, const float *ff, int neox, float freq_base, float freq_scale, float ext_factor,
                   float attn_factor, const float corr[2], int sync);
+// ggml_rope_multi with mode GGML_ROPE_TYPE_MROPE (sections[4], pos = 4 * n_tok positions): NEOX pair order, pair j takes
+// the position of its sector j % sum(sections). Returns -1 if the kernel is missing (gen9blas_rope_multi_supported()).
+int gen9blas_rope_multi(int n_dims, int nh, int n_tok, const float *X, long xs1, long xs2, float *Y, long ys1, long ys2,
+                        const int *pos, const float *ff, const int sections[4], float freq_base, float freq_scale,
+                        float ext_factor, float attn_factor, const float corr[2], int sync);
+int gen9blas_rope_multi_supported(void);
+// ggml SET_ROWS with F32 source rows and an F16 destination (llama.cpp's KV-cache writes): dst row idx[i] of plane (i02, i03)
+// = src row i, RTE rounding (bit-identical to ggml-cpu). idx int64 (idx64 = 1) or int32, byte strides b10/b11/b12,
+// broadcast over planes as ggml-cpu. dst must be zero-copy (USM or userptr). sync: wait and report *bad (index out of range).
+int gen9blas_set_rows_f16(int nc, int nr, int ne02, int ne03, const float *src, long s1, long s2, long s3,
+                          const void *idx, size_t idx_bytes, long b10, long b11, long b12, int idx64, int ne11, int ne12,
+                          uint16_t *dst, size_t dst_bytes, long d1, long d2, long d3, long ne1, int sync, int *bad);
+int gen9blas_set_rows_supported(void);
 // ggml backend: n (1..8) products of one F32 input with HS-packed weights (Q/K/V), A packed once, one wait;
 // nonfinite[i] per output. Returns 1 if not applicable (an output not zero-copy): compute them one by one.
 int gen9blas_gemm_multi_f16w(int M, const float *A, int lda, int n, const gen9blas_packed *const *P, float *const *C,

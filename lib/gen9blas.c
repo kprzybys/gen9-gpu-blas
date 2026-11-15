@@ -119,6 +119,7 @@ static int init_l12(const char *dir) {
 
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
+static cl_kernel k_rope_m, k_setrows;   // gen9blas_rope_multi (NULL if the binary lacks it)
 static cl_kernel k_skp[3];   // gen9blas_skinny_pb16_4 / _8 / _16
 static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8, k_epi_8x;
 static cl_kernel k_rms, k_binop, k_rope, k_lnorm, k_gelu, k_lnorm_pack, k_gelu_erf, k_cvt_heads, k_im2col, k_relu;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
@@ -147,6 +148,8 @@ int gen9blas_init(const char *dir) {
     KER(ph, "pk_a3_f32", k_pa3_f32); KER(ph, "gen9blas_epilog_hf", k_epi_hf); KER(ph, "gen9blas_swiglu_pack_a3", k_swiglu);   // F16 weights x F32 activations
     { cl_int e4; k_dequant = clCreateKernel(ph, "gen9blas_dequant_b16", &e4); if (e4) k_dequant = NULL; }
     { cl_int e5; k_dequant2 = clCreateKernel(ph, "gen9blas_dequant_b16s", &e5); if (e5) k_dequant2 = NULL; }
+    { cl_int e10; k_rope_m = clCreateKernel(ph, "gen9blas_rope_multi", &e10); if (e10) k_rope_m = NULL; }
+    { cl_int e11; k_setrows = clCreateKernel(ph, "gen9blas_set_rows_f16", &e11); if (e11) k_setrows = NULL; }
     for (int i = 0; i < 3; i++) {   // skinny products on HS-packed weights (gen9blas_gemm_pb_skinny); NULL if the binary lacks them
         char n[40]; cl_int e9; snprintf(n, sizeof n, "gen9blas_skinny_pb16_%d", 4 << i);
         k_skp[i] = clCreateKernel(ph, n, &e9); if (e9) k_skp[i] = NULL;
@@ -1156,6 +1159,64 @@ int gen9blas_rope(int n_dims, int nh, int n_tok, const float *X, long xs1, long 
     ARG(k_rope, 16, corr[0]); ARG(k_rope, 17, corr[1]);
     size_t g[2] = { (size_t)n_dims / 2, (size_t)n_tok };
     CHECK(clEnqueueNDRangeKernel(q, k_rope, 2, NULL, g, NULL, 0, NULL, NULL));
+    return ew_done(sync, xY, zY, bY, Y);
+}
+
+// ggml SET_ROWS F32 -> F16 (gen9blas.h). src / dst strides in elements, index strides in bytes; dst_bytes = extent of dst.
+int gen9blas_set_rows_supported(void) { return k_setrows != NULL; }
+int gen9blas_set_rows_f16(int nc, int nr, int ne02, int ne03, const float *src, long s1, long s2, long s3,
+                          const void *idx, size_t idx_bytes, long b10, long b11, long b12, int idx64, int ne11, int ne12,
+                          uint16_t *dst, size_t dst_bytes, long d1, long d2, long d3, long ne1, int sync, int *bad) {
+    static int *flag;
+    NEW_OPERATION();
+    if (!k_setrows) FAIL("set_rows: kernel not in this build");
+    if (nc <= 0 || nr <= 0 || ne02 <= 0 || ne03 <= 0) return 0;
+    if (!flag && !(flag = gen9blas_alloc(64))) return -1;
+    size_t bS = ((size_t)(nr - 1) * s1 + (size_t)(ne02 - 1) * s2 + (size_t)(ne03 - 1) * s3 + nc) * 4;
+    bf_t xS, xI, xD; int zS, zI, zD;
+    if (get_obj(src, bS, &uA, 1, 0, &xS, &zS) || get_obj(idx, idx_bytes, &uB, 1, 0, &xI, &zI) ||
+        get_obj(dst, dst_bytes, &uC, 1, 1, &xD, &zD)) return -1;
+    if (!zD) FAIL("set_rows: destination is not zero-copy");   // a copy-in/copy-out of the whole cache would cost more than the op
+    *flag = 0;
+    bf_t xF = { NULL, flag };
+    cl_long a1 = s1, a2 = s2, a3 = s3, c10 = b10, c11 = b11, c12 = b12, e1 = d1, e2 = d2, e3 = d3, n1 = ne1;
+    cl_kernel k = k_setrows;
+    ARGB(k, 0, xS); ARG(k, 1, a1); ARG(k, 2, a2); ARG(k, 3, a3); ARGB(k, 4, xI); ARG(k, 5, c10); ARG(k, 6, c11); ARG(k, 7, c12);
+    ARG(k, 8, idx64); ARG(k, 9, ne11); ARG(k, 10, ne12); ARG(k, 11, ne02); ARGB(k, 12, xD); ARG(k, 13, e1); ARG(k, 14, e2);
+    ARG(k, 15, e3); ARG(k, 16, n1); ARGB(k, 17, xF);
+    size_t g[3] = { (size_t)nc, (size_t)nr, (size_t)ne02 * ne03 };
+    CHECK(clEnqueueNDRangeKernel(q, k, 3, NULL, g, NULL, 0, NULL, NULL));
+    if (sync) { if (wait_gpu()) return -1; if (bad) *bad = *flag; }
+    return 0;
+}
+
+// ggml_rope_multi, mode MROPE (sections s[4]): pos holds 4 * n_tok positions (t, h, w, e). Layout rules as gen9blas_rope.
+int gen9blas_rope_multi_supported(void) { return k_rope_m != NULL; }
+int gen9blas_rope_multi(int n_dims, int nh, int n_tok, const float *X, long xs1, long xs2, float *Y, long ys1, long ys2,
+                        const int *pos, const float *ff, const int sections[4], float freq_base, float freq_scale,
+                        float ext_factor, float attn_factor, const float corr[2], int sync) {
+    NEW_OPERATION();
+    if (!k_rope_m) FAIL("rope_multi: kernel not in this build");
+    if (n_dims <= 0 || nh <= 0 || n_tok <= 0) return 0;
+    if (n_dims % 2 || xs1 < n_dims || ys1 < n_dims || xs2 < (long)nh * xs1 - (xs1 - n_dims) || ys2 < (long)nh * ys1 - (ys1 - n_dims))
+        FAIL("rope_multi: unsupported layout");
+    if (sections[0] + sections[1] + sections[2] + sections[3] <= 0) FAIL("rope_multi: empty sections");
+    size_t bX = ((size_t)(n_tok - 1) * xs2 + (size_t)(nh - 1) * xs1 + n_dims) * 4;
+    size_t bY = ((size_t)(n_tok - 1) * ys2 + (size_t)(nh - 1) * ys1 + n_dims) * 4;
+    bf_t xX, xY, xP, xF = BM(NULL); int zX, zY, zP, zF, hf = ff != NULL;
+    if (get_obj(X, bX, &uA, 1, 0, &xX, &zX) || get_obj(pos, (size_t)n_tok * 16, &uB, 1, 0, &xP, &zP) ||
+        (hf && get_obj(ff, (size_t)n_dims / 2 * 4, &uD, 1, 0, &xF, &zF)) || get_obj(Y, bY, &uC, 0, 1, &xY, &zY)) return -1;
+    if (!hf) xF = xP;
+    const float theta_scale = powf(freq_base, -2.0f / n_dims);   // as ggml-cpu
+    cl_long l1 = xs1, l2 = xs2, m1 = ys1, m2 = ys2;
+    cl_kernel k = k_rope_m;
+    ARGB(k, 0, xX); ARG(k, 1, l1); ARG(k, 2, l2); ARGB(k, 3, xY); ARG(k, 4, m1); ARG(k, 5, m2);
+    ARGB(k, 6, xP); ARGB(k, 7, xF); ARG(k, 8, hf); ARG(k, 9, nh); ARG(k, 10, n_dims); ARG(k, 11, n_tok);
+    ARG(k, 12, sections[0]); ARG(k, 13, sections[1]); ARG(k, 14, sections[2]); ARG(k, 15, sections[3]);
+    ARG(k, 16, theta_scale); ARG(k, 17, freq_scale); ARG(k, 18, ext_factor); ARG(k, 19, attn_factor);
+    ARG(k, 20, corr[0]); ARG(k, 21, corr[1]);
+    size_t g[2] = { (size_t)n_dims / 2, (size_t)n_tok };
+    CHECK(clEnqueueNDRangeKernel(q, k, 2, NULL, g, NULL, 0, NULL, NULL));
     return ew_done(sync, xY, zY, bY, Y);
 }
 

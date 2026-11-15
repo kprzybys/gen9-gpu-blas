@@ -1059,6 +1059,52 @@ __kernel void gen9blas_rope(__global const float *x, long xs1, long xs2, __globa
         yp[i1] = x0 * s + x1 * c;
     }
 }
+// ggml ROPE, mode GGML_ROPE_TYPE_MROPE (ggml_rope_multi; PaddleOCR-VL / ERNIE text model): as gen9blas_rope in NEOX pair
+// order (i, i + n_dims/2), but pair j takes its position from sector j % (s0+s1+s2+s3): t (pos[t]) for sector < s0, h
+// (pos[t + n_tok]) below s0+s1, w (pos[t + 2 n_tok]) below s0+s1+s2, e (pos[t + 3 n_tok]) after; theta = p * theta_scale^j
+// by repeated multiplication as ggml_mrope_cache_init (no reset per section: indep_sects is false for MROPE).
+__kernel void gen9blas_rope_multi(__global const float *x, long xs1, long xs2, __global float *y, long ys1, long ys2,
+                                  __global const int *pos, __global const float *ff, int has_ff, int nh, int n_dims, int n_tok,
+                                  int s0, int s1, int s2, int s3, float theta_scale, float freq_scale, float ext_factor,
+                                  float attn_factor, float corr0, float corr1) {
+    const int j = get_global_id(0), t = get_global_id(1);
+    const int sector = j % (s0 + s1 + s2 + s3);
+    const int sec = sector < s0 ? 0 : sector < s0 + s1 ? 1 : sector < s0 + s1 + s2 ? 2 : 3;
+    float theta = (float)pos[t + sec * n_tok];
+    for (int k = 0; k < j; k++) theta *= theta_scale;
+    const float theta_extrap = has_ff ? theta / ff[j] : theta;
+    const float theta_interp = freq_scale * theta_extrap;
+    float th = theta_interp, mscale = attn_factor;
+    if (ext_factor != 0.0f) {
+        const float yv = ((float)j - corr0) / fmax(0.001f, corr1 - corr0);
+        const float ramp_mix = (1.0f - fmin(1.0f, fmax(0.0f, yv))) * ext_factor;
+        th = theta_interp * (1.0f - ramp_mix) + theta_extrap * ramp_mix;
+        mscale *= 1.0f + 0.1f * log(1.0f / freq_scale);
+    }
+    const float c = cos(th) * mscale, s = sin(th) * mscale;
+    const int i0 = j, i1 = j + n_dims / 2;
+    for (int h = 0; h < nh; h++) {
+        __global const float *xp = x + t * xs2 + h * xs1;
+        __global float *yp = y + t * ys2 + h * ys1;
+        const float x0 = xp[i0], x1 = xp[i1];
+        yp[i0] = x0 * c - x1 * s;
+        yp[i1] = x0 * s + x1 * c;
+    }
+}
+// ggml SET_ROWS, F32 rows -> F16 rows (the KV-cache writes of llama.cpp): dst row idx[i] of plane (i02, i03) = src row i,
+// rounded to nearest even (vstore_half_rte, = ggml_cpu_fp32_to_fp16). Strides in elements (src floats, dst halves), index
+// strides in bytes; idx64: indices are int64 (else int32); indices broadcast over planes as ggml-cpu (i11 = i02 % ne11,
+// i12 = i03 % ne12). An index outside [0, ne1) sets *bad and writes nothing. Grid (nc, nr, ne02 * ne03).
+__kernel void gen9blas_set_rows_f16(__global const float *src, long s1, long s2, long s3, __global const uchar *idx,
+                                    long b10, long b11, long b12, int idx64, int ne11, int ne12, int ne02,
+                                    __global half *dst, long d1, long d2, long d3, long ne1, __global int *bad) {
+    const int c = get_global_id(0), i = get_global_id(1), p = get_global_id(2);
+    const int i02 = p % ne02, i03 = p / ne02;
+    __global const uchar *ip = idx + i * b10 + (i02 % ne11) * b11 + (i03 % ne12) * b12;
+    const long i1 = idx64 ? *(__global const long *)ip : (long)*(__global const int *)ip;
+    if (i1 < 0 || i1 >= ne1) { if (c == 0) atomic_or(bad, 1); return; }
+    vstore_half_rte(src[i * s1 + i02 * s2 + i03 * s3 + c], 0, dst + i1 * d1 + i02 * d2 + i03 * d3 + c);
+}
 // ggml NORM (LayerNorm without affine) [* w] [+ b], one work-group of 128 per row (grid (128, M)), as ggml-cpu:
 // mean = sum / K, variance = sum((x - mean)^2) / K, y = (x - mean) * (1 / sqrt(variance + eps)), then * w, then + b.
 __kernel __attribute__((reqd_work_group_size(128, 1, 1)))
