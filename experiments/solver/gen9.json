@@ -9,7 +9,7 @@
         300,
         1100
       ],
-      "ram": "2 x DDR4-2400 (kp-laptop) / 1 x DDR4-2400 (gp-laptop)",
+      "ram": "2 x DDR4-2400 (dual channel) / 1 x DDR4-2400 (single channel)",
       "tag": "SPEC",
       "source": "docs/performance-model.md section 1; dmidecode 2026-11-13"
     },

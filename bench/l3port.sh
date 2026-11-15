@@ -1,7 +1,7 @@
 #!/bin/bash
 # L3 / data-port ceiling sweep (bench/l3port.cl): Gop/s = GB/s of block reads. Each launch <= ~25 ms; nice 19, ionice idle.
 # Results: results/l3port-2026-11-13.txt
-set -u; cd "$(dirname "$0")"; [ -f ~/neo/env.sh ] && . ~/neo/env.sh   # tc: NEO legacy outside the system
+set -u; cd "$(dirname "$0")"; [ -n "${NEO_ENV:-}" ] && . "$NEO_ENV"   # NEO_ENV: env script of a NEO install outside the system (legacy NEO on HD 530)
 [ -x clbench ] || gcc -O2 -Wall -o clbench clbench.c -lOpenCL
 N=${N:-4096}; G=16384; export BUF=$((1 << 20))
 run() { nice -n 19 ionice -c3 ./clbench l3port.cl k_port $G "$@"; }

@@ -1,5 +1,5 @@
 // Wall time spent inside cblas_sgemm, per shape, for any BLAS underneath (LD_PRELOAD before it):
-//   LD_PRELOAD="$PWD/libsgemm_timer.so $HOME/gen9-gpu-blas/lib/libgen9blas_blas.so" <program>   (gen9blas)
+//   LD_PRELOAD="$PWD/libsgemm_timer.so <repo>/lib/libgen9blas_blas.so" <program>   (gen9blas)
 //   LD_PRELOAD="$PWD/libsgemm_timer.so" <program>                                               (the program's own BLAS)
 // At exit prints, per (order, transA, transB, M, N, K): calls, total ms, GFLOPS; then the total and the process wall time.
 // Build: gcc -O2 -Wall -shared -fPIC -o libsgemm_timer.so sgemm_timer.c -ldl
