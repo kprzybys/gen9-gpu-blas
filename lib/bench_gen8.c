@@ -1,5 +1,5 @@
 // Gen8 performance-model ceilings (docs/gen8.md): FMA peak (FP32, FP64) and memory bandwidth (read, write, copy),
-// kernels from bench/gen8_probe.cl through kcl. Best of 5 timed runs after a warm-up, wall time around clFinish.
+// kernels from lib/kernels/gen8_probe.cl through kcl. Best of 5 timed runs after a warm-up, wall time around clFinish.
 // Build: make -C lib bench_gen8 (Gen8 only). Run: ./bench_gen8 [MB per buffer, default 128]
 #include "kcl.h"
 #include <stdio.h>

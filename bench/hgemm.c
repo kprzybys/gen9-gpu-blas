@@ -80,7 +80,7 @@ int main(int argc, char **argv) {
     cl_mem srcA = bA, srcB = bB;
     if (pack) {
         // packing kernels always from the hgemm.cl source (also when the main kernel is from .bin)
-        size_t pl; unsigned char *ps = read_file(getenv("PACK_CL") ? getenv("PACK_CL") : "hgemm.cl", &pl);
+        size_t pl; unsigned char *ps = read_file(getenv("PACK_CL") ? getenv("PACK_CL") : "../lib/kernels/hgemm.cl", &pl);
         cl_program pp = clCreateProgramWithSource(ctx, 1, (const char **)&ps, NULL, &err); CHECK(err);
         CHECK(clBuildProgram(pp, 1, &dev, "", NULL, NULL));
         // PACK=2: A2 layout (pack_a2) for the hand-written asm loop

@@ -9,8 +9,8 @@ optional: gemm_clblast
 # the whl *_tok binaries (make -C ../asm attn) and ocloc for the kernel table; on a machine without ocloc copy
 # attn_kernels.c from one that has it.
 ATTN_KCL_BINS = attn_qwen_tok.bin attn_llama_tok.bin attn_qwen_tokc.bin attn_llama_tokc.bin attn_whisper_tokc.bin attn_qwen7b_tokc.bin attn_qwen3_tokc.bin
-attn_kernels.c: ../lib/gen_kernels.py $(ATTN_KCL_BINS)
-	python3 ../lib/gen_kernels.py . .attn_kernels $(ATTN_KCL_BINS) > $@
+attn_kernels.c: ../lib/gen_kernels.py $(addprefix ../lib/kernels/,$(ATTN_KCL_BINS))
+	python3 ../lib/gen_kernels.py ../lib/kernels .attn_kernels $(ATTN_KCL_BINS) > $@
 attn_kcl: attn_kcl.c attn_kernels.c ../lib/kcl.c ../lib/kcl.h ../lib/kcl_desc.h
 	gcc $(CFLAGS) -I../lib -I../lib/third_party/mesa -o $@ attn_kcl.c attn_kernels.c ../lib/kcl.c -lm -lpthread
 

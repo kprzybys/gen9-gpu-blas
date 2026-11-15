@@ -45,7 +45,7 @@ int main(int argc, char **argv) {
     if (clBuildProgram(prog, 1, &dev, opts, NULL, NULL) != CL_SUCCESS) {
         char log[65536]; clGetProgramBuildInfo(prog, dev, CL_PROGRAM_BUILD_LOG, sizeof log, log, NULL); fprintf(stderr, "%s\n", log); return 1; }
     cl_kernel k = clCreateKernel(prog, kname, &err); CHECK(err);
-    unsigned char *ps = rd(getenv("PACK_CL") ? getenv("PACK_CL") : "sgemm.cl", &len);
+    unsigned char *ps = rd(getenv("PACK_CL") ? getenv("PACK_CL") : "../lib/kernels/sgemm.cl", &len);
     cl_program pp = clCreateProgramWithSource(ctx, 1, (const char **)&ps, NULL, &err); CHECK(err); CHECK(clBuildProgram(pp, 1, &dev, "", NULL, NULL));
     int p2 = getenv("PACK2") ? atoi(getenv("PACK2")) : 0;   // PACK2=1: layouts for the asm loop
     // PACK2=2: pkf_a / pkf_b (batched signature, layouts as in pack_af2/bf2)

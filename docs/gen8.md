@@ -36,7 +36,7 @@ All cited sources: `sh scripts/fetch_docs.sh`.
 - The bdw output is a patch-token binary (`PTM.txt`, `*_KernelHeap.asm`), not zebin, and `-internal_options
   -cl-intel-enable-zebin` does not change that [EXP]. `lib/gen_kernels.py` therefore has a patch-token reader (token
   layouts: IGC `patch_list.h`/`patch_shared.h`, mapping as in NEO `kernel_descriptor_from_patchtokens.cpp`);
-  `make -C lib kernels_gen8.c` builds the Gen8 table `kcl_programs_gen8` (the six `.cl` programs of the library, `-noFP64bRegion`; kernels with A64 QWord messages are marked unsupported; the probes of `bench/gen8_probe.cl` go only into `kernels_gen8_probe.c` for `lib/test_gen8_probe`).
+  `make -C lib kernels_gen8.c` builds the Gen8 table `kcl_programs_gen8` (the six `.cl` programs of the library, `-noFP64bRegion`; kernels with A64 QWord messages are marked unsupported; the probes of `lib/kernels/gen8_probe.cl` go only into `kernels_gen8_probe.c` for `lib/test_gen8_probe`).
 - Check of the reader (`make -C lib check-patchtokens`): Gen9.5 compiled in both formats; of the kernels with identical
   ISA, 235 have identical descriptors and 8 differ only in accepted ways (both readers' rules in
   `lib/check_patchtokens.py`), 0 errors; 16 kernels get different code from the two compile paths and are not compared
@@ -45,7 +45,7 @@ All cited sources: `sh scripts/fetch_docs.sh`.
 - **Scratch**: 8 kernels spill to scratch when built for bdw (`hgemm_16x32`, `hgemm_16x32g/kc/mx/p/q`, `hgemm_v`,
   `gemv_n_f`; whl: only `hgemm_16x32kc`, `hgemm_16x32mx`). kcl has no scratch support and `lib/gen_kernels.py` marks
   such kernels unsupported [SCAN].
-- `bench/gen_h.bin`, `gen_hd.bin`, `gen_s.bin` are Gen9 binaries and would need Gen8 versions.
+- `lib/kernels/gen_h.bin`, `gen_hd.bin`, `gen_s.bin` are Gen9 binaries and would need Gen8 versions.
 - Not evaluated: Beignet, the older Intel OpenCL stack, is said to have supported Cherryview [HYP, unchecked].
 
 ## 3. Cherryview EU restrictions vs code compiled for Broadwell
@@ -169,7 +169,7 @@ So kcl itself works on Gen8 (command stream, 4 GB address space, coherency, patc
 64-bit regions of `-noFP64bRegion` executed correctly in `copy16_f`.
 
 Analysis (offline, 2026-11-12):
-- **SGEMM: a software bug of step D5, not the hardware.** On Gen8 the main kernel is `sgemm_v` from `bench/sgemm.cl`,
+- **SGEMM: a software bug of step D5, not the hardware.** On Gen8 the main kernel is `sgemm_v` from `lib/kernels/sgemm.cl`,
   which reads the plain packed layout of `pack_af`/`pack_bf` (`sgemm.cl:46-53`, 156-181), while the packing kernels
   `pkf_a`/`pkf_b` write the interleaved layout of the Gen9 assembler kernel (`PKF_IDX_A`/`PKF_IDX_B`, `sgemm.cl:131-133`).
   The same arguments, a different data layout; on Gen9 this pair never runs. A numpy emulation of "pack with PKF_IDX,
@@ -183,7 +183,7 @@ Analysis (offline, 2026-11-12):
   only instruction forms it uses that no completed kernel used are A64 qword gather/scatter messages and `mov :df`
   [SCAN]. The CHV PRM defines A64 QWord scattered messages (vol07 p.129, 193), but Mesa never emits them [HYP: the
   candidate cause].
-- Fixed (`GEN8_PLAIN_PACK` in the bdw build of `bench/sgemm.cl`) and re-run 2026-11-13 [MEAS]: SGEMM n = 16, 64, 100,
+- Fixed (`GEN8_PLAIN_PACK` in the bdw build of `lib/kernels/sgemm.cl`) and re-run 2026-11-13 [MEAS]: SGEMM n = 16, 64, 100,
   256 and batched 2 x 64 correct (max relative error 1e-7 .. 6e-7; kernels `pkf_a`, `pkf_b`, `sgemm_v`,
   `gen9blas_epilog_fb`, `skinny_*`), no reset. This confirms the layout diagnosis and that these kernels, including their
   DW x DW multiplies and the `mul`/`mach` sequence with non-zero batch index, execute correctly on the Cherryview.
@@ -191,7 +191,7 @@ Analysis (offline, 2026-11-12):
   engine reset** (detected by kcl; system unaffected). So the DGEMM hang does not come from index
   arithmetic; the candidates left are the A64 qword scattered messages (most likely) and DF-typed moves [HYP].
   `-cl-intel-force-enable-a64WA` (internal option) does not change these messages [EXP].
-- **Root cause confirmed, 2026-11-13** (`lib/test_gen8_probe`, kernels in `bench/gen8_probe.cl`, compiled stateless) [MEAS]:
+- **Root cause confirmed, 2026-11-13** (`lib/test_gen8_probe`, kernels in `lib/kernels/gen8_probe.cl`, compiled stateless) [MEAS]:
   `probe_df_dword` (DF multiply, A64 dword gather/scatter only) is correct (64 of 64); `probe_qword` (the A64 QWord
   gathering read `0x042402FF` of the hanging kernels, integer data, no DF type) **hangs the GPU** (engine reset; system
   unaffected). So on the Cherryview the A64 QWord scattered *read* must not be used. The CHV PRM documents
@@ -199,8 +199,8 @@ Analysis (offline, 2026-11-12):
   Qword *write*); Mesa never emits 64-bit memory messages on Gen8 (`elk_fs_nir.cpp`: 64-bit global loads are split into
   32-bit ones). Not tested on its own: the A64 QWord scattered write (the probe's compiler used dword scatter for it).
 - Fix (`GEN8_CHV`, defined only in the bdw build, `lib/gen_kernels.py` `GEN8_DEFINES`): element access through macros
-  (`RD`/`WR`, `LV4T`/`SV4T`, `V4`/`VG`/`COPYG` in `bench/level12.cl`; `RD`/`WR`/`RDD`/`WRD` in `bench/sgemm.cl` and
-  `bench/dgemm_core.cl`, which `lib/gen_dgemm.py` combines into `dgemm.cl`). On Gen9 they expand to the former plain
+  (`RD`/`WR`, `LV4T`/`SV4T`, `V4`/`VG`/`COPYG` in `lib/kernels/level12.cl`; `RD`/`WR`/`RDD`/`WRD` in `lib/kernels/sgemm.cl` and
+  `lib/kernels/dgemm_core.cl`, which `lib/gen_dgemm.py` combines into `dgemm.cl`). On Gen9 they expand to the former plain
   indexing (Gen9 `kernels.c` unchanged, md5 02e260eb); on Gen8 FP64 data moves as uint pairs (dword messages). The same
   build also avoids the other two FP64 forms CHV forbids: a `sub_group_broadcast` of a double with a variable lane (an
   indirect DF move, R2; now two dword broadcasts) and FP64 division (`math.invm`/`madm` with accumulators, R3; now an FP32
@@ -267,7 +267,7 @@ and 1.2-1.4x optimistic for FP32. No CPU comparison: the target has only the ref
 
 ## 6e. Tuning (2026-11-13, branch `gen8-tune`) [MEAS]
 
-Ceilings first (`lib/bench_gen8`, kernels in `bench/gen8_probe.cl`, at 600 MHz; FMA loops of 8 independent chains per
+Ceilings first (`lib/bench_gen8`, kernels in `lib/kernels/gen8_probe.cl`, at 600 MHz; FMA loops of 8 independent chains per
 work-item, long enough for the clock to ramp up from 200 MHz):
 
 | | measured | theoretical (CHV PRM vol04 p.5) |
@@ -279,7 +279,7 @@ work-item, long enough for the clock to ramp up from 200 MHz):
 Levels 1 and 2 already stream at 6.7-8.1 GB/s (6d), i.e. at the memory ceiling: nothing to gain there. The GEMMs were
 far from the FMA ceilings (SGEMM 0.43-0.56, DGEMM about 0.7 of the measured values), so the tuning went into them.
 
-**SGEMM: `sgemm8_v32`** (`bench/sgemm.cl`, `#ifdef GEN8_CHV`). `sgemm_v` was written for SIMD16 on Gen9; a wider tile
+**SGEMM: `sgemm8_v32`** (`lib/kernels/sgemm.cl`, `#ifdef GEN8_CHV`). `sgemm_v` was written for SIMD16 on Gen9; a wider tile
 in SIMD16 spilled (424, 679 and fewer scratch messages in the variants tried), because a per-lane float takes 2 GRF in
 SIMD16 and 1 GRF in SIMD8. The new kernel: one SIMD8 subgroup per 16 x 32 tile of C (`float acc[16][4]`, 64 GRF), A packed
 in 16 x 16 blocks (`pkf_a8`) and B in 32-column panels (`pkf_b32`), so that per 4 k the subgroup does three block reads
@@ -295,7 +295,7 @@ in 16 x 16 blocks (`pkf_a8`) and B in 32-column panels (`pkf_b32`), so that per 
 Result: 69.9 / 76.2 / 68.7 GFLOPS at n = 1024 / 2048 / 4096 (was 47.3 / 40.1 / 36.9 with `sgemm_v`; same session),
 0.82-0.91 of the measured FMA ceiling. `GEN9BLAS_SGEMM8=v` selects the old kernel (comparisons).
 
-**DGEMM: `dgemm8_v832`** (`bench/dgemm_core.cl`). `dgemm_v` (16 x 16 per two SIMD8 subgroups) spends 151 instructions
+**DGEMM: `dgemm8_v832`** (`lib/kernels/dgemm_core.cl`). `dgemm_v` (16 x 16 per two SIMD8 subgroups) spends 151 instructions
 per 64 `mad:df` in its loop: Gen8 3-source instructions are Align16 only, so each broadcast A value is a separate
 `mov:df`. The new kernel: one SIMD8 subgroup per 8 x 32 tile (`double acc[8][4]`), A from the existing 16-row packing,
 B in 32-column panels (`pkd_b32`), all reads as `ulong` block reads (no QWord scattered read, section 6a), 100 instructions
@@ -306,7 +306,7 @@ of the measured FP64 ceiling. `GEN9BLAS_DGEMM8=v` selects `dgemm_v`.
 zeros in C[b >= 1] of a batched GEMM. A debug kernel (`bench_gen8 ids`) showed correct group and subgroup ids; computing
 the batch offset `(size_t)b * M * K` as a 32-bit product instead made the result correct, with nothing else changed. The
 same change fixed `skinny_r4/r8` (6c): their row pointers `W + (long)row * ldw` became `W + (uint)row * (uint)ldw`
-(`OFS` in `bench/level12.cl`), and `test_skinny` passes with them enabled. On Gen8 the address space is 4 GB, so 32-bit
+(`OFS` in `lib/kernels/level12.cl`), and `test_skinny` passes with them enabled. On Gen8 the address space is 4 GB, so 32-bit
 offsets cannot overflow there; the Gen9 build keeps 64-bit products. Hypothesis for the cause: the compiler emulates the
 64-bit multiply with DW x DW `mul`/`mach` sequences that break Cherryview's region rules (section 3, R1a; 922 such
 sequences in the scan). Not every such sequence fails (most kernels contain them and pass), and which instruction gives

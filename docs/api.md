@@ -296,7 +296,7 @@ Requirements: Linux with the i915 driver and access to `/dev/dri/renderD128`; GC
 OpenCL types; Python 3 with NumPy (tests, wrapper);
 `ocloc` from Intel's compute-runtime packages (the kernels are compiled at build time); the Mesa header `lib/third_party/mesa/gen9_pack.h`
 is in the repository. OpenBLAS (`libopenblas.so.0`) is needed at run time for `libgen9blas_blas.so`. The NEO builds additionally
-need `libOpenCL` and a working NEO. The assembly GEMM binaries (`bench/gen_h.bin`, `bench/gen_hd.bin`, `bench/gen_s.bin`) are
+need `libOpenCL` and a working NEO. The assembly GEMM binaries (`lib/kernels/gen_h.bin`, `lib/kernels/gen_hd.bin`, `lib/kernels/gen_s.bin`) are
 tracked; they are rebuilt without a GPU by `make -C asm`.
 
 ```

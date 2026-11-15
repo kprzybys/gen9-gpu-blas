@@ -19,7 +19,7 @@ for job in gpu cpu; do
   j=$(mktemp); intel_gpu_top -J -s 5000 -o "$j" >/dev/null 2>&1 & p=$!
   if [ $job = gpu ]; then
     echo "## HGEMM asm N=2048, 4000 runs (WAIT=sleep), trace every 400"
-    WAIT=sleep TRACE=400 REPS=4000 PACK=2 ND1=1 LY=1 ./hgemm hgemm_asm.bin hgemm_16x32p 2048 2>&1
+    WAIT=sleep TRACE=400 REPS=4000 PACK=2 ND1=1 LY=1 ./hgemm ../lib/kernels/hgemm_asm.bin hgemm_16x32p 2048 2>&1
   else
     echo "## OpenBLAS f32 N=2048, 90 s"
     python3 gemm_cpu.py f32 2048 90 2>&1

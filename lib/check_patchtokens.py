@@ -24,7 +24,7 @@ ARG = re.compile(r"\{(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+)\}")
 def build(target):
     out = os.path.join(work, f"kernels_{target}.c")
     with open(out, "w") as f:
-        subprocess.run([sys.executable, os.path.join(here, "gen_kernels.py"), os.path.join(here, "..", "bench"),
+        subprocess.run([sys.executable, os.path.join(here, "gen_kernels.py"), os.path.join(here, "kernels"),
                         os.path.join(work, target), target], stdout=f, check=True)
     text = open(out).read()
     isa = dict(re.findall(r"static const uint8_t (p\d+_k\d+_isa)\[\d+\] = \{\n(.*?)\};", text, re.S))

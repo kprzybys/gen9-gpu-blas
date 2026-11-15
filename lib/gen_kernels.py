@@ -15,7 +15,7 @@ Targets:
           patchtoken_program(); IGC_VISAOptions=-noFP64bRegion; no assembler binaries (they are Gen9 code);
           tables kcl_programs_gen8 / kcl_nprograms_gen8. Kernels whose code contains A64 QWord scattered messages
           (they hang the Cherryview) are marked unsupported.
-  bdw-probe  as bdw plus bench/gen8_probe.cl (unmarked: it contains the hanging message on purpose), for
+  bdw-probe  as bdw plus lib/kernels/gen8_probe.cl (unmarked: it contains the hanging message on purpose), for
           lib/test_gen8_probe only.
   whl-pt  check of the patch-token reader: Gen9.5 compiled in the patch-token format, compared with whl by
           lib/check_patchtokens.py (assembler binaries are still read from zebin).

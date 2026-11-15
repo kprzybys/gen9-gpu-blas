@@ -147,7 +147,7 @@ Budget for HGEMM at 800 GFLOPS: at least 5.2 FLOP/B from L3, 40 FLOP/B from RAM.
 
 ## 8. HGEMM: from OpenCL C to hand-written assembly (`results/hgemm-compare-2026-11-11.txt`)
 
-Kernels `hgemm_16x32` (2D images), `hgemm_16x32g` (grouped order), `hgemm_16x32p` (packed data) in `bench/hgemm.cl`;
+Kernels `hgemm_16x32` (2D images), `hgemm_16x32g` (grouped order), `hgemm_16x32p` (packed data) in `lib/kernels/hgemm.cl`;
 program `bench/hgemm.c` (env `PACK`, `ND1`, `LY`, `PAD`, `REPS`, `DUMP`); series `bench/hgemm_compare.sh`.
 
 | Version (N = 4096) | GFLOPS | What changed |
@@ -185,7 +185,7 @@ Lessons: the hand loop gave +19% over the best compiler code (777 vs 654) and 3.
 bank conflicts. Packing mattered more than assembly (it removed a 20x collapse). On the GPU HGEMM is 2.4x faster
 and 2.4x more energy-efficient than the CPU in FP32 (short runs).
 
-Packing (`pack_a`, `pack_a2`, ... in `bench/hgemm.cl`; N = 4096: A 5.8 ms, B 5.6 ms): "16 elements per work-item" versions were
+Packing (`pack_a`, `pack_a2`, ... in `lib/kernels/hgemm.cl`; N = 4096: A 5.8 ms, B 5.6 ms): "16 elements per work-item" versions were
 slower (`pack_b16` 17.7 ms) because neighbouring work-items write 16 panels (pages). A later round (`bench/packing.c`,
 `bench/packing.cl`, byte-exact against the reference) cut FP16 packing at n = 1024 / 4096 from 0.45 / 7.25 to 0.24 / 4.5 ms for B
 (2 elements per work-item, `pk_bq_w2`) and from 0.54 / 8.9 to 0.31 / 5.7 ms for A (4 rows x 8 k, `pk_a2_q`); FP32 gains nothing.
@@ -193,7 +193,7 @@ The old kernels remain under `GEN9BLAS_PACK=old`. HGEMM n = 1024 call: 4.4-4.9 -
 
 ## 9. SGEMM and the accurate FP16 variant
 
-**SGEMM** (`bench/sgemm.cl`, `bench/sgemm.c`, `asm/sgemm_asm.py`): OpenCL C 16x16 with packing 342-351 GFLOPS (128 of 256 `mad`
+**SGEMM** (`lib/kernels/sgemm.cl`, `bench/sgemm.c`, `asm/sgemm_asm.py`): OpenCL C 16x16 with packing 342-351 GFLOPS (128 of 256 `mad`
 conflicting); assembly **359-376 GFLOPS** (92% of FP32 peak), 0 conflicts, error as FP32 (about 1.5e-8). The B row is 2 GRFs
 (even-`kl` rows in an even-based block, odd in an odd-based one: `pack_bf2`), buffers are quarters of k (too few contiguous free
 registers for halves), read-ahead of 2 quarters; the script finds A/B pointers, counter and bound from the data flow. A `send`
@@ -277,7 +277,7 @@ GB/s); GEMM n = 4096 at 500 MHz: -40% energy for 2.2x time.
 
 ## 12. Levels 1-2
 
-One source `bench/level12.cl`, compiled three times (`-DHALF`: FP16 stored, FP32 computed; plain FP32; `-DDBL`; `-cl-std=CL3.0`).
+One source `lib/kernels/level12.cl`, compiled three times (`-DHALF`: FP16 stored, FP32 computed; plain FP32; `-DDBL`; `-cl-std=CL3.0`).
 Reductions accumulate in FP64 per work-item, up to 96 group results summed on the CPU. GEMV N: a sub-group of 16 handles 4
 rows (`vload4`); GEMV T: work-item = 4 columns x a band of rows plus a summing kernel. Triangular variants use a mask on
 (i, j) and an optional unit diagonal (SYMV = N pass plus T pass; SYR/SYR2 = GER with a mask); banded/packed forms use one
@@ -363,7 +363,7 @@ old USM/plain thresholds had no basis. Criterion: process CPU time per call, GPU
 (M = 1-16 rows against large weights). Baseline: the GEMM packed the whole weight matrix and computed full-height tiles:
 HGEMM M <= 16 at 4096² took 10.4 ms (3.2 GB/s of weights), independent of M.
 
-New kernels in `bench/level12.cl` (FP16 and FP32; FP64 unchanged): `skinny_k1/k4/k8` (weights contiguous along K, A·Wᵀ,
+New kernels in `lib/kernels/level12.cl` (FP16 and FP32; FP64 unchanged): `skinny_k1/k4/k8` (weights contiguous along K, A·Wᵀ,
 `gemv_nw`-like layout) and `skinny_n4`/`skinny_n2` (weights contiguous along N, A·B, K parts plus reduction); FP32
 accumulation also for FP16. Dispatch in `gen9blas_gemm_batched`: single GEMM with min(M, N) <= 16 (small N: roles swapped,
 Cᵀ = op(B)ᵀ·op(A)ᵀ); `GEN9BLAS_SKINNY=0` disables, `GEN9BLAS_SKINNY=n` changes the threshold.
@@ -442,7 +442,7 @@ The repository does not keep a per-binary build script; everything is in `asm/Ma
 | `make -C asm` | rebuilds the 6 binaries in `bench/` (`gen_h`, `gen_hd`, `gen_s`, `hgemm_asm`, `hgemm_kc_asm`, `sgemm_asm`) from the frozen templates `asm/gen_h.cl`, `gen_s.cl`, `hgemm.cl`, `hgemm_kc.cl`, `sgemm.cl` and the tracked accumulator maps `asm/*_map.txt`; no GPU needed |
 | `make -C asm check` | rebuilds into a temporary directory and compares with `bench/*.bin` (`cmp`) |
 | `make -C asm maps` | regenerates the maps on the GPU (`asm/maps.sh`; needs `bench/hgemm` and `bench/sgemm`: `make -C bench`) |
-| `make -C lib` | embeds `bench/gen_h.bin`, `gen_hd.bin`, `gen_s.bin` into `lib/kernels.c` (via `lib/gen_kernels.py`) |
+| `make -C lib` | embeds `lib/kernels/gen_h.bin`, `gen_hd.bin`, `gen_s.bin` into `lib/kernels.c` (via `lib/gen_kernels.py`) |
 
 Steps inside the makefile: template (OpenCL C) -> `asm/disassemble.sh` -> directory `asm/<name>.d` -> generator in `loop` mode
 (`asm/gemm_gen.py`, `asm/hgemm_asm.py`, `asm/hgemm_kc_asm.py`, `asm/sgemm_asm.py`) plus the map -> `.bin`. Generator modes:

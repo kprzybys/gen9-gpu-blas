@@ -1,6 +1,6 @@
 """Accurate HGEMM (16x16 tile, FP16 sum in chunks of 32 products -> FP32) in hand-written Gen9 assembly.
 
-Template: hgemm_16x16kc from bench/hgemm.cl (asm/hgemm_kc.d). From the template: prologue (pointers, accumulator zeroing)
+Template: hgemm_16x16kc from lib/kernels/hgemm.cl (asm/hgemm_kc.d). From the template: prologue (pointers, accumulator zeroing)
 and epilogue ((half)(f + h) write). The k loop is replaced with our own. Detected automatically from the compiler loop:
 pointers A/B (:q registers incremented by a constant step; role from data use in mad, also through `mov :w` copies),
 counter and limit (`cmp (lt)`), accumulators (zeroed in the prologue: 16 × hf, 16 × f).

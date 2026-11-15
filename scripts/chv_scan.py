@@ -41,7 +41,7 @@ def programs():   # the bdw build of lib/gen_kernels.py: .cl programs with the G
 
 def build(out):
     for i, (src, opts) in enumerate(programs()):
-        cmd = ["ocloc", "compile", "-q", "-file", os.path.join(ROOT, "bench", src), "-device", "bdw",
+        cmd = ["ocloc", "compile", "-q", "-file", os.path.join(ROOT, "lib", "kernels", src), "-device", "bdw",
                "-output_no_suffix", "-output", f"p{i}", "-out_dir", out] + (["-options", opts] if opts else [])
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode:

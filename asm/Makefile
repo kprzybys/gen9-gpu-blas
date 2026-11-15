@@ -1,7 +1,7 @@
 # Reproducible build of the six hand-assembled GEMM binaries (no GPU needed):
-#   make -C asm          rebuild all binaries into ../bench from the frozen templates (*.cl) and tracked maps (*_map.txt)
+#   make -C asm          rebuild all binaries into ../lib/kernels from the frozen templates (*.cl) and tracked maps (*_map.txt)
 #   make -C asm check    gemm-check + attn-check (below)
-#   make -C asm gemm-check  rebuild the GEMM binaries into a temporary directory (from scratch), cmp with ../bench
+#   make -C asm gemm-check  rebuild the GEMM binaries into a temporary directory (from scratch), cmp with ../lib/kernels
 #   make -C asm maps     regenerate the accumulator maps on the GPU (needs ../bench/hgemm and ../bench/sgemm: make -C ../bench)
 #   make -C asm attn     hand-scheduled attention kernels (one binary per shape; DEVICE=skl for HD 530), not in `all`
 #   make -C asm attn-check  rebuild the attention binaries for skl and whl in a temporary directory and compare their
@@ -11,7 +11,7 @@
 # Library binaries: gen_h, gen_hd, gen_s (embedded by lib/Makefile); older experiments: hgemm_asm, hgemm_kc_asm, sgemm_asm.
 # gen_h and gen_hd share the template gen_h.cl (they patch different kernels: hgemm_v and hgemm_kc_v).
 # Guide to writing a new hand-assembled kernel (rules, workflow, checklist): ../docs/isa-notes.md
-BIN_DIR ?= ../bench
+BIN_DIR ?= ../lib/kernels
 BINS = gen_h gen_hd gen_s hgemm_asm hgemm_kc_asm sgemm_asm
 MAPS = h hd s hgemm hgemm_kc sgemm
 DIRS = gen_h.d gen_hd.d gen_s.d hgemm.d hgemm_kc.d sgemm.d
@@ -136,7 +136,7 @@ gemm-check:
 	$(MAKE) --no-print-directory -B BIN_DIR=$$tmp all >/dev/null || exit 1; \
 	fail=; \
 	for b in $(BINS); do \
-	  if cmp -s $$tmp/$$b.bin ../bench/$$b.bin; then echo "OK        $$b.bin"; else echo "DIFFERENT $$b.bin"; fail=1; fi; \
+	  if cmp -s $$tmp/$$b.bin $(BIN_DIR)/$$b.bin; then echo "OK        $$b.bin"; else echo "DIFFERENT $$b.bin"; fail=1; fi; \
 	done; \
 	rm -r $$tmp; \
 	test -z "$$fail"

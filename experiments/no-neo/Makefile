@@ -47,14 +47,14 @@ kernels_bti.h: store.cl kernels.py
 chain_bti: chain.c kernels_bti.h gen9i.h $(GEN9_PACK)
 	gcc -O2 -Wall -I../../lib/third_party/mesa -I. -DBTI -o $@ chain.c
 
-# HGEMM: packing kernels from bench/hgemm.cl (IGC, binding table) and hgemm_v from bench/gen_h.bin (our assembler)
-kernels_pack.h: ../../bench/hgemm.cl kernels.py
-	ocloc compile -file ../../bench/hgemm.cl -device whl -output_no_suffix -output hgemm_cl >/dev/null
+# HGEMM: packing kernels from lib/kernels/hgemm.cl (IGC, binding table) and hgemm_v from lib/kernels/gen_h.bin (our assembler)
+kernels_pack.h: ../../lib/kernels/hgemm.cl kernels.py
+	ocloc compile -file ../../lib/kernels/hgemm.cl -device whl -output_no_suffix -output hgemm_cl >/dev/null
 	rm -rf dis_h && ocloc disasm -file hgemm_cl.bin -device whl -dump dis_h >/dev/null 2>&1
 	python3 kernels.py hgemm_cl.bin dis_h/.ze_info pk_a2_q,pk_bq_w2 > $@
-kernels_gemm.h: ../../bench/gen_h.bin kernels.py
-	rm -rf dis_gen && ocloc disasm -file ../../bench/gen_h.bin -device whl -dump dis_gen >/dev/null 2>&1
-	python3 kernels.py ../../bench/gen_h.bin dis_gen/.ze_info hgemm_v > $@
+kernels_gemm.h: ../../lib/kernels/gen_h.bin kernels.py
+	rm -rf dis_gen && ocloc disasm -file ../../lib/kernels/gen_h.bin -device whl -dump dis_gen >/dev/null 2>&1
+	python3 kernels.py ../../lib/kernels/gen_h.bin dis_gen/.ze_info hgemm_v > $@
 gemm_h: gemm_h.c kernels_pack.h kernels_gemm.h gen9i.h $(GEN9_PACK)
 	gcc -O2 -Wall -I../../lib/third_party/mesa -I. -o $@ gemm_h.c -lm
 

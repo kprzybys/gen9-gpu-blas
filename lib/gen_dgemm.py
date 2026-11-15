@@ -1,8 +1,8 @@
-"""Assembles bench/dgemm.cl: bench/dgemm_core.cl (packing, main FP64 kernel) + helper kernels from bench/sgemm.cl
+"""Assembles lib/kernels/dgemm.cl: lib/kernels/dgemm_core.cl (packing, main FP64 kernel) + helper kernels from lib/kernels/sgemm.cl
 (batch and triangular epilog, TRSM, expansion, merging, block inverses) with float -> double substitution and
 name suffixes _f -> _d (_fb -> _db, _trif -> _trid).
 
-Run: python3 gen_dgemm.py ../bench/sgemm.cl ../bench/dgemm_core.cl > ../bench/dgemm.cl   (the Makefile does this)
+Run: python3 gen_dgemm.py kernels/sgemm.cl kernels/dgemm_core.cl > kernels/dgemm.cl   (the Makefile does this)
 """
 import re
 import sys

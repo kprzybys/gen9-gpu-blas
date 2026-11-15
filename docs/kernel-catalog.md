@@ -14,14 +14,14 @@ path on i915 without NEO, [no-neo.md](no-neo.md)).
 
 | Kernel | Binary / source | What it does | Result |
 |---|---|---|---|
-| `hgemm_v` | `bench/gen_h.bin` (asm, template `asm/gen_h.cl`) | FP16 GEMM, FP16 accumulation, 16x32 tile per thread, packed A2 / BQ inputs | 699 GFLOPS whole call n = 4096, 777 kernel only (`results/compare-onednn-2026-11-11.txt`, `results/hgemm-compare-2026-11-11.txt`) |
-| `hgemm_kc_v` | `bench/gen_hd.bin` (asm) | FP16 inputs, FP32 sums of 32 products (K % 32 == 0), FP16 C; packed A3 / B16 | 618 GFLOPS n = 4096, error 1.5e-5 vs 1.4e-4 for `hgemm_v`; used by the ggml backend, `emb/` |
-| `sgemm_v` | `bench/gen_s.bin` (asm, template `asm/gen_s.cl`) | FP32 GEMM, 16x16 tile, packed `pkf_a` / `pkf_b` | 344 GFLOPS n = 4096 (85 % of the 402.8 GFLOPS measured FMA peak); used by `ina/`, `silero/`, `emb/` (FP32 mode) |
-| `dgemm_v` + `pkd_*` | `bench/dgemm.cl` (generated), `bench/dgemm_core.cl` | FP64 GEMM | 57 GFLOPS (slower than OpenBLAS on the CPU; this GPU has weak FP64) |
-| `hgemm_16x32*`, `hgemm_16x16kc*`, `sgemm_16x16p*` | `bench/hgemm.cl`, `bench/sgemm.cl`, `asm/hgemm*.cl` | OpenCL C ancestors / templates of the asm kernels, kept for comparison and as asm templates | see [history.md](history.md) |
+| `hgemm_v` | `lib/kernels/gen_h.bin` (asm, template `asm/gen_h.cl`) | FP16 GEMM, FP16 accumulation, 16x32 tile per thread, packed A2 / BQ inputs | 699 GFLOPS whole call n = 4096, 777 kernel only (`results/compare-onednn-2026-11-11.txt`, `results/hgemm-compare-2026-11-11.txt`) |
+| `hgemm_kc_v` | `lib/kernels/gen_hd.bin` (asm) | FP16 inputs, FP32 sums of 32 products (K % 32 == 0), FP16 C; packed A3 / B16 | 618 GFLOPS n = 4096, error 1.5e-5 vs 1.4e-4 for `hgemm_v`; used by the ggml backend, `emb/` |
+| `sgemm_v` | `lib/kernels/gen_s.bin` (asm, template `asm/gen_s.cl`) | FP32 GEMM, 16x16 tile, packed `pkf_a` / `pkf_b` | 344 GFLOPS n = 4096 (85 % of the 402.8 GFLOPS measured FMA peak); used by `ina/`, `silero/`, `emb/` (FP32 mode) |
+| `dgemm_v` + `pkd_*` | `lib/kernels/dgemm.cl` (generated), `lib/kernels/dgemm_core.cl` | FP64 GEMM | 57 GFLOPS (slower than OpenBLAS on the CPU; this GPU has weak FP64) |
+| `hgemm_16x32*`, `hgemm_16x16kc*`, `sgemm_16x16p*` | `lib/kernels/hgemm.cl`, `lib/kernels/sgemm.cl`, `asm/hgemm*.cl` | OpenCL C ancestors / templates of the asm kernels, kept for comparison and as asm templates | see [history.md](history.md) |
 | `skinny_q4k`, `skinny_q4k_t` | `bench/skinny_q4k.cl` | GEMM with few rows (M = 1..16, LLM token generation) straight on Q4_K weights | 4096x4096 FP16: 1.5 ms at M = 1 vs 10.4 ms through packing; memory-bound limit 1.3-1.5 ms ([skinny-gemm.md](skinny-gemm.md)) |
 
-**Packing and epilogues** (`bench/hgemm.cl`, `bench/sgemm.cl`, `bench/packing.cl`): `pk_a2`, `pk_a3`, `pk_bq`, `pk_b16`
+**Packing and epilogues** (`lib/kernels/hgemm.cl`, `lib/kernels/sgemm.cl`, `bench/packing.cl`): `pk_a2`, `pk_a3`, `pk_bq`, `pk_b16`
 (macro-generated, + `_t` transposed), fast variants `pk_a2_q`, `pk_a3_q`, `pk_bq_w2`, `pk_b16_w2`, `pk_a3_f32` /
 `pk_a3_f32v` (FP32 rows -> FP16 A3 through SLM with 16 B stores), `pkf_a` / `pkf_b` (+ `_t`);
 `gen9blas_dequant_b16` (Q4_K / Q8_0 weights dequantized on the GPU straight into the packed layout, bit-identical to the
@@ -33,14 +33,14 @@ packing of the next GEMM's input).
 diagonal blocks), `gen9blas_syr2k_merge_*`, `gen9blas_expand_*` (`_h`, `_f`, `_d` variants). Full BLAS level-3 API:
 [api.md](api.md).
 
-## 2. BLAS levels 1-2 (`bench/level12.cl`, `bench/l12.cl`)
+## 2. BLAS levels 1-2 (`lib/kernels/level12.cl`, `bench/l12.cl`)
 
 axpy, copy, dot, nrm2, iamax, rot, rotm, scal, swap; gemv (`gemv_n`, `gemv_nw`, `gemv_t1`, `gemv_t1b`, `gemv_t2`), ger,
 symv (`symv1`, `symv2`), syr2, trsv (blocked: `trsv_block`, `trsv_upd_n`, `trsv_upd_t`). Kernels are generated per
 type by a macro. Memory-bound; GPU pays off only for large vectors and when the CPU is busy
 (`results/level12-2026-11-12.txt`). A single-launch "sync-free" TRSV was 3-8x slower than the blocked one (pitfalls.md).
 
-## 3. ggml backend operations (`ggml-backend/ggml-gen9.cpp`, kernels in `bench/hgemm.cl`)
+## 3. ggml backend operations (`ggml-backend/ggml-gen9.cpp`, kernels in `lib/kernels/hgemm.cl`)
 
 Used by llama.cpp, whisper.cpp and NeMo-Speech.cpp ([ggml-backend-design.md](ggml-backend-design.md)).
 
@@ -61,7 +61,7 @@ large-v3-turbo Polish RTF 0.41; Nemotron diarization 1 h in 66.5 s (CPU 278 s).
 
 | Directory | Kernels | Purpose | Result |
 |---|---|---|---|
-| `mel/` (`mel_full.cl`; also `bench/mel.cl`) | `mel_power`, `mel_power_fft`, `mel_log`, `mel_log_sparse`, `mel_fused`, `mel_norm` | whisper log-mel spectrogram (STFT as GEMM-like work) | ~0.3 % of a transcription ([whisper-gpu.md](whisper-gpu.md)) |
+| `mel/` (`mel_full.cl`; also `mel/mel.cl`) | `mel_power`, `mel_power_fft`, `mel_log`, `mel_log_sparse`, `mel_fused`, `mel_norm` | whisper log-mel spectrogram (STFT as GEMM-like work) | ~0.3 % of a transcription ([whisper-gpu.md](whisper-gpu.md)) |
 | `ina/` (`ina.cl`, 18) | `ina_mel`, `ina_gate`, `ina_smooth`, `ina_patches`, `ina_minval`, `ina_conv1p`, `ina_conv3`, `ina_pool`, `ina_pool_br`, `ina_dense`, `ina_head`, `ina_head_c`, `ina_im2col` (`_p`, `_v`), `ina_stats`, `ina_c1s`, `ina_c1pool` + `sgemm_v` | inaSpeechSegmenter (speech / music / noise, gender) entirely on the GPU | ~34 s per hour, segments identical to the original ([ina-gpu-report.md](ina-gpu-report.md)) |
 | `silero/` (`silero.cl`, `lstm.cl`) | front end `sg_im`, `sgx_im0..45`, `sgy_im1..3`, `sgz_im1`, `sgh_im0..2` (im2col into tile layout) + 6 GEMMs through `sgemm_v`; `lstm_steps` (persistent LSTM, 2 streams per work-group); `sil_head` | Silero VAD v6, file split into independent 30 s streams; library `gen9vad` + whisper.cpp hook | 1 h in 0.75 s (11x CPU 4 threads), probabilities within 1e-5 of silero-vad ([silero-gpu.md](silero-gpu.md)) |
 | `emb/` (`emb.cl`, 11) | FP16 (default): `emb_pk_b16`, `emb_im2col_hv` (SLM, 16 B stores), `emb_im2col_ph`, `emb_resid_h`, `emb_stats_h` + `hgemm_kc_v`; FP32 (`EMB_F16=0`): `emb_im2col_v`, `emb_im2col_p`, `emb_resid`, `emb_stats` + `sgemm_v`; `emb_head` | WeSpeaker ResNet34-LM speaker embedding (diarization, speaker identification) | 15.7 ms per second of audio (OpenVINO FP16 17.6), cos >= 0.99999 vs ONNX Runtime; ParlaSpeech-PL EER 0.75 % |

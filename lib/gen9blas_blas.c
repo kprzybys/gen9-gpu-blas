@@ -5,7 +5,7 @@
 // Usage without rebuilding programs: LD_PRELOAD=.../libgen9blas_blas.so program  (or as a replacement for libblas.so.3).
 // Variables: GEN9BLAS_BLAS=auto (default) | gpu (every S call on the GPU) | cpu (everything on the CPU);
 //            GEN9BLAS_BLAS_CPU=path of the CPU BLAS (default libopenblas.so.0); GEN9BLAS_DIR=kernel directory (default
-//            ../bench relative to this library); GEN9BLAS_BLAS_INFO=1: every S call and where it went, on stderr.
+//            kernels/ next to this library); GEN9BLAS_BLAS_INFO=1: every S call and where it went, on stderr.
 // "auto" rules (criterion: process CPU time per call; measured on mains power, results/auto-thresholds-2026-11-12.txt):
 // GPU when the work on the CPU would cost more than the fixed cost of a GPU call (~20–250 µs CPU). Level 3 from 4 MFLOP. Level 1
 // (CBLAS only) from 2^20 elements, level 2 from 2^22 (M·N, n = 2048); from 2^16 when OpenBLAS has > 1 thread and the function is
@@ -71,7 +71,7 @@ static void init_gpu(void) {
     const char *dir_arg = getenv("GEN9BLAS_DIR"); char dirbuf[PATH_MAX + 16], path[PATH_MAX];
     Dl_info d;
     if (!dir_arg && dladdr((void *)init_gpu, &d) && d.dli_fname && realpath(d.dli_fname, path)) {
-        snprintf(dirbuf, sizeof dirbuf, "%s/../bench", dirname(path)); dir_arg = dirbuf;
+        snprintf(dirbuf, sizeof dirbuf, "%s/kernels", dirname(path)); dir_arg = dirbuf;
     }
     if (!dir_arg || gen9blas_init(dir_arg)) {
         fprintf(stderr, "gen9blas_blas: GPU unavailable (%s) -- everything on the CPU\n", dir_arg ? gen9blas_error() : "no kernel directory");

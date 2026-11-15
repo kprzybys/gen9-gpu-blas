@@ -1,6 +1,6 @@
 """Common generator of hand-written GEMM loops in Gen9 assembly for UHD 620 (replaces hgemm_asm.py, sgemm_asm.py, hgemm_kc_asm.py).
 
-Types (templates in bench/*.cl; all batched: matrix index from the thread index, b = 0 for 1 matrix):
+Types (templates asm/*.cl, frozen copies of lib/kernels/*.cl; all batched: matrix index from the thread index, b = 0 for 1 matrix):
   h  : hgemm_16x32q    tile 16×32, FP16, A2 + Bq,   half-steps of k (2 × 8 kl), 512 mad / k16
   hd : hgemm_16x16kc_b tile 16×16, FP16 -> chunks of 32 -> FP32, A3 + B16, quarters of k, 256 mad / k16
   s  : sgemm_16x16p_b  tile 16×16, FP32, A2f + B2f, quarters of k, 256 mad / k16

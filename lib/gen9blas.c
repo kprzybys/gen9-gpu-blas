@@ -93,7 +93,7 @@ static int program_src(const char *dir, const char *file, const char *options, c
 
 #define KER(pr, name, dst) do { cl_int e2_; dst = clCreateKernel(pr, name, &e2_); CHECK(e2_); } while (0)
 
-// Level 1–2 kernels (bench/level12.cl): L12[0] FP16 (GEN9BLAS_H, GEN9BLAS_HS), L12[1] FP32.
+// Level 1–2 kernels (lib/kernels/level12.cl): L12[0] FP16 (GEN9BLAS_H, GEN9BLAS_HS), L12[1] FP32.
 typedef struct { cl_kernel axpy, scal, copy, copy16, rot, red, iamax, gemv_n, gemv_nw, gemv_t1, gemv_t1b, gemv_t2, ger, syr2, to_f, from_f, trsv_block, trsv_upd_n, trsv_upd_t, rotm, pmv, psv, spr2, symv1, symv2, skinny_k1, skinny_k4, skinny_k8, skinny_r4, skinny_r8, skinny_n4, skinny_n2; int es; } l12_t;
 static l12_t L12[3];   // 0 FP16, 1 FP32, 2 FP64
 // Gen8 Cherryview (kcl, docs/gen8.md): no FP16 for now (its kernels need scratch there), GEMM main kernels from OpenCL C
@@ -117,7 +117,7 @@ static int init_l12(const char *dir) {
             if (gen8 && t[j].k == &k->gemv_n) { cl_int e; k->gemv_n = clCreateKernel(pr, n, &e); if (e) k->gemv_n = NULL; continue; }
             KER(pr, n, *t[j].k);
         }
-        if (i < 2) {   // skinny GEMM: FP16 and FP32 only (bench/level12.cl, #ifndef DBL)
+        if (i < 2) {   // skinny GEMM: FP16 and FP32 only (lib/kernels/level12.cl, #ifndef DBL)
             struct { const char *n; cl_kernel *k; } c[] = { { "skinny_k1", &k->skinny_k1 }, { "skinny_k4", &k->skinny_k4 }, { "skinny_k8", &k->skinny_k8 },
                 { "skinny_r4", &k->skinny_r4 }, { "skinny_r8", &k->skinny_r8 },
                 { "skinny_n4", &k->skinny_n4 }, { "skinny_n2", &k->skinny_n2 } };
@@ -191,11 +191,11 @@ int gen9blas_init(const char *dir) {
         { GEN9BLAS_HS, "gen_hd.bin", "hgemm_kc_v", "pk_a3", "pk_b16", "gen9blas_epilog_b",  "gen9blas_epilog_tri",  2, 16, GEN9BLAS_KC, ph },
         { GEN9BLAS_S,  "gen_s.bin",  "sgemm_v",    "pkf_a", "pkf_b",  "gen9blas_epilog_fb", "gen9blas_epilog_trif", 4, 16, 16, ps },
         { GEN9BLAS_D,  NULL,         "dgemm_v",    "pkd_a", "pkd_b",  "gen9blas_epilog_db", "gen9blas_epilog_trid", 8, 16, 16, pd } };
-    // Gen8 SGEMM: sgemm8_v32 (16 x 32 tile, SIMD8, its own packed layouts; bench/sgemm.cl); GEN9BLAS_SGEMM8=v: the
+    // Gen8 SGEMM: sgemm8_v32 (16 x 32 tile, SIMD8, its own packed layouts; lib/kernels/sgemm.cl); GEN9BLAS_SGEMM8=v: the
     // OpenCL frame sgemm_v of the Gen9 kernel (comparisons, docs/gen8.md 6d)
     const char *s8 = getenv("GEN9BLAS_SGEMM8");
     if (gen8 && !(s8 && !strcmp(s8, "v"))) { t[2].k = "sgemm8_v32"; t[2].pa = "pkf_a8"; t[2].pb = "pkf_b32"; t[2].tn = 32; }
-    // Gen8 DGEMM: dgemm8_v832 (8 x 32 tiles, SIMD8, B in 32-column panels; bench/dgemm_core.cl); GEN9BLAS_DGEMM8=v: dgemm_v
+    // Gen8 DGEMM: dgemm8_v832 (8 x 32 tiles, SIMD8, B in 32-column panels; lib/kernels/dgemm_core.cl); GEN9BLAS_DGEMM8=v: dgemm_v
     const char *d8 = getenv("GEN9BLAS_DGEMM8");
     if (gen8 && !(d8 && !strcmp(d8, "v"))) { t[3].k = "dgemm8_v832"; t[3].pb = "pkd_b32"; t[3].tn = 32; }
     for (int i = 0; i < 4; i++) {
@@ -870,7 +870,7 @@ int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_pa
     return gemm_pb_f16w_any(1, M, A, lda, P, C, ldc, nonfinite, NULL, NULL, NULL);
 }
 
-// Small batches (M <= 16) on HS-packed weights without packing A: gen9blas_skinny_pb16_<MT> (bench/hgemm.cl), F32 products
+// Small batches (M <= 16) on HS-packed weights without packing A: gen9blas_skinny_pb16_<MT> (lib/kernels/hgemm.cl), F32 products
 // and sums, F32 result straight into C. Returns 1 (nothing done) when the kernel is missing or M is out of range.
 int gen9blas_skinny_pb_supported(void) { return k_skp[0] && k_skp[1] && k_skp[2]; }
 int gen9blas_gemm_pb_skinny(int M, const float *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {

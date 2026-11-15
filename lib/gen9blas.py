@@ -47,7 +47,7 @@ _ready = False
 def _init():
     global _ready
     if not _ready:
-        if _lib.gen9blas_init(os.path.join(_HERE, "..", "bench").encode()) != 0:
+        if _lib.gen9blas_init(os.path.join(_HERE, "kernels").encode()) != 0:
             raise RuntimeError(_lib.gen9blas_error().decode())
         _ready = True
 

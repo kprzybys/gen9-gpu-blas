@@ -10,7 +10,7 @@ lib/.kernels_gen8/
 lib/.check_patchtokens/
 lib/gen9blas_blas_d.inc
 lib/gen9blas_blas_forward.c
-bench/dgemm.cl
+lib/kernels/dgemm.cl
 __pycache__/
 *.pyc
 # compiled benchmark and experiment programs
@@ -37,8 +37,8 @@ asm/out/
 asm/*.d/
 # attention: generated binaries (asm/Makefile attn), bench/attn_kcl and its kernel table
 bench/attn
-bench/attn_*.bin
-bench/.attn-device
+lib/kernels/attn_*.bin
+lib/kernels/.attn-device
 bench/attn_kcl
 bench/attn_kernels.c
 bench/.attn_kernels/
@@ -55,3 +55,5 @@ compile_commands.json
 .cache/clangd/
 # Serena MCP (local project config/cache)
 .serena/
+ggml-backend/test_dec
+ggml-backend/test_vision

@@ -1,6 +1,6 @@
 """HGEMM 16x32 in hand-written Gen9 assembly: generator of a loop inserted into the compiler template.
 
-Template: kernel hgemm_16x32p from bench/hgemm.cl (disassembled by asm/disassemble.sh into asm/hgemm.d).
+Template: kernel hgemm_16x32p from lib/kernels/hgemm.cl (disassembled by asm/disassemble.sh into asm/hgemm.d).
 From the template we take the prologue (addresses pa = r78.0:q, pb0 = r78.1:q, pb1 = r6.1:q, k counter = r6.1:d, K = r6.0:d,
 accumulator zeroing) and the epilogue (C write). The whole k loop (from the loop label to `while`) is replaced with our own code.
 
@@ -11,7 +11,7 @@ Modes:
 Loop (step k = 16, two halves kl = 0..7 and 8..15, each in a separate register buffer X/Y):
   [256 mad: half 0 from buffer X] [6 send: next half 0 -> X] [256 mad: half 1 from Y] [6 send -> Y] [counter]
 No bank conflicts: B registers (row kl) have the parity of kl (even base), A registers for a given kl
-have the opposite parity thanks to the A2 layout (pack_a2 in bench/hgemm.cl).
+have the opposite parity thanks to the A2 layout (pack_a2 in lib/kernels/hgemm.cl).
 """
 import os
 import re

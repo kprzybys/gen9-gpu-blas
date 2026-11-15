@@ -1,5 +1,5 @@
 // DGEMM (FP64) for libgen9blas: packing and the main kernel. The remaining FP64 kernels (epilogs, TRSM, expansion, merging)
-// are derived from sgemm.cl by type substitution -- lib/gen_dgemm.py assembles bench/dgemm.cl from it.
+// are derived from sgemm.cl by type substitution -- lib/gen_dgemm.py assembles lib/kernels/dgemm.cl from it.
 // Panel layout (A: r = row m, B: r = column n): P[(r/16)·Kp·16 + k·16 + r%16] -- in a 16-row panel element
 // (k, r) is at k·16 + r. Offsets used by the library (a piece starting at row i0 and column k0: i0·Kp + k0·16
 // for A, k0·16 for B) are the same as in the FP32 asm layout.

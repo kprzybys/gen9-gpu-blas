@@ -2,7 +2,7 @@
 """Dependency graph between paths of the repo and their target repositories (tools/repo-map.toml).
 
 Edges come from tracked files only (git ls-files), comments stripped:
-  path    a path-like token (`../bench/sgemm.cl`, `lib/kcl.c`, `$(abspath ../lib)`) that resolves to a tracked file/dir
+  path    a path-like token (`../lib/kernels/sgemm.cl`, `lib/kcl.c`, `$(abspath ../lib)`) that resolves to a tracked file/dir
   include #include "x.h" (relative to the file, else a unique basename in the repo)
   name    a string literal naming a tracked file by basename (kcl_program("gen_s.bin"), "sgemm.cl")
   import  Python `import x` / `from x import` resolving to a tracked x.py (same dir first, else unique basename)
