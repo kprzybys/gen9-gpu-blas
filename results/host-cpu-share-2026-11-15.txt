@@ -80,3 +80,11 @@ removed ggml-backend/ directory), and the flag summary warned "no optimization f
    Against beam search 5 (whisper-cli default, section 3): -10 % time, -21 % CPU time, WER 17.46 -> 14.44 %.
    On this set beam search costs time and quality. The decoder (now 29 %, one token per 23 ms, memory-bound) is where
    Q8_0 should pay off (-13 % measured earlier with greedy decoding).
+
+6. Whisper Q8_0, greedy decoding (2026-11-16 ~00:05):
+     total 203.4 s, encode 153.1 s (33 windows), decode 38.1 s (2799 tokens, 13.6 ms each), prompt 8.3 s, 0 fallbacks;
+     user CPU 354.4 s; WER 14.95 % (178/1191).
+   Summary on pl60 (10.8 min):   beam 5 F16 260.0 s / 17.46 %   greedy F16 234.8 s / 14.44 %   greedy Q8_0 203.4 s / 14.95 %
+   Greedy + Q8_0: -22 % time and -41 % CPU time against whisper-cli's defaults; a decoder token 23.3 -> 13.6 ms.
+   Applied: the bundle wrapper (kp-igpu-apps mel/whisper-gpu, deployed to gp ~/whisper-gpu) adds -bs 1 -bo 1 unless the
+   caller sets them; the model (F16 or Q8_0) stays the caller's choice (-m).
