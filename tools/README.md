@@ -2,7 +2,6 @@
 
 | Tool | What it does |
 |---|---|
-| `repo-map.toml` | target repository of every tracked path (lib / backend / apps / badania) and the allowed dependency order |
 | `depgraph.py` | dependency edges between paths (Makefile paths, `#include`, file names in strings, Python imports, kernel names); `--check` fails on edges that break the repo order, `--dirs` shows directory coupling, `--docs` cross-repo links |
 | `kernels.py` | inventory of OpenCL kernels: users, unnamed (unused) kernels, same name / identical body in several files |
 | `dup.sh` | copy-paste detection (jscpd 4.0.5) |

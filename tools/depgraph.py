@@ -37,7 +37,12 @@ def glob_re(pat):
 
 
 class RepoMap:
+    """Target repository per path (the monorepo's tools/repo-map.toml). Since the split there is none: every path
+    belongs to this repository, and the order check is trivially satisfied."""
     def __init__(self, path):
+        if not os.path.exists(path):
+            self.deps, self.rules = {"lib": set()}, [("lib", [glob_re("**")])]
+            return
         cfg = tomllib.load(open(path, "rb"))
         self.deps = {k: set(v.get("deps", [])) for k, v in cfg["repos"].items()}
         self.rules = [(r["repo"], [glob_re(p) for p in r["patterns"]]) for r in cfg["rule"]]

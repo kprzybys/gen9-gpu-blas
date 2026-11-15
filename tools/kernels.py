@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Inventory of OpenCL kernels in tracked .cl files (refactor plan 2026-11-15, stage 1).
 
-For every `kernel void NAME(...)`: where it is defined, which repo the file goes to (tools/repo-map.toml), and which code
+For every `kernel void NAME(...)`: where it is defined, which repo the file goes to (tools/repo-map.toml, if present), and which code
 files name it in a string literal (clCreateKernel, KER(...), kcl tables, Python). Reports:
   --dup      same name defined in more than one file, and identical bodies under different names/files
   --unused   kernels no code file names (candidates for removal; asm-generated or test-only kernels show up here too)

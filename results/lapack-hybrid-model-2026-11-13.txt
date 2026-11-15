@@ -1,8 +1,7 @@
 # Hybrid LAPACK (Cholesky potrf, then LU getrf) on gen9blas -- model before any measurement, 2026-11-13 night
 Scheme (MAGMA style, no copies: CPU and GPU work on the same host buffers through userptr): diagonal block / panel on the
 CPU (OpenBLAS), panel TRSM and trailing SYRK/GEMM on the GPU in FP32; optional FP64 iterative refinement on the CPU
-(sposv-style mixed precision: factor in FP32, residual and correction in FP64). Background: reports/Katalog kerneli GPU.md
-(section LAPACK), research_notes/Katalog kerneli GPU/dense_linear_algebra.md. Nothing below is measured for LAPACK yet.
+(sposv-style mixed precision: factor in FP32, residual and correction in FP64). Nothing below is measured for LAPACK yet.
 
 ## Facts used (kp, UHD 620 + i5/i7-8x65U, all FP32 unless noted)
 - gen9blas whole call, square n = 2048 / 4096: SGEMM 341-351, SSYRK 242-266, STRSM 183 / 226-232 GFLOPS, CPU < 1 %
