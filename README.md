@@ -148,6 +148,8 @@ gen9blas_sgemm(M, N, K, 1.0, A, K, B, N, 0.0, C, N);
 gcc -O2 prog.c -Ilib -Llib -lgen9blas -Wl,-rpath,$PWD/lib
 ```
 
+Rust: `bindings/rust` (crates `gen9blas` and `gen9blas-sys`; see [bindings/rust/README.md](bindings/rust/README.md)).
+
 Existing programs: NumPy/SciPy from the distribution use the system `libblas.so.3`. With the preloaded layer, S and D
 functions of levels 2–3 and CBLAS level 1 go to the GPU when it pays off; everything else is forwarded to OpenBLAS.
 

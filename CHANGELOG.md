@@ -12,6 +12,10 @@ Breaking release: the API is reorganized; GPU arithmetic is unchanged (same kern
 - `libkcl.a`: kcl for programs with their own kernel tables (link it instead of compiling `lib/kcl.c`).
 - `libgen9blas.so` exports only the `gen9blas_*` API (built with `-fvisibility=hidden`); `kcl_*` is no longer exported.
 
+### Rust
+- `bindings/rust`: `gen9blas-sys` (raw FFI to the whole API, checked against the headers by
+  `tools/check_rust_ffi.py`) and `gen9blas` (safe BLAS API: checked slice shapes, `Result`, `UsmBuffer`, `PackedB`).
+
 ### API: old -> new
 | 0.1 | 0.2 |
 |---|---|

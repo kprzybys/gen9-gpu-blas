@@ -1,0 +1,15 @@
+[package]
+name = "gen9blas"
+description = "Safe Rust API for libgen9blas: BLAS levels 1-3 on Intel Gen9 iGPUs (UHD 620 / HD 530)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+keywords = ["blas", "gpu", "intel", "gemm", "linear-algebra"]
+categories = ["api-bindings", "science", "mathematics"]
+
+build = "build.rs"
+
+[dependencies]
+gen9blas-sys = { path = "../gen9blas-sys", version = "0.2.0" }

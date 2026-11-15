@@ -1,0 +1,12 @@
+[package]
+name = "gen9blas-sys"
+description = "Raw FFI bindings to libgen9blas (BLAS and NN ops on Intel Gen9 iGPUs)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+links = "gen9blas"
+build = "build.rs"
+
+[dependencies]
