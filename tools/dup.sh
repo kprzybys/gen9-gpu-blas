@@ -1,12 +1,12 @@
 #!/bin/bash
 # Copy-paste detection (jscpd, pinned) over code that ships: C/OpenCL (.c .h .cl), C++, Python, shell.
-# Skips third_party, results, reports/notes, generated kernel tables. Prints the summary; JSON in ${1:-/tmp}/jscpd-report.json.
+# Skips frozen asm templates (asm/*.cl: copies kept for bit-identical binaries), generated dgemm.cl, third_party, results, reports/notes, generated kernel tables. Prints the summary; JSON in ${1:-/tmp}/jscpd-report.json.
 #   tools/dup.sh [outdir]        (needs node/npx; first run downloads jscpd 4.0.5)
 set -eu
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 OUT=${1:-${TMPDIR:-/tmp}/jscpd-$$}; mkdir -p "$OUT"
 npx --yes jscpd@4.0.5 --silent --min-tokens 70 --formats-exts "c:c,h,cl;cpp:cpp,hpp;python:py;bash:sh" \
-  --ignore "**/third_party/**,**/results/**,**/research_notes/**,**/reports/**,**/build/**,**/kcl_build/**,**/*_kernels.c,**/kernels.c" \
+  --ignore "asm/*.cl,lib/kernels/dgemm.cl,**/third_party/**,**/results/**,**/research_notes/**,**/reports/**,**/build/**,**/kcl_build/**,**/*_kernels.c,**/kernels.c" \
   --reporters json --output "$OUT" . > /dev/null
 python3 - "$OUT/jscpd-report.json" <<'PY'
 import json, sys, collections
