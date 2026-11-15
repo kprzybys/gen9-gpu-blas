@@ -65,3 +65,5 @@ cl_int kcl_wait(void);
 // without a wait see each byte at one GPU address). Registered until kcl_span_clear(). Returns 0 or -1 (not registered).
 int kcl_span_add(const void *ptr, size_t n, int wr);
 void kcl_span_clear(void);
+// 1 on a Gen8 Cherryview GPU (docs/gen8.md): kernels from kernels_gen8.c, no assembler programs; 0 on Gen9.
+int kcl_gen8(void);

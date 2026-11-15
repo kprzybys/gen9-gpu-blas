@@ -76,6 +76,9 @@ for name, nbytes, gpu, cpu in [
     if dtype == np.float16 and name in ("symv", "syr", "syr2") or dtype == np.float16 and name[:4] in ("trmv", "trsv"):
         results.append("-")   # no FP16 BLAS on the CPU
     else:
-        t, c = measure(lambda: cpu(x, y, A))
-        results.append(f"{nbytes / t / 1e9:5.1f} GB/s {100 * c:4.0f}%")
+        try:
+            t, c = measure(lambda: cpu(x, y, A))
+            results.append(f"{nbytes / t / 1e9:5.1f} GB/s {100 * c:4.0f}%")
+        except ImportError:   # no SciPy (CPU BLAS column), e.g. a machine with only the GPU library
+            results.append("-")
     print(f"  {name:10s} " + " ".join(f"{w:>18s}" for w in results))

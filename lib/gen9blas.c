@@ -25,6 +25,7 @@ typedef struct {
     cl_kernel main, pa, pb, pa_t, pb_t, pa_q, pb_w2,   // pa_q, pb_w2: faster packing without transpose (NULL: absent)
               epi, epi_tri, tL, tY, tZ, tI[4], expand, syr2k_merge;   // t*: TRSM; expand: full matrix; syr2k_merge: SYR2K join
     int es, tn, km, ready;
+    int sg;   // work-items per C tile in the main kernel: its subgroup size (16; Gen8 sgemm8_v32: 8)
 } type_t;
 
 static cl_context ctx;
@@ -94,8 +95,12 @@ static int program_src(const char *dir, const char *file, const char *options, c
 // Level 1–2 kernels (bench/level12.cl): L12[0] FP16 (GEN9BLAS_H, GEN9BLAS_HS), L12[1] FP32.
 typedef struct { cl_kernel axpy, scal, copy, copy16, rot, red, iamax, gemv_n, gemv_nw, gemv_t1, gemv_t1b, gemv_t2, ger, syr2, to_f, from_f, trsv_block, trsv_upd_n, trsv_upd_t, rotm, pmv, psv, spr2, symv1, symv2, skinny_k1, skinny_k4, skinny_k8, skinny_r4, skinny_r8, skinny_n4, skinny_n2; int es; } l12_t;
 static l12_t L12[3];   // 0 FP16, 1 FP32, 2 FP64
+// Gen8 Cherryview (kcl, docs/gen8.md): no FP16 for now (its kernels need scratch there), GEMM main kernels from OpenCL C
+// instead of the Gen9 assembler binaries, gemv_n_f unavailable (scratch) -> the grouped GEMV for every N.
+static int gen8;
 static int init_l12(const char *dir) {
     for (int i = 0; i < 3; i++) {
+        if (gen8 && i == 0) continue;
         cl_program pr; const char *suf = "hfd" + i, *opc[3] = { "-cl-std=CL3.0 -DHALF", "-cl-std=CL3.0", "-cl-std=CL3.0 -DDBL" };
         char n[32], sf[2] = { *suf, 0 };
         if (program_src(dir, "level12.cl", opc[i], &pr)) return -1;
@@ -106,7 +111,11 @@ static int init_l12(const char *dir) {
             { "to_f", &k->to_f }, { "from_f", &k->from_f }, { "trsv_block", &k->trsv_block },
             { "trsv_upd_n", &k->trsv_upd_n }, { "trsv_upd_t", &k->trsv_upd_t }, { "rotm", &k->rotm }, { "pmv", &k->pmv },
             { "psv", &k->psv }, { "spr2", &k->spr2 }, { "symv1", &k->symv1 }, { "symv2", &k->symv2 } };
-        for (size_t j = 0; j < sizeof t / sizeof t[0]; j++) { snprintf(n, sizeof n, "%s_%s", t[j].n, suf); KER(pr, n, *t[j].k); }
+        for (size_t j = 0; j < sizeof t / sizeof t[0]; j++) {
+            snprintf(n, sizeof n, "%s_%s", t[j].n, suf);
+            if (gen8 && t[j].k == &k->gemv_n) { cl_int e; k->gemv_n = clCreateKernel(pr, n, &e); if (e) k->gemv_n = NULL; continue; }
+            KER(pr, n, *t[j].k);
+        }
         if (i < 2) {   // skinny GEMM: FP16 and FP32 only (bench/level12.cl, #ifndef DBL)
             struct { const char *n; cl_kernel *k; } c[] = { { "skinny_k1", &k->skinny_k1 }, { "skinny_k4", &k->skinny_k4 }, { "skinny_k8", &k->skinny_k8 },
                 { "skinny_r4", &k->skinny_r4 }, { "skinny_r8", &k->skinny_r8 },
@@ -134,6 +143,9 @@ int gen9blas_init(const char *dir) {
     profile = getenv("GEN9BLAS_PROFILE") != NULL;
     cl_queue_properties qp[] = { CL_QUEUE_PROPERTIES, profile ? CL_QUEUE_PROFILING_ENABLE : 0, 0 };
     q = clCreateCommandQueueWithProperties(ctx, dev, qp, &err); CHECK(err);
+#ifndef GEN9BLAS_NEO
+    gen8 = kcl_gen8();
+#endif
     cl_program ph, ps, pd;
     if (program_src(dir, "hgemm.cl", "", &ph) || program_src(dir, "sgemm.cl", "", &ps) ||
         program_src(dir, "dgemm.cl", "", &pd)) return -1;
@@ -166,10 +178,19 @@ int gen9blas_init(const char *dir) {
         { GEN9BLAS_HS, "gen_hd.bin", "hgemm_kc_v", "pk_a3", "pk_b16", "gen9blas_epilog_b",  "gen9blas_epilog_tri",  2, 16, GEN9BLAS_KC, ph },
         { GEN9BLAS_S,  "gen_s.bin",  "sgemm_v",    "pkf_a", "pkf_b",  "gen9blas_epilog_fb", "gen9blas_epilog_trif", 4, 16, 16, ps },
         { GEN9BLAS_D,  NULL,         "dgemm_v",    "pkd_a", "pkd_b",  "gen9blas_epilog_db", "gen9blas_epilog_trid", 8, 16, 16, pd } };
+    // Gen8 SGEMM: sgemm8_v32 (16 x 32 tile, SIMD8, its own packed layouts; bench/sgemm.cl); GEN9BLAS_SGEMM8=v: the
+    // OpenCL frame sgemm_v of the Gen9 kernel (comparisons, docs/gen8.md 6d)
+    const char *s8 = getenv("GEN9BLAS_SGEMM8");
+    if (gen8 && !(s8 && !strcmp(s8, "v"))) { t[2].k = "sgemm8_v32"; t[2].pa = "pkf_a8"; t[2].pb = "pkf_b32"; t[2].tn = 32; }
+    // Gen8 DGEMM: dgemm8_v832 (8 x 32 tiles, SIMD8, B in 32-column panels; bench/dgemm_core.cl); GEN9BLAS_DGEMM8=v: dgemm_v
+    const char *d8 = getenv("GEN9BLAS_DGEMM8");
+    if (gen8 && !(d8 && !strcmp(d8, "v"))) { t[3].k = "dgemm8_v832"; t[3].pb = "pkd_b32"; t[3].tn = 32; }
     for (int i = 0; i < 4; i++) {
+        if (gen8 && t[i].es == 2) continue;   // FP16: not on Gen8 yet
         type_t *r = &types[t[i].r]; char n[64];
-        if (t[i].bin ? program_bin(dir, t[i].bin, t[i].k, &r->main) : 0) return -1;
-        if (!t[i].bin) KER(t[i].pr, t[i].k, r->main);
+        const char *bin = gen8 ? NULL : t[i].bin;   // Gen8: sgemm_v from sgemm.cl (same arguments as gen_s.bin)
+        if (bin ? program_bin(dir, bin, t[i].k, &r->main) : 0) return -1;
+        if (!bin) KER(t[i].pr, t[i].k, r->main);
         KER(t[i].pr, t[i].pa, r->pa); KER(t[i].pr, t[i].pb, r->pb); KER(t[i].pr, t[i].epi, r->epi);
         KER(t[i].pr, t[i].tri, r->epi_tri);
         const char *suf = t[i].es == 4 ? "f" : t[i].es == 8 ? "d" : "h";
@@ -186,6 +207,7 @@ int gen9blas_init(const char *dir) {
         snprintf(n, sizeof n, "%s_q", t[i].pa); r->pa_q = old_pack ? NULL : clCreateKernel(t[i].pr, n, &e3); if (e3) r->pa_q = NULL;
         snprintf(n, sizeof n, "%s_w2", t[i].pb); r->pb_w2 = old_pack ? NULL : clCreateKernel(t[i].pr, n, &e3); if (e3) r->pb_w2 = NULL;
         r->es = t[i].es; r->tn = t[i].tn; r->km = t[i].km; r->ready = 1;
+        r->sg = (gen8 && t[i].r == GEN9BLAS_S && t[i].tn == 32) ? 8 : 16;
     }
     errbuf[0] = 0;
     inited = 1;
@@ -381,7 +403,7 @@ int gen9blas_gemm_batched(int type, int tA, int tB, int M, int N, int K, double 
     bf_t target = direct ? xC : BM(dCp); int ldtarget = direct ? ldc : Np;
     ARG(r->main, 0, dAp); ARG(r->main, 1, dBp); ARGB(r->main, 2, target); ARG(r->main, 3, Mp); ARG(r->main, 4, Np);
     ARG(r->main, 5, ldtarget); ARG(r->main, 6, Kp); ARG(r->main, 7, Kp);
-    size_t gm = (size_t)count * (Np / r->tn) * (Mp / 16) * 16, lm = 16;
+    size_t gm = (size_t)count * (Np / r->tn) * (Mp / 16) * r->sg, lm = r->sg;
     cl_event ev = NULL;
     if (!split) CHECK(clEnqueueNDRangeKernel(q, r->main, 1, NULL, &gm, &lm, 0, NULL, &ev));
     else {
@@ -469,6 +491,7 @@ static double max_launch_ms(void) {
 }
 static double est_ms(type_t *r, double M, double N, double K) {   // conservative GFLOPS of the main kernels
     double gf = r == &types[GEN9BLAS_D] ? 45 : r == &types[GEN9BLAS_S] ? 300 : r == &types[GEN9BLAS_HS] ? 500 : 600;
+    if (gen8) gf = r == &types[GEN9BLAS_D] ? 8 : 50;   // CHV peaks: FP64 14, FP32 115 GFLOPS (docs/gen8.md); not measured yet
     return 2 * M * N * K / (gf * 1e6);
 }
 
@@ -483,7 +506,7 @@ static int launch1(type_t *r, cl_mem Ap, size_t oA, cl_mem Bp, size_t oB, cl_mem
     }
     ARG(r->main, 0, sub[0]); ARG(r->main, 1, sub[1]); ARG(r->main, 2, sub[2]); ARG(r->main, 3, M); ARG(r->main, 4, N);
     ARG(r->main, 5, ldc); ARG(r->main, 6, K); ARG(r->main, 7, Kfull);
-    size_t gm = (size_t)(N / r->tn) * (M / 16) * 16, lm = 16; cl_event ev;
+    size_t gm = (size_t)(N / r->tn) * (M / 16) * r->sg, lm = r->sg; cl_event ev;
     CHECK(clEnqueueNDRangeKernel(q, r->main, 1, NULL, &gm, &lm, 0, NULL, &ev));
     if (measure && nev < (int)(sizeof evs / sizeof evs[0])) evs[nev++] = ev; else clReleaseEvent(ev);
     for (int i = 0; i < 3; i++) if (sub_made[i]) clReleaseMemObject(sub[i]);
@@ -1582,7 +1605,7 @@ static int gemv_inner(l12_t *k, int trans, int M, int N, double alpha, bf_t A, i
         // GEN9BLAS_GEMV_N=old|grouped forces a variant (comparisons).
         static int forced = -1;
         if (forced < 0) { const char *e = getenv("GEN9BLAS_GEMV_N"); forced = !e ? 0 : !strcmp(e, "old") ? 1 : !strcmp(e, "grouped") ? 2 : 0; }
-        const int grouped = forced == 2 || (forced == 0 && N >= 1024);
+        const int grouped = !k->gemv_n || forced == 2 || (forced == 0 && N >= 1024);
         cl_kernel K = grouped ? k->gemv_nw : k->gemv_n;
         ARG(K, 0, M); ARG(K, 1, N); ARGR(K, 2, alpha); ARGB(K, 3, A); ARG(K, 4, oa); ARG(K, 5, lda); ARGB(K, 6, x);
         ARG(K, 7, ox); ARG(K, 8, ix); ARGR(K, 9, beta); ARGB(K, 10, y); ARG(K, 11, oy); ARG(K, 12, iy); ARG(K, 13, mode); ARG(K, 14, unit);

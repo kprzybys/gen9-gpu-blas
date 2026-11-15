@@ -5,12 +5,17 @@ GENXML = ../../third_party/mesa-25.2.8/genxml
 SYMBOLS = PIPELINE_SELECT,STATE_BASE_ADDRESS,MEDIA_VFE_STATE,MEDIA_INTERFACE_DESCRIPTOR_LOAD,INTERFACE_DESCRIPTOR_DATA,GPGPU_WALKER,MEDIA_STATE_FLUSH,PIPE_CONTROL,MI_BATCH_BUFFER_END,MI_LOAD_REGISTER_IMM,MI_STORE_REGISTER_MEM,MI_NOOP,MEMORY_OBJECT_CONTROL_STATE,L3CNTLREG,RENDER_SURFACE_STATE,BINDING_TABLE_STATE
 GEN9_PACK = ../../lib/third_party/mesa/gen9_pack.h
 all: first neo_compare probe store.isa chain neo_chain chain_bti gemm_h userptr
-.PHONY: all gen9_pack
+.PHONY: all gen9_pack gen8_pack
 
 # Explicit target (not part of `all`): regenerate the tracked gen9_pack.h from Mesa genxml (needs third_party/mesa-25.2.8).
 gen9_pack:
 	python3 $(GENXML)/gen_pack_header.py --include-symbols "$(SYMBOLS)" $(GENXML)/gen90.xml > $(GEN9_PACK).tmp
 	mv $(GEN9_PACK).tmp $(GEN9_PACK)
+
+# The same for the two Gen8 commands kcl packs differently (lib/kcl_gen8.c, docs/gen8.md).
+gen8_pack:
+	python3 $(GENXML)/gen_pack_header.py --include-symbols "PIPELINE_SELECT,STATE_BASE_ADDRESS" $(GENXML)/gen80.xml > ../../lib/third_party/mesa/gen8_pack.h.tmp
+	mv ../../lib/third_party/mesa/gen8_pack.h.tmp ../../lib/third_party/mesa/gen8_pack.h
 
 store.isa: store.cl extract.py
 	ocloc compile -file store.cl -device whl -options "-cl-intel-greater-than-4GB-buffer-required" -output_no_suffix -output store >/dev/null

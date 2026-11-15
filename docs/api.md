@@ -268,6 +268,7 @@ All variables are read once per process (on first use). "Value" lists what is ac
 | `GEN9BLAS_PROFILE` | set (any value) | profiling: stage times on stderr, `gen9blas_last_time_ms()` returns the kernel time. Off by default because queue profiling costs ~20 µs of CPU per event |
 | `GEN9BLAS_SKINNY` | integer; default: threshold 16 for FP16 and FP32, none for FP64 | skinny GEMM is used when min(M, N) <= n; `0` disables it (old packed path) |
 | `GEN9BLAS_SKINNY_R` | `0` | use the older `skinny_k4` / `skinny_k8` kernels instead of `skinny_r4` / `skinny_r8` (comparisons) |
+| `GEN9BLAS_SGEMM8`, `GEN9BLAS_DGEMM8` | `v` | Gen8 only: use the untuned `sgemm_v` / `dgemm_v` instead of `sgemm8_v32` / `dgemm8_v832` (comparisons, docs/gen8.md 6e) |
 | `GEN9BLAS_MAX_LAUNCH_MS` | number; default 100 | longest planned GEMM kernel launch; longer ones are split into row bands (see "Long launches") |
 | `GEN9BLAS_BLOCKS` | integer; default 4 for n >= 512, else 1 | number of bands in blocked SYRK / SYR2K / TRMM / TRSM |
 | `GEN9BLAS_GEMV_N` | `old`, `grouped`; default: grouped for N >= 1024 | force a variant of GEMV N (comparisons) |

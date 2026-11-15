@@ -17,6 +17,9 @@ import gen9blas  # noqa: E402
 
 TYPES = [("fp16", np.float16, False, 4.9e-4, 5e-3), ("fp16 acc.", np.float16, True, 4.9e-4, 5e-3),
         ("fp32", np.float32, False, 1e-6, 1e-5), ("fp64", np.float64, False, 1e-14, 1e-13)]
+TYPES = [t for t in TYPES if gen9blas.available(t[1], t[2])]   # Gen8: no FP16
+if not gen9blas.available(np.float16):
+    print("NOTE: FP16 unavailable on this GPU (Gen8), skipping the FP16 cases")
 rng = np.random.default_rng(7)
 errors = 0
 
@@ -99,8 +102,9 @@ for desc, dt, acc, tol_avg, tol_max in TYPES:
 
 # TRSM: A = triangular, diagonal ≥ n (well conditioned). float32: ≤ 1e-4; float16: ≤ 5e-3 (the solution
 # is stored in FP16 between blocks; the reference is computed from data rounded to FP16)
-for t_desc, t_dt, t_acc, t_tol in (("trsm fp64", np.float64, False, 1e-12), ("trsm fp32", np.float32, False, 1e-4), ("trsm fp16", np.float16, False, 5e-3),
-                                    ("trsm fp16d", np.float16, True, 5e-3)):
+for t_desc, t_dt, t_acc, t_tol in [t for t in (("trsm fp64", np.float64, False, 1e-12), ("trsm fp32", np.float32, False, 1e-4),
+                                    ("trsm fp16", np.float16, False, 5e-3), ("trsm fp16d", np.float16, True, 5e-3))
+                                    if gen9blas.available(t[1], t[2])]:
   n_ok = n_all = 0
   for side in "LR":
       for uplo in "LU":
@@ -130,7 +134,7 @@ for t_desc, t_dt, t_acc, t_tol in (("trsm fp64", np.float64, False, 1e-12), ("tr
   print(f"{t_desc:11s}: {n_ok}/{n_all} cases OK")
 
 print("\n== GEMM batched: 256 × (64×64×64), FP16 / FP32")
-for dt in (np.float16, np.float32):
+for dt in [d for d in (np.float16, np.float32) if gen9blas.available(d)]:
     A, B = rnd((256, 64, 64), dt), rnd((256, 64, 64), dt)
     gen9blas.gemm_batched(A, B)
     t = time.perf_counter(); gen9blas.gemm_batched(A, B); tw = time.perf_counter() - t
@@ -145,7 +149,7 @@ for dt in (np.float16, np.float32):
 
 print("\n== Zero-copy views: slices (row stride), A[::2], .T views, C as a slice (FP32, FP16)")
 tol32 = (1e-6, 1e-5)
-for name, dt in (("fp32", np.float32), ("fp16", np.float16)):
+for name, dt in [t for t in (("fp32", np.float32), ("fp16", np.float16)) if gen9blas.available(t[1])]:
     tol = tol32 if dt == np.float32 else (4.9e-4, 5e-3)
     D = rnd((300, 400), dt); E = rnd((400, 300), dt); P = rnd((260, 260), dt)
     views = {"slice": lambda X: X[5:105, 7:107], "every 2nd": lambda X: X[::2, 3:103][:100],

@@ -35,7 +35,7 @@ def check(desc, dt, result, ref):
         print(f"BAD {desc}: error {e:.2e}")
 
 
-for dt in (np.float16, np.float32):
+for dt in [d for d in (np.float16, np.float32) if gen9blas.available(d)]:   # Gen8: no FP16
     fn = gen9blas.hgemm if dt == np.float16 else gen9blas.sgemm
     label = np.dtype(dt).name
     for usm in (True, False):

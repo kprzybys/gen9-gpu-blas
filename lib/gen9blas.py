@@ -107,6 +107,12 @@ def empty(shape, dtype=np.float16):
     return np.frombuffer(raw, dtype=np.uint8, count=n).view(dtype).reshape(shape)
 
 
+def available(dt, accurate=False):
+    """Whether the type can be used on this GPU (Gen8 Cherryview: no FP16 for now, docs/gen8.md)."""
+    _init()
+    return bool(_lib.gen9blas_available(_kind(dt, accurate)))
+
+
 def _kind(dt, accurate):
     if np.dtype(dt) == np.float32:
         return GEN9BLAS_S
