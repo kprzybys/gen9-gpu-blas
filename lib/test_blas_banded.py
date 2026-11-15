@@ -15,7 +15,7 @@ os.environ["GEN9BLAS_BLAS"] = "gpu"
 os.environ["GEN9BLAS_BLAS_INFO"] = "1"
 import numpy as np  # noqa: E402
 
-K_ = ctypes.CDLL(os.path.join(HERE, "libgen9blas_blas.so"))
+K_ = ctypes.CDLL(os.environ.get("GEN9BLAS_BLAS_LIB", os.path.join(HERE, "libgen9blas_blas.so")))
 O_ = ctypes.CDLL("libopenblas.so.0")
 log = tempfile.TemporaryFile(); saved_stderr = os.dup(2); os.dup2(log.fileno(), 2)
 rng = np.random.default_rng(9)

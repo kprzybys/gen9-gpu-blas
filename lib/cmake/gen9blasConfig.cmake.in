@@ -1,0 +1,13 @@
+# find_package(gen9blas 0.2) -> targets gen9blas::gen9blas (shared library), gen9blas::kcl (libkcl.a for programs with
+# their own kernel tables), function gen9blas_kernel_table() (cmake/gen9blasKernels.cmake), variables:
+#   GEN9BLAS_GEN_KERNELS   path of gen_kernels.py      GEN9BLAS_KERNELS_DIR  library kernel sources and asm binaries
+@PACKAGE_INIT@
+include(CMakeFindDependencyMacro)
+find_dependency(Threads)
+include("${CMAKE_CURRENT_LIST_DIR}/gen9blasTargets.cmake")
+set_and_check(GEN9BLAS_DATADIR "@PACKAGE_CMAKE_INSTALL_DATADIR@/gen9blas")
+set(GEN9BLAS_GEN_KERNELS "${GEN9BLAS_DATADIR}/gen_kernels.py")
+set(GEN9BLAS_KERNELS_DIR "${GEN9BLAS_DATADIR}/kernels")
+set(GEN9BLAS_OCLOC_VERSION "@GEN9BLAS_OCLOC_VERSION@")
+include("${CMAKE_CURRENT_LIST_DIR}/gen9blasKernels.cmake")
+check_required_components(gen9blas)

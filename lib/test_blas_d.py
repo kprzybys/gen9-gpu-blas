@@ -14,7 +14,7 @@ import tempfile
 HERE = os.path.dirname(os.path.realpath(__file__))
 os.environ.setdefault("GEN9BLAS_BLAS", "gpu")
 os.environ["GEN9BLAS_BLAS_INFO"] = "1"
-os.environ["GEN9BLAS_LIB"] = os.path.join(HERE, "libgen9blas_blas.so")   # gen9blas.empty z tego samego kontekstu OpenCL
+os.environ["GEN9BLAS_LIB"] = os.environ.get("GEN9BLAS_BLAS_LIB", os.path.join(HERE, "libgen9blas_blas.so"))   # gen9blas.empty z tego samego kontekstu OpenCL
 import numpy as np  # noqa: E402
 
 sys.path.insert(0, HERE)
