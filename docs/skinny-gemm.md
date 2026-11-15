@@ -38,7 +38,7 @@ N = K = 4096):
 
 ## Design
 
-Common to all kernels (`skinny_*` in `lib/kernels/level12.cl`, selected in `gemm_skinny` in `lib/gen9blas.c`):
+Common to all kernels (`skinny_*` in `lib/kernels/level12.cl`, selected in `gemm_skinny` in `lib/src/gemm.c`):
 
 - no packing: the operands are read directly (USM or userptr), the weights once per tile of rows of the small operand;
 - FP32 accumulation also for FP16 (accuracy at least as good as `GEN9BLAS_HS`, at no cost when memory-bound);

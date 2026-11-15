@@ -1,4 +1,4 @@
-// kcl: the OpenCL subset used by gen9blas.c, implemented directly on i915 (without NEO). Description: ../docs/no-neo.md.
+// kcl: the OpenCL subset used by libgen9blas (lib/src), implemented directly on i915 (without NEO). Description: ../docs/no-neo.md.
 // Types and constants come from the Khronos headers; functions are renamed to kcl_* (the library does not export cl* symbols, so
 // it does not clash with a real OpenCL in the same process).
 #pragma once

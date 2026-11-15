@@ -1,7 +1,7 @@
 """Skinny GEMM test (small M or N, no packing; docs/skinny-gemm.md) against NumPy in FP64.
 
 Run: python3 lib/test_skinny.py   (forces the skinny kernel for min(M, N) ≤ 64 via GEN9BLAS_SKINNY=64, regardless of the
-selection threshold in gen9blas.c; the old path is covered by test_basic and test_level3)
+selection threshold in src/gemm.c; the old path is covered by test_basic and test_level3)
 Cases: both weight layouts (A·Wᵀ and A·B), transposes of A and B (.T views), small N (role swap), alpha/beta, C as a slice
 (row stride), odd sizes and K tails (K mod 8, K mod 128), M around the tiles (1, 3, 4, 5, 8, 9, 16, 17, 33, 64),
 USM memory (gen9blas.empty) and plain (NumPy). FP16 and FP32.

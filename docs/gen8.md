@@ -149,7 +149,7 @@ This section and section 5 describe the situation before the port; `lib/kcl.c` l
 | D2 | device parameters at init: chipset (CHV = 0x22b0-0x22b3), EU and subslice count, timestamp frequency, LLC, GTT size | `lib/kcl.c` `init()` |
 | D3 | Gen8 command stream: PIPELINE_SELECT and STATE_BASE_ADDRESS from `gen8_pack.h` (own file `kcl_gen8.c`: the Mesa headers define the same enumerators), dummy MEDIA_VFE_STATE after PIPELINE_SELECT, no 0xE404, DC flush with the CS stall, MOCS 0x78, L3CNTLREG 0x60000121 always (bit 9 clear, SLM layout; Beignet uses the same value), SLM in 4 KB steps with a barrier, at most 42 threads per group, VFE threads and private memory from EU_TOTAL | `lib/kcl.c`, `lib/kcl_gen8.c` |
 | D4 | without LLC: CPU-read objects snooped (SET_CACHING CACHED), CPU-written objects mapped WC + sfence before execbuffer; 4 GB PPGTT: addresses from 1 MB, freed ranges reused after the GPU is done with them | `lib/kcl.c` `kbo_new`, `kbo_addr` |
-| D5 | gen9blas on Gen8: FP32 and FP64 only, `sgemm_v` from `sgemm.cl`, grouped GEMV for every N (no `gemv_n_f`), band splitting assumes 50 / 8 GFLOPS | `lib/gen9blas.c` |
+| D5 | gen9blas on Gen8: FP32 and FP64 only, `sgemm_v` from `sgemm.cl`, grouped GEMV for every N (no `gemv_n_f`), band splitting assumes 50 / 8 GFLOPS | `lib/src/core.c` |
 
 The Gen9 command stream is unchanged; after D3 and after D5, `make -C lib check` passed on the HD 530 and the GEMM speeds
 matched `results/skylake-hd530-2026-11-12.txt` within 0.6 % (n >= 2048).
@@ -247,7 +247,7 @@ other one is a subnormal quotient off by 1 ulp, as the emulation predicted. `dtr
 
 `skinny_r*` differ from the passing SLM/barrier kernels (`skinny_k4_f`, `trsv_block_f`, same 16 threads per group) by
 SIMD8 and the A64 aligned OWord block read x4 (`intel_sub_group_block_read2`); which of the two (if either) is the cause
-is not known [HYP]. They are only the faster variant, so on Gen8 `gen9blas.c` uses `skinny_k*` instead (as with
+is not known [HYP]. They are only the faster variant, so on Gen8 `lib/src/gemm.c` uses `skinny_k*` instead (as with
 `GEN9BLAS_SKINNY_R=0`). Neither was the cause: 64-bit index products were (6e).
 
 ## 6d. Performance (2026-11-13, `results/braswell-gen8-2026-11-13.txt`) [MEAS]

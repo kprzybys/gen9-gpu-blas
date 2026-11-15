@@ -1,4 +1,4 @@
-// kcl: the OpenCL subset used by gen9blas.c, implemented directly on i915 (Gen9: UHD 620, HD 530; Gen8 Cherryview: docs/gen8.md), without NEO. Facts and measurements: ../docs/no-neo.md.
+// kcl: the OpenCL subset used by libgen9blas (lib/src), implemented directly on i915 (Gen9: UHD 620, HD 530; Gen8 Cherryview: docs/gen8.md), without NEO. Facts and measurements: ../docs/no-neo.md.
 //
 // Model: an in-order queue = a batch buffer built on the fly; each clEnqueueNDRangeKernel appends
 // IDD + indirect data + (for stateful arguments) binding table and surface states + GPGPU_WALKER; between kernels

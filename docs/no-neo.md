@@ -219,7 +219,7 @@ Without NEO: time equal to NEO with busy waiting or shorter, CPU 8-25x lower tha
 ## 6f. The whole library without NEO: the kcl layer [MEAS]
 
 Goal: the whole library runs at the lowest possible hardware level. Implementation: `lib/kcl.c` + `lib/kcl.h` are exactly
-the subset of OpenCL used by `lib/gen9blas.c` (about 25 functions), implemented on i915; `gen9blas.c` is almost unchanged
+the subset of OpenCL used by `lib/src/` (about 25 functions), implemented on i915; `gen9blas.c` is almost unchanged
 (program creation -> built-in kernels, the wait -> `GEM_WAIT`). Kernels are compiled at build time (`lib/gen_kernels.py`:
 `ocloc` for `hgemm.cl`, `sgemm.cl`, `dgemm.cl`, `level12.cl` in three option sets (`-DHALF`, default, `-DDBL`), plus the
 assembler binaries `gen_*.bin`) into `lib/kernels.c` (239 kernels, 1.28 MB of ISA at the time of the measurement;

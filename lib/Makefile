@@ -4,7 +4,7 @@
 GEN = third_party/mesa
 CFL = -O2 -Wall -shared -fPIC
 CL_SOURCES = kernels/hgemm.cl kernels/sgemm.cl kernels/dgemm.cl kernels/level12.cl kernels/gen_h.bin kernels/gen_hd.bin kernels/gen_s.bin
-# attention (gen9blas_attn.c): the *_tokc binaries of `make -C ../asm attn` (whl), embedded when present
+# attention (src/attn.c): the *_tokc binaries of `make -C ../asm attn` (whl), embedded when present
 CL_SOURCES += $(wildcard kernels/attn_qwen_tokc.bin kernels/attn_llama_tokc.bin kernels/attn_whisper_tokc.bin kernels/attn_qwen7b_tokc.bin kernels/attn_qwen3_tokc.bin kernels/attn_nemo_tokc.bin kernels/attn_paddle_tokc.bin kernels/attn_ernie_tokc.bin kernels/attn_ernie_stokc.bin)
 all: libgen9blas.so libgen9blas_blas.so libgen9blas_neo.so libgen9blas_blas_neo.so
 
@@ -30,11 +30,14 @@ bench_gen8: bench_gen8.c kcl.c kcl_gen8.c kernels.c kernels_gen8_probe.c kcl.h k
 test_gen8_probe: test_gen8_probe.c kcl.c kcl_gen8.c kernels.c kernels_gen8_probe.c kcl.h kcl_desc.h kcl_gen8.h $(GEN)/gen9_pack.h $(GEN)/gen8_pack.h
 	gcc -O2 -Wall -I$(GEN) -o $@ test_gen8_probe.c kcl.c kcl_gen8.c kernels.c kernels_gen8_probe.c -lm
 
-libgen9blas.so: gen9blas.c gen9blas.h $(KCL_DEP) gen9blas_attn.c
-	gcc $(CFL) -I$(GEN) -o $@ gen9blas.c $(KCL_SRC) gen9blas_attn.c -lm
+# library units (refactor 2b: lib/gen9blas.c split into src/, shared state in src/internal.h)
+LIB_SRC = src/core.c src/gemm.c src/packed.c src/ops.c src/level3.c src/level12.c
+LIB_DEP = $(LIB_SRC) src/internal.h gen9blas.h
+libgen9blas.so: $(LIB_DEP) $(KCL_DEP) src/attn.c
+	gcc $(CFL) -I. -I$(GEN) -o $@ $(LIB_SRC) $(KCL_SRC) src/attn.c -lm
 
-libgen9blas_neo.so: gen9blas.c gen9blas.h
-	gcc $(CFL) -DGEN9BLAS_NEO -o $@ gen9blas.c -lOpenCL -lm
+libgen9blas_neo.so: $(LIB_DEP)
+	gcc $(CFL) -I. -DGEN9BLAS_NEO -o $@ $(LIB_SRC) -lOpenCL -lm
 
 test: libgen9blas.so
 	python3 test_basic.py
@@ -57,19 +60,19 @@ check: libgen9blas.so libgen9blas_blas.so
 clean:
 	rm -f libgen9blas.so libgen9blas_neo.so libgen9blas_blas.so libgen9blas_blas_neo.so kernels.c kernels_gen8.c kernels_gen8_probe.c test_gen8_probe bench_gen8
 
-# Full BLAS/CBLAS: S/D functions on the GPU, the rest through jumps to OpenBLAS (gen9blas_blas_forward.c generated from the symbol list).
-libgen9blas_blas.so: gen9blas.c gen9blas.h $(KCL_DEP) gen9blas_blas.c gen9blas_blas_d.inc gen9blas_blas_forward.c
-	gcc $(CFL) -I$(GEN) -o $@ gen9blas.c $(KCL_SRC) gen9blas_blas.c gen9blas_blas_forward.c -lm -ldl -lpthread
+# Full BLAS/CBLAS: S/D functions on the GPU, the rest through jumps to OpenBLAS (src/cblas_forward.c generated from the symbol list).
+libgen9blas_blas.so: $(LIB_DEP) $(KCL_DEP) src/cblas.c src/cblas_d.inc src/cblas_forward.c
+	gcc $(CFL) -I. -I$(GEN) -o $@ $(LIB_SRC) $(KCL_SRC) src/cblas.c src/cblas_forward.c -lm -ldl -lpthread
 
-libgen9blas_blas_neo.so: gen9blas.c gen9blas.h gen9blas_blas.c gen9blas_blas_d.inc gen9blas_blas_forward.c
-	gcc $(CFL) -DGEN9BLAS_NEO -o $@ gen9blas.c gen9blas_blas.c gen9blas_blas_forward.c -lOpenCL -lm -ldl -lpthread
+libgen9blas_blas_neo.so: $(LIB_DEP) src/cblas.c src/cblas_d.inc src/cblas_forward.c
+	gcc $(CFL) -I. -DGEN9BLAS_NEO -o $@ $(LIB_SRC) src/cblas.c src/cblas_forward.c -lOpenCL -lm -ldl -lpthread
 
-gen9blas_blas_forward.c: gen_forward.py blas_symbols.txt gen9blas_blas.c gen9blas_blas_d.inc
-	python3 gen_forward.py blas_symbols.txt gen9blas_blas.c gen9blas_blas_d.inc > $@
+src/cblas_forward.c: gen_forward.py blas_symbols.txt src/cblas.c src/cblas_d.inc
+	python3 gen_forward.py blas_symbols.txt src/cblas.c src/cblas_d.inc > $@
 
 # D functions of the BLAS layer from the S function code (float -> double, names s -> d).
-gen9blas_blas_d.inc: gen_blas_d.py gen9blas_blas.c
-	python3 gen_blas_d.py gen9blas_blas.c > $@
+src/cblas_d.inc: gen_blas_d.py src/cblas.c
+	python3 gen_blas_d.py src/cblas.c > $@
 
 # Level-3 FP64 kernels: core (packing, DGEMM) + helper kernels from sgemm.cl after type substitution.
 kernels/dgemm.cl: gen_dgemm.py kernels/sgemm.cl kernels/dgemm_core.cl

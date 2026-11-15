@@ -8,8 +8,8 @@ lib/.kernels/
 lib/kernels_gen8.c
 lib/.kernels_gen8/
 lib/.check_patchtokens/
-lib/gen9blas_blas_d.inc
-lib/gen9blas_blas_forward.c
+lib/src/cblas_d.inc
+lib/src/cblas_forward.c
 lib/kernels/dgemm.cl
 __pycache__/
 *.pyc

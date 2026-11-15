@@ -1,6 +1,6 @@
 // Flash attention on the GPU for the ggml backend (docs/attention-gpu.md section 11): the hand-scheduled kernels of
 // asm/attn_gen.py (*_tokc binaries: Q in llama.cpp's layout, index-based causal masking), run through kcl on the
-// caller's memory (i915 userptr). Separate from gen9blas.c on purpose (own state, own error text); needs kcl (not
+// caller's memory (i915 userptr). Separate from the BLAS units (core.c ...) on purpose (own state, own error text); needs kcl (not
 // built for the NEO variants of the library).
 //
 // Per call (one ggml FLASH_ATTN_EXT node): one kcl operation with userptr regions K, V (from the view's first row to

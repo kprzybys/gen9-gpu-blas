@@ -3,7 +3,7 @@
 Run (the Makefile does it): python3 gen_kernels.py <bench dir> <work dir> [whl|bdw|bdw-probe|whl-pt] > kernels.c
 Other tables (e.g. bench/attn_kcl, emb/, dec/, ina/, which link kcl.c without the library): python3 gen_kernels.py <dir>
 <work dir> <binary.bin> ... > table.c -- only the listed binaries from <dir> (whl binaries; kcl does no device check).
-Programs as in gen9blas.c: OpenCL C sources compiled with `ocloc` with the same options as NEO used to get
+Programs as in src/core.c: OpenCL C sources compiled with `ocloc` with the same options as NEO used to get
 (clBuildProgram) and binaries from our assembler (gen_*.bin). For each kernel: SIMD, sizes of cross-thread and
 per-thread data, argument offsets (value / stateless pointer / stateful from the binding table), SLM, barrier,
 private memory, program constants. Kernels with unsupported features (images, sampler, scratch) get the `unsupported`
@@ -35,7 +35,7 @@ GEN8 = TARGET in ("bdw", "bdw-probe")
 DEVICE = "bdw" if GEN8 else "whl"
 os.makedirs(WORK, exist_ok=True)
 
-# (file, options) -- exactly like the program_zr / program_bin calls in gen9blas.c
+# (file, options) -- exactly like the program_zr / program_bin calls in src/core.c
 PROGRAMS = [
     ("hgemm.cl", ""), ("sgemm.cl", ""), ("dgemm.cl", ""),
     ("level12.cl", "-cl-std=CL3.0 -DHALF"), ("level12.cl", "-cl-std=CL3.0"), ("level12.cl", "-cl-std=CL3.0 -DDBL"),

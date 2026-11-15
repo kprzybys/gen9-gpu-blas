@@ -176,7 +176,7 @@ ordinary memory (UNKNOWN). [SW]
 **`clWaitForEvents` / `clFinish` spin on the CPU.**
 About 6 W extra and 100% of a core for short calls (it also explains the "low CPU use" advantage of any library
 that waits by sleeping). Do: marker + `clFlush` + polling with `nanosleep` (20 us -> 0.5 ms), as `wait_gpu()`
-in `lib/gen9blas.c`; `GEN9BLAS_WAIT=busy` restores `clFinish`. Whole package 25.1 -> 18.9 W at equal speed.
+in `lib/src/core.c`; `GEN9BLAS_WAIT=busy` restores `clFinish`. Whole package 25.1 -> 18.9 W at equal speed.
 `clFinish` does not spin all the time (level 3, n = 4096: 12-26% of a core vs 6-12%). Waiting by sleeping is not
 slower in medians over several seconds; the single "best of 5" figure had suggested 0.8 ms loss (it was GPU
 warm-up). [MEAS] Source: `results/compare-l3-2026-11-11.txt`, `results/long-run-2026-11-11.txt`.

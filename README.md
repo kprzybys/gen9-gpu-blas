@@ -180,7 +180,7 @@ Reproducing the measurements: [docs/benchmarks.md](docs/benchmarks.md).
 
 | Path | Contents |
 |---|---|
-| `lib/` | `libgen9blas` (`gen9blas.c`, `kcl.c`, generated kernels), Python module `gen9blas.py`, BLAS/CBLAS layer, 8 test suites |
+| `lib/` | `libgen9blas` (`src/`: `core.c`, `gemm.c`, `level3.c`, `level12.c`, `packed.c`, `ops.c`; `kcl.c`; kernels in `kernels/`), Python module `gen9blas.py`, BLAS/CBLAS layer, 8 test suites |
 | `asm/` | Reproducible build of the six hand-assembled GEMM binaries (`make -C asm`), generators, microbenchmarks |
 | `bench/` | OpenCL C kernels, measurement programs and scripts; `bench/compare/`: comparisons with other libraries |
 | `experiments/no-neo/` | Step-by-step programs that drive i915 directly (first kernel, probes, chains, userptr) |

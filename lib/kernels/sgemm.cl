@@ -329,7 +329,7 @@ __kernel void trsm_inv3_f(int n, int nb, __global const double *X, __global floa
 }
 
 #ifdef GEN8_CHV
-// ---------- Gen8 Cherryview SGEMM variants (docs/gen8.md 6d; chosen in lib/gen9blas.c) ----------
+// ---------- Gen8 Cherryview SGEMM variants (docs/gen8.md 6d; chosen in lib/src/core.c) ----------
 // sgemm8_v32: tile 16 rows x 32 columns per subgroup of 8 (sgemm_v: 16 x 16, SIMD16). 3 KB read per 16-k step for
 // 16 384 multiply-adds instead of 2 KB for 8 192 (less traffic per flop; CHV has no LLC). SIMD8 because a per-lane
 // value takes one GRF there (two in SIMD16): 64 accumulators (lane l: columns l, l+8, l+16, l+24) + A for 4 k (8) +

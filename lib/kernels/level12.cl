@@ -212,7 +212,7 @@ void F(red)(int n, int mode, __global const T *x, L ox, L ix, __global const T *
     s = work_group_reduce_add(s);
     if (get_local_id(0) == 0) part[get_group_id(0)] = s;
 }
-// iamax: first index of the largest |x|; one part per group: (value, index); NaN skipped. Groups <= 96 (GROUPS in gen9blas.c).
+// iamax: first index of the largest |x|; one part per group: (value, index); NaN skipped. Groups <= 96 (GROUPS in lib/src/internal.h).
 // A work-item scans its elements in ascending order (chunks of 4, in sequence), so on a tie the smaller index stays.
 __kernel __attribute__((reqd_work_group_size(256, 1, 1)))
 void F(iamax)(int n, __global const T *x, L ox, L ix, __global R *cv) {   // values [0, 96), indices [96, 192)
@@ -631,7 +631,7 @@ __kernel void F(spr2)(int n, int fmt, R alpha, __global const T *x, L ox, L ix, 
 
 // ---- skinny GEMM (small M), 2026-11-12: docs/skinny-gemm.md ----
 // C (M×N) = alpha·A·op(W) + beta·C without packing; weights read once per tile of MT rows of A; FP32 accumulation (R).
-// Arbitrary strides: A[m][k] = A[m·sam + k·sak], C[m][n] = C[m·scm + n·scn] (swapping roles for small N: gen9blas.c).
+// Arbitrary strides: A[m][k] = A[m·sam + k·sak], C[m][n] = C[m·scm + n·scn] (swapping roles for small N: lib/src/gemm.c).
 // FP64 omitted (local memory and registers; D keeps the old path).
 #ifndef DBL
 #ifdef HALF
@@ -728,7 +728,7 @@ SKINNY_K(4, 4)
 SKINNY_K(8, 2)   // MT = 8 with RW = 4 (32 accumulators) -> register spill (spill_size 448-640 B), kcl does not support this
 
 // (1b) Rework 2026-11-12 (results/skinny-gemm-rework-2026-11-12.txt): weights contiguous along K, A contiguous along K (sak = 1),
-// K % (8·KL) = 0, A, W and strides aligned to 16 B (checked by gen9blas.c; the fallback path in the kernel spilled registers). SIMD8 (float per lane = 1 GRF -> 8·MT accumulators without spill), RW = 8 weight rows,
+// K % (8·KL) = 0, A, W and strides aligned to 16 B (checked by lib/src/gemm.c; the fallback path in the kernel spilled registers). SIMD8 (float per lane = 1 GRF -> 8·MT accumulators without spill), RW = 8 weight rows,
 // S = 4 subgroups every 8·KL k (step 32·KL -> long loop, cheap epilogue). A lane reads 8 B (FP16: KL = 4, FP32: KL = 2) --
 // the block read is interleaved (element c of lane l = p[l + 8c]); the same layout for A and weights, so the dot product matches.
 // Accumulation with explicit fma, component-wise conversion.
@@ -750,7 +750,7 @@ SKINNY_K(8, 2)   // MT = 8 with RW = 4 (32 accumulators) -> register spill (spil
 // private memory (scratch, kcl does not configure it -> wrong result rows; fine through NEO; 2026-11-12) --
 // IGC moves only smaller arrays to registers (s[8][4] = 128 B passed), separate variables always.
 #ifndef SKINNY_S
-#define SKINNY_S 16   // subgroups per group (gen9blas.c: SKINNY_S)
+#define SKINNY_S 16   // subgroups per group (lib/src/internal.h: SKINNY_S)
 #endif
 #define SKINNY_W8(X) X(0) X(1) X(2) X(3) X(4) X(5) X(6) X(7)
 #define CR_ZERO(r) vr_t s##r = 0.0f;

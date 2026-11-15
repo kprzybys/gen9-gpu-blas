@@ -80,8 +80,8 @@ Conventions:
 | L3CNTLREG (`0x7034`) from an unprivileged batch buffer | `MI_LOAD_REGISTER_IMM` works (read back 0x60000321) [MEAS] | [no-neo.md](no-neo.md); `lib/kcl.c` |
 | MOCS (stateless/surface) | index 0 = uncached (2x slower), 2 best [MEAS] | [no-neo.md](no-neo.md); `KCL_MOCS` in `lib/kcl.c` |
 | 2 MB pages in PPGTT | unavailable: shmem THP = never [MEAS] | [no-neo.md](no-neo.md) |
-| Queue profiling | about 20 us CPU per event (hence `GEN9BLAS_PROFILE` only on request) | `lib/gen9blas.c` (comment at the profiling code) |
-| `clWaitForEvents` / `clFinish` | spin actively (100% of a core); `wait_gpu()` in `lib/gen9blas.c` sleeps with `nanosleep` (`GEN9BLAS_WAIT=busy` restores `clFinish`) | `lib/gen9blas.c`, `bench/hgemm.c` |
+| Queue profiling | about 20 us CPU per event (hence `GEN9BLAS_PROFILE` only on request) | `lib/src/core.c` (comment at the profiling code) |
+| `clWaitForEvents` / `clFinish` | spin actively (100% of a core); `wait_gpu()` in `lib/src/core.c` sleeps with `nanosleep` (`GEN9BLAS_WAIT=busy` restores `clFinish`) | `lib/src/core.c`, `bench/hgemm.c` |
 | Host USM allocation | about 0.5 ms CPU per MB (hence the pool behind `gen9blas.empty`) | `lib/gen9blas.py` (comment at `_pool`) |
 | Host memory for the GPU | host USM only; `USE_HOST_PTR` on ordinary memory -> random NEO crashes | [pitfalls.md](pitfalls.md) |
 | `ocloc` compilation | `-device whl` (`cfl` gives CL_INVALID_BINARY); remove the `.spv` from the binary | `lib/gen_kernels.py`, [pitfalls.md](pitfalls.md) |
