@@ -66,3 +66,6 @@ test_blas_banded   RESULT: all OK
 test_skinny        RESULT: all OK
 test_userptr       RESULT: all OK
 test_packed        errors: 0
+test_errors        RESULT: 19/19 OK
+rust-ffi           86 functions, 35 constants: OK
+rust-gpu           3 passed, 0 failed
