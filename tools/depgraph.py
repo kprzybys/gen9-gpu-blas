@@ -177,8 +177,9 @@ def main():
     a = ap.parse_args()
     rm = RepoMap(a.map)
     if a.list:
-        g_files = subprocess.run(["git", "ls-files"], capture_output=True, text=True, cwd=ROOT).stdout.split()
-        for f in g_files:
+        g_files = subprocess.run(["git", "-c", "core.quotepath=off", "ls-files", "-z"], capture_output=True,
+                                 cwd=ROOT).stdout.decode().split("\0")   # names with spaces / non-ASCII intact
+        for f in filter(None, g_files):
             if rm.repo(f) == a.list: print(f)
         return 0
     g = Graph()
