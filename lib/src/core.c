@@ -104,15 +104,13 @@ static int init_l12(const char *dir) {
     return 0;
 }
 
-// One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
+// One-shot (gen9blas_init below): later calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
 cl_kernel k_rope_m, k_setrows, k_cpy_any, k_upscale, k_dec_part, k_dec_comb;   // gen9blas_rope_multi, _set_rows_f16, _cpy_any, _upscale_f32 (NULL if the binary lacks them)
 cl_kernel k_skp[3];   // gen9blas_skinny_pb16_4 / _8 / _16
 cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8, k_epi_8x;
 cl_kernel k_rms, k_binop, k_rope, k_lnorm, k_gelu, k_lnorm_pack, k_gelu_erf, k_cvt_heads, k_im2col, k_relu;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
-int gen9blas_init(const char *dir) {
-    static int inited;
-    if (inited) return 0;
+static int init_impl(const char *dir) {
     cl_int err; cl_platform_id plat;
     CHECK(clGetPlatformIDs(1, &plat, NULL));
     CHECK(clGetDeviceIDs(plat, CL_DEVICE_TYPE_GPU, 1, &dev, NULL));
@@ -200,8 +198,40 @@ int gen9blas_init(const char *dir) {
         r->sg = (gen8 && t[i].r == GEN9BLAS_S && t[i].tn == 32) ? 8 : 16;
     }
     errbuf[0] = 0;
-    inited = 1;
     return 0;
+}
+
+// Once per process (pthread_once): a failed initialization is final -- retrying would create a second context next to
+// the half-initialized first one. Its error text is kept and restored on every later call.
+static pthread_once_t init_once = PTHREAD_ONCE_INIT;
+static int init_status = -1;
+static char init_err[sizeof errbuf];
+static void init_run(void) {
+    const char *d = getenv("GEN9BLAS_DIR");   // NEO build only: kernel sources (kcl has them built in)
+    init_status = init_impl(d ? d : "lib/kernels");
+    if (init_status) snprintf(init_err, sizeof init_err, "%s", errbuf[0] ? errbuf : "GPU initialization failed");
+}
+int gen9blas_init(void) {
+    pthread_once(&init_once, init_run);
+    if (init_status) { snprintf(errbuf, sizeof errbuf, "%s", init_err); return -1; }
+    return 0;
+}
+int gen9blas_version(void) { return GEN9BLAS_VERSION; }
+int gen9blas_device_gen(void) { return gen9blas_init() ? 0 : gen8 ? 8 : 9; }
+int gen9blas_has(int f) {
+    if (gen9blas_init()) return 0;
+    switch (f) {
+    case GEN9BLAS_FEAT_FP16: return types[GEN9BLAS_H].ready && types[GEN9BLAS_HS].ready;
+    case GEN9BLAS_FEAT_FP32: return types[GEN9BLAS_S].ready;
+    case GEN9BLAS_FEAT_FP64: return types[GEN9BLAS_D].ready;
+    case GEN9BLAS_FEAT_SKINNY_PB: return k_skp[0] && k_skp[1] && k_skp[2];
+    case GEN9BLAS_FEAT_EPILOG_EXT: return k_epi_8x != NULL;
+    case GEN9BLAS_FEAT_NORM_PACK: return k_lnorm_pack != NULL && k_epi_8x != NULL;
+    case GEN9BLAS_FEAT_ROPE_MULTI: return k_rope_m != NULL;
+    case GEN9BLAS_FEAT_CPY: return k_cpy_any != NULL && k_upscale != NULL;
+    case GEN9BLAS_FEAT_SET_ROWS: return k_setrows != NULL;
+    default: return 0;
+    }
 }
 
 // Sleeping wait for the queue to finish: clFinish / clWaitForEvents / blocking reads in NEO spin actively
@@ -256,7 +286,7 @@ int ensure_buf(cl_mem *b, size_t *size, size_t needed) {
 
 void *gen9blas_alloc(size_t bytes) {
     cl_int err;
-    if (!usm_alloc) { snprintf(errbuf, sizeof errbuf, "gen9blas_alloc: gen9blas_init not called"); return NULL; }
+    if (!usm_alloc && gen9blas_init()) return NULL;   // initializes on first use
     void *p = usm_alloc(ctx, NULL, bytes ? bytes : 1, 4096, &err);
     if (err != CL_SUCCESS) { snprintf(errbuf, sizeof errbuf, "clHostMemAllocINTEL(%zu) = %d", bytes, err); return NULL; }
     return p;
@@ -351,7 +381,6 @@ cl_kernel pack_kernel(type_t *r, int roleB, int trans, size_t Rp, size_t Kp, siz
     g[0] = Rp; g[1] = Kp; return r->pb;
 }
 
-int gen9blas_available(int type) { return type >= 0 && type <= 3 && types[type].ready; }
 double gen9blas_last_time_ms(void) { return last_ms; }
 int gen9blas_last_zero_copy(void) { return last_zc; }
 const char *gen9blas_error(void) { return errbuf; }

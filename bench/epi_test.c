@@ -3,7 +3,7 @@
 // runs them today. Shapes of whisper large-v3-turbo's encoder (K 1280, N 1280 / 5120), M rows of activations.
 // Build: gcc -O2 -Wall -I../lib -o epi_test epi_test.c -L../lib -lgen9blas -Wl,-rpath,$(realpath ../lib) -lm
 // Run:   ./epi_test [M=600]       exit 0 = all cases bit-identical
-#include "gen9blas.h"
+#include "gen9blas_ml.h"
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -21,14 +21,14 @@ static int run_case(const char *name, int M, int K, int N, int use_bias, int gel
     for (size_t i = 0; i < (size_t)M * K; i++) A[i] = 4.0f * rnd();
     for (int j = 0; j < N; j++) bias[j] = rnd();
     for (size_t i = 0; i < (size_t)M * N; i++) R[i] = 2.0f * rnd();
-    gen9blas_packed *P = gen9blas_pack_b(GEN9BLAS_HS, 1, K, N, W, K);
+    gen9blas_packed_b *P = gen9blas_pack_b(GEN9BLAS_HS, 1, K, N, W, K);
     if (!P) { printf("%s: pack_b failed: %s\n", name, gen9blas_error()); return 1; }
     int nf0 = 0, nf1 = 0;
     // unfused: as the backend today (each op its own GPU kernel)
     if (gen9blas_gemm_pb_f16w(M, A, K, P, C0, N, &nf0)) { printf("%s: gemm: %s\n", name, gen9blas_error()); return 1; }
-    if (use_bias && gen9blas_binop_rows(0, M, N, C0, N, bias, 0, C0, N, 1)) { printf("%s: add: %s\n", name, gen9blas_error()); return 1; }
+    if (use_bias && gen9blas_binop_rows(0, M, N, C0, N, bias, 0, 1, C0, N, 1)) { printf("%s: add: %s\n", name, gen9blas_error()); return 1; }
     if (gelu && gen9blas_gelu((size_t)M * N, C0, C0, 1)) { printf("%s: gelu: %s\n", name, gen9blas_error()); return 1; }
-    if (res && gen9blas_binop_rows(0, M, N, C0, N, R, N, C0, N, 1)) { printf("%s: add R: %s\n", name, gen9blas_error()); return 1; }
+    if (res && gen9blas_binop_rows(0, M, N, C0, N, R, N, 1, C0, N, 1)) { printf("%s: add R: %s\n", name, gen9blas_error()); return 1; }
     // fused
     const float *Rp = NULL;
     if (res && inplace) { memcpy(C1, R, (size_t)M * N * 4); Rp = C1; } else if (res) Rp = R;
@@ -39,7 +39,7 @@ static int run_case(const char *name, int M, int K, int N, int use_bias, int gel
     for (size_t i = 0; i < (size_t)M * N; i++) if (memcmp(&C0[i], &C1[i], 4)) { nd++; double d = fabs((double)C0[i] - C1[i]); if (d > mx) mx = d; }
     printf("%-34s M %d K %d N %d: %s (%ld differing, max |diff| %.3e; nonfinite %d/%d)\n", name, M, K, N,
            nd ? "DIFFERENT" : "bit-identical", nd, mx, nf0, nf1);
-    gen9blas_packed_free(P); free(W); free(A); free(bias); free(R); free(C0); free(C1);
+    gen9blas_packed_b_free(P); free(W); free(A); free(bias); free(R); free(C0); free(C1);
     return nd != 0 || nf0 != nf1;
 }
 
@@ -53,8 +53,8 @@ static int run_norm_case(const char *name, int M, int K, int N, int gelu) {
     for (size_t i = 0; i < (size_t)M * K; i++) X[i] = 3.0f * rnd() + 0.5f;
     for (int i = 0; i < K; i++) { w[i] = 1.0f + rnd(); b[i] = 0.2f * rnd(); }
     for (int j = 0; j < N; j++) bias[j] = rnd();
-    gen9blas_packed *P = gen9blas_pack_b(GEN9BLAS_HS, 1, K, N, W, K);
-    gen9blas_packed_a *pa = gen9blas_packed_a_new();
+    gen9blas_packed_b *P = gen9blas_pack_b(GEN9BLAS_HS, 1, K, N, W, K);
+    gen9blas_packed_a *pa = gen9blas_packed_a_create();
     int nf0 = 0, nf1 = 0;
     if (!P || !pa) { printf("%s: alloc failed: %s\n", name, gen9blas_error()); return 1; }
     if (gen9blas_layer_norm(M, K, X, K, w, b, 1e-5f, Y0, K, 1) ||
@@ -66,22 +66,22 @@ static int run_norm_case(const char *name, int M, int K, int N, int gelu) {
     for (size_t i = 0; i < (size_t)M * N; i++) dc += memcmp(&C0[i], &C1[i], 4) != 0;
     printf("%-34s M %d K %d N %d: Y %s (%ld), C %s (%ld)\n", name, M, K, N, dy ? "DIFFERENT" : "bit-identical", dy,
            dc ? "DIFFERENT" : "bit-identical", dc);
-    gen9blas_packed_a_free(pa); gen9blas_packed_free(P);
+    gen9blas_packed_a_free(pa); gen9blas_packed_b_free(P);
     free(W); free(X); free(w); free(b); free(bias); free(Y0); free(Y1); free(C0); free(C1);
     return dy != 0 || dc != 0 || nf0 != nf1;
 }
 
 int main(int argc, char **argv) {
     const int M = argc > 1 ? atoi(argv[1]) : 600;
-    if (gen9blas_init(GEN9_BENCH_DIR)) { printf("init: %s\n", gen9blas_error()); return 1; }
-    if (!gen9blas_epilog_ext_supported()) { printf("FAIL: gen9blas_epilog_hf8x not in the library\n"); return 1; }
+    if (gen9blas_init()) { printf("init: %s\n", gen9blas_error()); return 1; }
+    if (!gen9blas_has(GEN9BLAS_FEAT_EPILOG_EXT)) { printf("FAIL: gen9blas_epilog_hf8x not in the library\n"); return 1; }
     int bad = 0;
     bad |= run_case("bias (Q, V)", M, 1280, 1280, 1, 0, 0, 0);
     bad |= run_case("bias + GELU (fc1)", M, 1280, 5120, 1, 1, 0, 0);
     bad |= run_case("bias + residual (out, fc2)", M, 1280, 1280, 1, 0, 1, 0);
     bad |= run_case("bias + residual in place (R = C)", M, 5120, 1280, 1, 0, 1, 1);
     bad |= run_case("odd N (tail of 4)", 37, 1280, 1283, 1, 1, 1, 0);
-    if (gen9blas_norm_pack_supported()) {
+    if (gen9blas_has(GEN9BLAS_FEAT_NORM_PACK)) {
         bad |= run_norm_case("norm -> pack -> GEMM + bias (Q)", M, 1280, 1280, 0);
         bad |= run_norm_case("norm -> pack -> GEMM + bias + GELU (fc1)", M, 1280, 5120, 1);
         bad |= run_norm_case("norm -> pack, partial 16-row band", 37, 1280, 1280, 0);

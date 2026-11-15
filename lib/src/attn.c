@@ -9,7 +9,7 @@
 // prefetches past the last block, section 9); k_attn in launches of at most ~GEN9BLAS_MAX_LAUNCH_MS (default 100 ms
 // at a conservative 200 GFLOPS = 2e10 FLOP: kcl has no mid-thread preemption and a launch cut by the 640 ms
 // preemption timeout returns silently wrong results; kcl_wait reports a reset as an error); one submission, wait.
-#include "gen9blas.h"
+#include "gen9blas_ml.h"
 #include "kcl.h"
 #include <math.h>
 #include <stdio.h>

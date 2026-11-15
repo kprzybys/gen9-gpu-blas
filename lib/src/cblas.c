@@ -68,13 +68,14 @@ static void init_gpu(void) {
     mode = e && !strcmp(e, "cpu") ? 0 : e && !strcmp(e, "gpu") ? 2 : 1;
     info = getenv("GEN9BLAS_BLAS_INFO") != NULL;
     if (!mode) return;
-    const char *dir_arg = getenv("GEN9BLAS_DIR"); char dirbuf[PATH_MAX + 16], path[PATH_MAX];
+    // NEO build: kernel sources from GEN9BLAS_DIR, default kernels/ next to this library (kcl: built in, unused)
+    char dirbuf[PATH_MAX + 16], path[PATH_MAX];
     Dl_info d;
-    if (!dir_arg && dladdr((void *)init_gpu, &d) && d.dli_fname && realpath(d.dli_fname, path)) {
-        snprintf(dirbuf, sizeof dirbuf, "%s/kernels", dirname(path)); dir_arg = dirbuf;
+    if (!getenv("GEN9BLAS_DIR") && dladdr((void *)init_gpu, &d) && d.dli_fname && realpath(d.dli_fname, path)) {
+        snprintf(dirbuf, sizeof dirbuf, "%s/kernels", dirname(path)); setenv("GEN9BLAS_DIR", dirbuf, 0);
     }
-    if (!dir_arg || gen9blas_init(dir_arg)) {
-        fprintf(stderr, "gen9blas_blas: GPU unavailable (%s) -- everything on the CPU\n", dir_arg ? gen9blas_error() : "no kernel directory");
+    if (gen9blas_init()) {
+        fprintf(stderr, "gen9blas_blas: GPU unavailable (%s) -- everything on the CPU\n", gen9blas_error());
         mode = 0;
     }
 }
@@ -100,7 +101,7 @@ static int gpu(const char *f, int err) {
     report(f, "GPU");
     return 0;
 }
-#define GPU(f, call) ({ pthread_mutex_lock(&gpu_lock); int e_ = (call); pthread_mutex_unlock(&gpu_lock); gpu(f, e_); })
+#define GPU(f, call) ({ pthread_mutex_lock(&gpu_lock); int e_ = gpu(f, (call)); pthread_mutex_unlock(&gpu_lock); e_; })   // error text read under the lock
 
 // ==== BEGIN TYPE: from here to the end of the file is the S function code; lib/gen_blas_d.py turns it into the D version ====
 // (float -> double, names s -> d, GEN9BLAS_S -> GEN9BLAS_D, helper functions and types with the _d suffix), appended at the end

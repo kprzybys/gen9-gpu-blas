@@ -2,7 +2,7 @@
 // Split verbatim from lib/gen9blas.c (refactor stage 2b); everything here has hidden visibility.
 #ifndef GEN9BLAS_INTERNAL_H
 #define GEN9BLAS_INTERNAL_H
-#include "gen9blas.h"
+#include "gen9blas_ml.h"
 #ifdef GEN9BLAS_NEO   // old NEO (OpenCL) path -- for comparisons only (libgen9blas_neo.so)
 #define CL_TARGET_OPENCL_VERSION 300
 #include <CL/cl.h>
@@ -11,6 +11,7 @@
 #include "kcl.h"
 #endif
 #include <limits.h>
+#include <pthread.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -38,7 +39,7 @@ typedef struct { cl_mem m; void *p; } bf_t;
 typedef struct { void *p; size_t n; } work_t;
 #define ARG(k, i, v) CHECK(clSetKernelArg(k, i, sizeof(v), &(v)))
 #define ARGS(k, i, v) CHECK(arg_scalar(r, k, i, v))
-struct gen9blas_packed { int type, K, N, Np, Kp; cl_mem buf; size_t bufsize; };
+struct gen9blas_packed_b { int type, K, N, Np, Kp; cl_mem buf; size_t bufsize; };
 #define SPARES 4
 typedef struct { const float *bias; int gelu; const float *R; int ldr; } epi_ext_t;
 struct gen9blas_packed_a { cl_mem buf; size_t cap; int M, K, Kp; };

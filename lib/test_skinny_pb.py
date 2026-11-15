@@ -19,13 +19,12 @@ L = gen9blas._lib
 _i, _p = ctypes.c_int, ctypes.c_void_p
 L.gen9blas_pack_b.argtypes = [_i, _i, _i, _i, _p, _i]
 L.gen9blas_pack_b.restype = _p
-L.gen9blas_packed_free.argtypes = [_p]
+L.gen9blas_packed_b_free.argtypes = [_p]
 L.gen9blas_gemm_pb_skinny.argtypes = [_i, _p, _i, _p, _p, _i, ctypes.POINTER(_i)]
 L.gen9blas_gemm_pb_f16w.argtypes = [_i, _p, _i, _p, _p, _i, ctypes.POINTER(_i)]
-L.gen9blas_skinny_pb_supported.restype = _i
 HS = 2
 gen9blas._init()
-if not L.gen9blas_skinny_pb_supported():
+if not L.gen9blas_has(3):   # GEN9BLAS_FEAT_SKINNY_PB
     sys.exit("gen9blas_skinny_pb16_* missing from the kernel table")
 rng = np.random.default_rng(11)
 errors = 0
@@ -71,6 +70,6 @@ for (N, K) in [(1024, 1024), (256, 1024), (3072, 1024), (1024, 3072), (1000, 100
             tf = med_ms(L.gen9blas_gemm_pb_f16w, M, A, P, N)
             line += f" | skinny {ts:.3f} ms ({N * K * 2 / ts / 1e6:.1f} GB/s) vs gemm_pb_f16w {tf:.3f} ms ({tf / ts:.1f}x)"
         print(line, flush=True)
-    L.gen9blas_packed_free(P)
+    L.gen9blas_packed_b_free(P)
 print("errors:", errors)
 sys.exit(1 if errors else 0)

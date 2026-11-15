@@ -25,7 +25,7 @@ import numpy as np
 _HERE = os.path.dirname(os.path.realpath(__file__))
 _lib = ctypes.CDLL(os.environ.get("GEN9BLAS_LIB", os.path.join(_HERE, "libgen9blas.so")))   # GEN9BLAS_LIB: another build of the library
 _i, _f, _p, _l, _d = ctypes.c_int, ctypes.c_float, ctypes.c_void_p, ctypes.c_long, ctypes.c_double
-_lib.gen9blas_init.argtypes = [ctypes.c_char_p]
+_lib.gen9blas_init.argtypes = []
 _lib.gen9blas_gemm.argtypes = [_i, _i, _i, _i, _i, _i, _d, _p, _i, _p, _i, _d, _p, _i]
 _lib.gen9blas_gemm_batched.argtypes = [_i, _i, _i, _i, _i, _i, _d, _p, _i, _l, _p, _i, _l, _d, _p, _i, _l, _i]
 _lib.gen9blas_symm.argtypes = [_i, _i, _i, _i, _i, _d, _p, _i, _p, _i, _d, _p, _i]
@@ -39,6 +39,10 @@ _lib.gen9blas_alloc.restype = ctypes.c_void_p
 _lib.gen9blas_free.argtypes = [ctypes.c_void_p]
 _lib.gen9blas_error.restype = ctypes.c_char_p
 GEN9BLAS_H, GEN9BLAS_S, GEN9BLAS_HS, GEN9BLAS_D = 0, 1, 2, 3
+FEAT_FP16, FEAT_FP32, FEAT_FP64 = 0, 1, 2   # gen9blas_has (GEN9BLAS_FEAT_*)
+_lib.gen9blas_version.restype = ctypes.c_int
+if _lib.gen9blas_version() // 100 != 2:   # 0.2.x: the API this module is written for
+    raise ImportError(f"gen9blas.py expects libgen9blas 0.2.x, loaded {_lib.gen9blas_version()}")
 _SIDE = {"L": 0, "R": 1}
 _TRI = {"L": 0, "U": 1}
 _ready = False
@@ -47,7 +51,7 @@ _ready = False
 def _init():
     global _ready
     if not _ready:
-        if _lib.gen9blas_init(os.path.join(_HERE, "kernels").encode()) != 0:
+        if _lib.gen9blas_init() != 0:
             raise RuntimeError(_lib.gen9blas_error().decode())
         _ready = True
 
@@ -110,7 +114,7 @@ def empty(shape, dtype=np.float16):
 def available(dt, accurate=False):
     """Whether the type can be used on this GPU (Gen8 Cherryview: no FP16 for now, docs/gen8.md)."""
     _init()
-    return bool(_lib.gen9blas_available(_kind(dt, accurate)))
+    return bool(_lib.gen9blas_has(FEAT_FP32 if _kind(dt, accurate) == GEN9BLAS_S else FEAT_FP64 if _kind(dt, accurate) == GEN9BLAS_D else FEAT_FP16))
 
 
 def _kind(dt, accurate):

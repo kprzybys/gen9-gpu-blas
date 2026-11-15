@@ -1,4 +1,4 @@
-"""Packed B kept on the GPU: gen9blas_pack_b / gen9blas_gemm_pb / gen9blas_packed_free (ggml backend, step 1a).
+"""Packed B kept on the GPU: gen9blas_pack_b / gen9blas_gemm_pb / gen9blas_packed_b_free (ggml backend, step 1a).
 
 Run: python3 lib/test_packed.py          (GEN9BLAS_PACK_BAND_MB=1 forces many packing / epilogue bands)
 Ordinary NumPy memory (userptr path, as llama.cpp's mmap'd weights). Checks, against float64 NumPy on sampled rows and
@@ -21,8 +21,8 @@ L = gen9blas._lib
 _i, _p, _d = ctypes.c_int, ctypes.c_void_p, ctypes.c_double
 L.gen9blas_pack_b.argtypes = [_i, _i, _i, _i, _p, _i]
 L.gen9blas_pack_b.restype = _p
-L.gen9blas_gemm_pb.argtypes = [_i, _i, _i, _d, _p, _i, _p, _d, _p, _i]
-L.gen9blas_packed_free.argtypes = [_p]
+L.gen9blas_gemm_pb.argtypes = [_i, _i, _d, _p, _i, _p, _d, _p, _i]
+L.gen9blas_packed_b_free.argtypes = [_p]
 H, S, HS, D = 0, 1, 2, 3
 DT = {H: np.float16, S: np.float32, HS: np.float16, D: np.float64}
 TOL = {H: 3e-3, S: 1e-6, HS: 3e-4, D: 1e-14}   # max relative error to sum|a*b| (README: hgemm ~1e-4, accurate ~1e-5, sgemm ~1e-8)
@@ -44,7 +44,7 @@ def gemm_pb(t, A, P, N, alpha=1.0, beta=0.0, C=None):
     M = A.shape[0]
     if C is None:
         C = np.zeros((M, N), DT[t])
-    rc = L.gen9blas_gemm_pb(t, 0, M, alpha, A.ctypes.data, A.shape[1], P, beta, C.ctypes.data, N)
+    rc = L.gen9blas_gemm_pb(0, M, alpha, A.ctypes.data, A.shape[1], P, beta, C.ctypes.data, N)
     if rc != 0:
         raise RuntimeError(L.gen9blas_error().decode())
     return C
@@ -82,7 +82,7 @@ def case(name, t, M, N, K, transB=1, alpha=1.0, beta=0.0, compare_gemm=True):
     ok = e <= TOL[t] and np.all(np.isfinite(C))
     errors += not ok
     print(f"{'OK ' if ok else 'ERR'} {name:42s} rel err {e:.2e}{same}")
-    L.gen9blas_packed_free(P)
+    L.gen9blas_packed_b_free(P)
 
 
 case("S  512x1536x1536 transB", S, 512, 1536, 1536)
@@ -108,7 +108,7 @@ for nm, A in (("reuse 1 (M=128)", A1), ("reuse 2 (M=512)", A2), ("reuse 3 (M=128
     ok = e <= TOL[S]
     errors += not ok
     print(f"{'OK ' if ok else 'ERR'} S  {nm + ', B zeroed after packing':40s} rel err {e:.2e}")
-L.gen9blas_packed_free(P)
+L.gen9blas_packed_b_free(P)
 
 # F16 weights x F32 activations -> F32 (gemm_pb_f16w; ggml backend with an F16 model)
 L.gen9blas_gemm_pb_f16w.argtypes = [_i, _p, _i, _p, _p, _i, ctypes.POINTER(_i)]
@@ -123,7 +123,7 @@ def f16w(name, M, N, K, a_scale=1.0, w_ones=False, expect_flag=False):
     nf = _i(0)
     if L.gen9blas_gemm_pb_f16w(M, A.ctypes.data, K, P, C.ctypes.data, N, ctypes.byref(nf)) != 0:
         raise RuntimeError(L.gen9blas_error().decode())
-    L.gen9blas_packed_free(P)
+    L.gen9blas_packed_b_free(P)
     if expect_flag is None:   # flag must equal "some exact result is beyond the FP16 range"
         big = bool(np.max(np.abs(A.astype(np.float64) @ W.T.astype(np.float64))) > 65504)
         ok = nf.value == int(big)
@@ -183,7 +183,7 @@ def ffn(name, M, K, N, Nd, x_scale=1.0, expect_flag=False):
         print(f"{'OK ' if ok else 'ERR'} FFN  {name:40s} rel err {e:.2e}, max |fused - unfused| / max|Y| {d:.2e}, flag {nf.value}")
     errors += not ok
     for P in (Pg, Pu, Pd):
-        L.gen9blas_packed_free(P)
+        L.gen9blas_packed_b_free(P)
 
 
 ffn("512x1536 -> 8960 -> 1536 (Qwen2.5-1.5B)", 512, 1536, 8960, 1536, x_scale=4.0)
@@ -205,7 +205,7 @@ if os.environ.get("SKIP_BIG") is None:
     print(f"{'OK ' if ok else 'ERR'} S  head 512x151936x1536 (0.93 GB packed)       rel err {e:.2e}  "
           f"pack {t_pack * 1e3:.0f} ms ({W.nbytes / t_pack / 1e9:.2f} GB/s), gemm_pb {t_mm * 1e3:.0f} ms "
           f"({2 * M * N * K / t_mm / 1e9:.0f} GFLOPS)")
-    L.gen9blas_packed_free(P)
+    L.gen9blas_packed_b_free(P)
 
 print("errors:", errors)
 sys.exit(1 if errors else 0)

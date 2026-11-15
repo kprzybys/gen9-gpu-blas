@@ -5,9 +5,9 @@
 // Per decoder step (per layer: self Q K V O, cross Q O = 6 x 1280x1280, fc1 5120x1280, fc2 1280x5120; x 4 layers; +
 // vocabulary 51866x1280; cross K/V are computed once per window and not counted). Each call includes its own wait,
 // like the backend today. Prints ms per step, ms per token (/ M) and weight GB/s.
-// Build (kp): gcc -O2 -Wall -I../lib -DGEN9_BENCH_DIR="\"$(realpath .)\"" -o decoder_gemm decoder_gemm.c -L../lib -lgen9blas -Wl,-rpath,$(realpath ../lib) -lm
+// Build (kp): gcc -O2 -Wall -I../lib -o decoder_gemm decoder_gemm.c -L../lib -lgen9blas -Wl,-rpath,$(realpath ../lib) -lm
 // Run:  ./decoder_gemm [reps=5]
-#include "gen9blas.h"
+#include "gen9blas_ml.h"
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -25,9 +25,9 @@ static const shape_t SH[] = { { "1280x1280 (x6 per layer)", 1280, 1280, 24 }, { 
 int main(int argc, char **argv) {
     const int reps = argc > 1 ? atoi(argv[1]) : 5;
     const int Ms[] = { 1, 2, 4, 5, 8, 10, 16, 20, 32, 40, 64 }; const int nM = sizeof Ms / sizeof Ms[0];
-    if (gen9blas_init(GEN9_BENCH_DIR)) { printf("init: %s\n", gen9blas_error()); return 1; }
+    if (gen9blas_init()) { printf("init: %s\n", gen9blas_error()); return 1; }
     srand(1);
-    gen9blas_packed *P[NS]; uint16_t *W[NS];
+    gen9blas_packed_b *P[NS]; uint16_t *W[NS];
     for (int s = 0; s < NS; s++) {
         const size_t n = (size_t)SH[s].N * SH[s].K;
         W[s] = gen9blas_alloc(n * 2);

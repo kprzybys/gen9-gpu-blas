@@ -5,7 +5,7 @@
 // ---------------- packed B kept between calls (constant weights; ggml backend, docs/ggml-backend-design.md) ----------------
 
 
-// Spare packed buffers: gen9blas_packed_free keeps up to SPARES freed buffers (GEN9BLAS_SPARE_MB in all, default 512)
+// Spare packed buffers: gen9blas_packed_b_free keeps up to SPARES freed buffers (GEN9BLAS_SPARE_MB in all, default 512)
 // and the next packing takes the smallest one that fits. A new buffer costs about as much as the dequantization
 // itself (i915 zeroes its pages: ~3.7 GB/s with userptr, 2026-11-13); this matters for weights packed on every use.
 static struct { cl_mem m; size_t sz; } spare[SPARES];
@@ -43,7 +43,7 @@ static size_t pack_band_bytes(void) {
 }
 
 // Packs op(B) into P->buf in bands of whole 32-column groups (n), each launch at most pack_band_bytes() of output.
-static int pack_b_bands(type_t *r, int tB, const void *B, int ldb, gen9blas_packed *P) {
+static int pack_b_bands(type_t *r, int tB, const void *B, int ldb, gen9blas_packed_b *P) {
     size_t bB = (tB ? (size_t)(P->N - 1) * ldb + P->K : (size_t)(P->K - 1) * ldb + P->N) * r->es;
     bf_t xB; int z;
     if (get_obj(B, bB, &uB, 1, 0, &xB, &z)) return -1;
@@ -67,12 +67,12 @@ static int pack_b_bands(type_t *r, int tB, const void *B, int ldb, gen9blas_pack
     return 0;
 }
 
-gen9blas_packed *gen9blas_pack_b(int type, int tB, int K, int N, const void *B, int ldb) {
+gen9blas_packed_b *gen9blas_pack_b(int type, int tB, int K, int N, const void *B, int ldb) {
     NEW_OPERATION();
     if (type < 0 || type > 3 || !types[type].ready) { snprintf(errbuf, sizeof errbuf, "type %d unavailable", type); return NULL; }
     if (K <= 0 || N <= 0) { snprintf(errbuf, sizeof errbuf, "pack_b: K = %d, N = %d", K, N); return NULL; }
     type_t *r = &types[type];
-    gen9blas_packed *P = calloc(1, sizeof *P);
+    gen9blas_packed_b *P = calloc(1, sizeof *P);
     if (!P) return NULL;
     P->type = type; P->K = K; P->N = N;
     P->Np = (N + r->tn - 1) / r->tn * r->tn; P->Kp = (K + r->km - 1) / r->km * r->km;
@@ -89,7 +89,7 @@ gen9blas_packed *gen9blas_pack_b(int type, int tB, int K, int N, const void *B, 
 }
 
 // Quantized weights (ggml block layouts) dequantized on the GPU straight into a GEN9BLAS_HS packed B (see gen9blas.h).
-static int pack_b_q_bands(int qt, size_t rb, const void *W, gen9blas_packed *P, int *nf) {
+static int pack_b_q_bands(int qt, size_t rb, const void *W, gen9blas_packed_b *P, int *nf) {
     size_t bW = (size_t)P->N * rb;
     bf_t xW; int z;
     if (get_obj(W, bW, &uB, 1, 0, &xW, &z)) return -1;
@@ -134,7 +134,7 @@ done:
     return 0;
 }
 
-gen9blas_packed *gen9blas_pack_b_q(int qtype, int K, int N, const void *W, size_t row_bytes, int *out_of_range) {
+gen9blas_packed_b *gen9blas_pack_b_q(int qtype, int K, int N, const void *W, size_t row_bytes, int *out_of_range) {
     static int *nf;
     NEW_OPERATION();
     *out_of_range = 0;
@@ -146,7 +146,7 @@ gen9blas_packed *gen9blas_pack_b_q(int qtype, int K, int N, const void *W, size_
     }
     if (!nf && !(nf = gen9blas_alloc(64))) return NULL;
     type_t *r = &types[GEN9BLAS_HS];
-    gen9blas_packed *P = calloc(1, sizeof *P);
+    gen9blas_packed_b *P = calloc(1, sizeof *P);
     if (!P) return NULL;
     P->type = GEN9BLAS_HS; P->K = K; P->N = N;
     P->Np = (N + r->tn - 1) / r->tn * r->tn; P->Kp = (K + r->km - 1) / r->km * r->km;
@@ -165,16 +165,18 @@ gen9blas_packed *gen9blas_pack_b_q(int qtype, int K, int N, const void *W, size_
     return P;
 }
 
-void gen9blas_packed_free(gen9blas_packed *P) {
+void gen9blas_packed_b_free(gen9blas_packed_b *P) {
     if (!P) return;
     wait_gpu();
     packed_buf_release(P->buf, P->bufsize); free(P);
 }
 
-int gen9blas_gemm_pb(int type, int tA, int M, double alpha, const void *A, int lda, const gen9blas_packed *P,
+int gen9blas_gemm_pb(int tA, int M, double alpha, const void *A, int lda, const gen9blas_packed_b *P,
                      double beta, void *C, int ldc) {
     NEW_OPERATION();
-    if (!P || P->type != type || !types[type].ready) FAIL("gemm_pb: packed B of another type or type %d unavailable", type);
+    if (!P) FAIL("gemm_pb: no packed B");
+    const int type = P->type;
+    if (!types[type].ready) FAIL("gemm_pb: type %d unavailable", type);
     if (M <= 0) return 0;
     type_t *r = &types[type];
     int es = r->es, N = P->N, K = P->K, Np = P->Np, Kp = P->Kp, Mp = (M + 15) / 16 * 16;
@@ -258,28 +260,27 @@ static int epilog_hfx(cl_mem dCp, int ldp, int Mp, bf_t xC, int ldc, int N, int 
     return 0;
 }
 // No-wait mode (gen9blas_nowait, gen9blas.h): products that would wait for their FP16-overflow flag instead take a flag
-// slot from one USM array and return without waiting; gen9blas_nowait_check reads and clears the slots (GPU idle).
+// slot from one USM array and return without waiting; gen9blas_nowait_pending reads and clears the slots (GPU idle).
 static int nw_mode, *nw_flags, nw_cap, nw_used;
 static int *nw_take(void) {
     if (!nw_mode) return NULL;
     if (!nw_flags) { nw_cap = 4096; if (!(nw_flags = gen9blas_alloc((size_t)nw_cap * 4))) { nw_cap = 0; return NULL; } memset(nw_flags, 0, (size_t)nw_cap * 4); }
     return nw_used < nw_cap ? nw_flags + nw_used++ : NULL;
 }
-void gen9blas_nowait(int on) { nw_mode = on; }
-int gen9blas_nowait_check(void) {
+void gen9blas_set_nowait(int on) { nw_mode = on; }
+int gen9blas_nowait_pending(void) {
     int n = 0;
     for (int i = 0; i < nw_used; i++) n += nw_flags[i] != 0;
     if (nw_used) memset(nw_flags, 0, (size_t)nw_used * 4);
     nw_used = 0;
     return n;
 }
-static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite,
+static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed_b *P, float *C, int ldc, int *nonfinite,
                             const epi_ext_t *ext, cl_mem preA, int *nw);
 // Packed GEMM input made once and reused (gen9blas_layer_norm_pack -> gen9blas_gemm_pa_f16w_ex).
-gen9blas_packed_a *gen9blas_packed_a_new(void) { return calloc(1, sizeof(gen9blas_packed_a)); }
+gen9blas_packed_a *gen9blas_packed_a_create(void) { return calloc(1, sizeof(gen9blas_packed_a)); }
 void gen9blas_packed_a_free(gen9blas_packed_a *pa) { if (!pa) return; if (pa->buf) clReleaseMemObject(pa->buf); free(pa); }
-int gen9blas_norm_pack_supported(void) { return k_lnorm_pack != NULL && k_epi_8x != NULL; }
-int gen9blas_gemm_pa_f16w_ex(const gen9blas_packed_a *pa, const gen9blas_packed *P, float *C, int ldc,
+int gen9blas_gemm_pa_f16w_ex(const gen9blas_packed_a *pa, const gen9blas_packed_b *P, float *C, int ldc,
                              const float *bias, int gelu, const float *R, int ldr, int *nonfinite) {
     if (!pa || !pa->buf || !P || pa->K != P->K || pa->Kp != P->Kp) FAIL("gemm_pa_f16w_ex: packed A does not match B (K %d/%d, Kp %d/%d)",
                                                                       pa ? pa->K : -1, P ? P->K : -1, pa ? pa->Kp : -1, P ? P->Kp : -1);
@@ -289,29 +290,27 @@ int gen9blas_gemm_pa_f16w_ex(const gen9blas_packed_a *pa, const gen9blas_packed 
     return gemm_pb_f16w_any(0, pa->M, NULL, 0, P, C, ldc, nonfinite, any ? &e : NULL, pa->buf, NULL);
 }
 
-int gen9blas_epilog_ext_supported(void) { return k_epi_8x != NULL; }
-int gen9blas_gemm_pb_f16w_ex(int M, const float *A, int lda, const gen9blas_packed *P, float *C, int ldc,
+int gen9blas_gemm_pb_f16w_ex(int M, const float *A, int lda, const gen9blas_packed_b *P, float *C, int ldc,
                              const float *bias, int gelu, const float *R, int ldr, int *nonfinite) {
     if (!k_epi_8x) FAIL("gemm_pb_f16w_ex: the binary lacks gen9blas_epilog_hf8x");
     const epi_ext_t e = { bias, gelu, R, ldr };
     return gemm_pb_f16w_any(0, M, A, lda, P, C, ldc, nonfinite, &e, NULL, NULL);
 }
-int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
+int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed_b *P, float *C, int ldc, int *nonfinite) {
     return gemm_pb_f16w_any(0, M, A, lda, P, C, ldc, nonfinite, NULL, NULL, NULL);
 }
 // The same with FP16 activations (ggml conv_1d: im2col result as src0, F16 kernel as src1): packed by the HS pa kernel.
-int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
+int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_packed_b *P, float *C, int ldc, int *nonfinite) {
     return gemm_pb_f16w_any(1, M, A, lda, P, C, ldc, nonfinite, NULL, NULL, NULL);
 }
 
 // Small batches (M <= 16) on HS-packed weights without packing A: gen9blas_skinny_pb16_<MT> (lib/kernels/hgemm.cl), F32 products
 // and sums, F32 result straight into C. Returns 1 (nothing done) when the kernel is missing or M is out of range.
-int gen9blas_skinny_pb_supported(void) { return k_skp[0] && k_skp[1] && k_skp[2]; }
-int gen9blas_gemm_pb_skinny(int M, const float *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
+int gen9blas_gemm_pb_skinny(int M, const float *A, int lda, const gen9blas_packed_b *P, float *C, int ldc, int *nonfinite) {
     static int *nf;
     NEW_OPERATION();
     if (!P || P->type != GEN9BLAS_HS) FAIL("gemm_pb_skinny: needs B packed as GEN9BLAS_HS");
-    if (M < 1 || M > 16 || !gen9blas_skinny_pb_supported()) return 1;
+    if (M < 1 || M > 16 || !gen9blas_has(GEN9BLAS_FEAT_SKINNY_PB)) return 1;
     if (!nf && !(nf = gen9blas_alloc(64))) return -1;
     *nonfinite = 0; *nf = 0;
     const int N = P->N, K = P->K, Kp = P->Kp, Np = P->Np;
@@ -328,7 +327,7 @@ int gen9blas_gemm_pb_skinny(int M, const float *A, int lda, const gen9blas_packe
     *nonfinite = *nf != 0;
     return 0;
 }
-static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite,
+static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed_b *P, float *C, int ldc, int *nonfinite,
                             const epi_ext_t *ext, cl_mem preA, int *nw) {
     static int *nf;   // USM flag word (coherent with the GPU through the LLC)
     NEW_OPERATION();
@@ -393,7 +392,7 @@ static int gemm_dev(type_t *r, cl_mem Ap, cl_mem Bp, cl_mem C, int Mp, int Np, i
 // n (1..8) products of one F32 input with HS-packed weights (ggml: Q/K/V MUL_MATs on the same normed input): A packed to
 // FP16 once, then GEMM + epilogue per weight, one wait. nonfinite[i]: output i had inf / NaN (caller recomputes it in F32).
 // Returns 1 (nothing done) when an output is not zero-copy (the copy path has one work buffer for C).
-int gen9blas_gemm_multi_f16w(int M, const float *A, int lda, int n, const gen9blas_packed *const *P, float *const *C,
+int gen9blas_gemm_multi_f16w(int M, const float *A, int lda, int n, const gen9blas_packed_b *const *P, float *const *C,
                              const int *ldc, int *nonfinite) {
     static int *nf;   // one USM flag word per output
     NEW_OPERATION();
@@ -427,7 +426,7 @@ int gen9blas_gemm_multi_f16w(int M, const float *A, int lda, int n, const gen9bl
     for (int i = 0; i < n; i++) all &= nws[i] != NULL;
     if (all) return 0;          // no-wait mode
     if (wait_gpu()) return -1;
-    for (int i = 0; i < n; i++) nonfinite[i] = !nws[i] && nf[i] != 0;   // calls with a slot report through gen9blas_nowait_check
+    for (int i = 0; i < n; i++) nonfinite[i] = !nws[i] && nf[i] != 0;   // calls with a slot report through gen9blas_nowait_pending
     return 0;
 }
 
@@ -437,8 +436,8 @@ int gen9blas_gemm_multi_f16w(int M, const float *A, int lda, int n, const gen9bl
 // X is packed to FP16 once; gate and up stay FP16; h is computed in F32 and rounded to FP16 into down's packed A;
 // down's result goes through the FP16 -> F32 epilogue. *nonfinite = 1 on any inf / NaN / FP16 overflow on the way.
 static cl_mem dG, dU, dH; static size_t sG, sU, sH;
-int gen9blas_ffn_f16w(int M, const float *X, int ldx, const gen9blas_packed *Pg, const gen9blas_packed *Pu,
-                      const gen9blas_packed *Pd, float *Y, int ldy, int *nonfinite) {
+int gen9blas_ffn_f16w(int M, const float *X, int ldx, const gen9blas_packed_b *Pg, const gen9blas_packed_b *Pu,
+                      const gen9blas_packed_b *Pd, float *Y, int ldy, int *nonfinite) {
     static int *nf;
     NEW_OPERATION();
     if (!Pg || !Pu || !Pd || Pg->type != GEN9BLAS_HS || Pu->type != GEN9BLAS_HS || Pd->type != GEN9BLAS_HS || !k_swiglu)

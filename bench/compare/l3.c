@@ -162,7 +162,7 @@ int main(int argc, char **argv) {
     int tr = !strcmp(op, "trmm") || !strcmp(op, "trsm");
 
     int gen9blas = !strcmp(lib, "gen9blas");
-    if (gen9blas) { const char *k = getenv("GEN9BLAS_DIR"); CHECK(gen9blas_init(k ? k : "bench") != 0); }
+    if (gen9blas) { CHECK(gen9blas_init() != 0); }
     void *(*alloc_fn)(size_t) = gen9blas && !host ? gen9blas_alloc : malloc;
     hA = alloc_fn(nb); hB = alloc_fn(nb); hC = alloc_fn(nb); hC0 = malloc(nb);
     rA = malloc(nn * 8); rB = malloc(nn * 8); rC = malloc(nn * 8);

@@ -12,7 +12,7 @@ static double now(clockid_t c) { struct timespec t; clock_gettime(c, &t); return
 int main(int argc, char **argv) {
     int n = argc > 1 ? atoi(argv[1]) : 4096, R = argc > 2 ? atoi(argv[2]) : 5000;
     int usm = argc > 3 && !strcmp(argv[3], "usm");
-    if (gen9blas_init(NULL)) { fprintf(stderr, "gen9blas_init: %s\n", gen9blas_error()); return 1; }
+    if (gen9blas_init()) { fprintf(stderr, "gen9blas_init: %s\n", gen9blas_error()); return 1; }
     float *x = usm ? gen9blas_alloc(n * 4) : aligned_alloc(64, (n * 4 + 63) / 64 * 64);
     float *y = usm ? gen9blas_alloc(n * 4) : aligned_alloc(64, (n * 4 + 63) / 64 * 64);
     for (int i = 0; i < n; i++) { x[i] = 1; y[i] = 0; }

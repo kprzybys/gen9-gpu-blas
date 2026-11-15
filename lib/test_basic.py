@@ -18,7 +18,7 @@ import gen9blas  # noqa: E402
 
 KINDS = [("hgemm", np.float16, dict(), 4.9e-4, 5e-3), ("sgemm", np.float32, dict(), 1e-6, 1e-5)]
 gen9blas._init()
-if gen9blas._lib.gen9blas_available(gen9blas.GEN9BLAS_HS):
+if gen9blas._lib.gen9blas_has(gen9blas.FEAT_FP16):
     KINDS.insert(1, ("hgemm acc.", np.float16, dict(accurate=True), 4.9e-4, 5e-3))
 else:
     print("NOTE: accurate FP16 variant unavailable, skipping")

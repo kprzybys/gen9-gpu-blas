@@ -21,7 +21,7 @@ import gen9blas as g
 step = sys.argv[1] if len(sys.argv) > 1 else "init"
 rng = np.random.default_rng(1)
 g._init()
-print("kcl_gen8 =", g._lib.kcl_gen8(), "| types available (H, S, HS, D):", [g._lib.gen9blas_available(t) for t in range(4)])
+print("device gen =", g._lib.gen9blas_device_gen(), "| FP16, FP32, FP64:", [g._lib.gen9blas_has(f) for f in (g.FEAT_FP16, g.FEAT_FP32, g.FEAT_FP64)])
 ok = True
 if step == "copy":
     for n in (64, 4096, 1 << 20):

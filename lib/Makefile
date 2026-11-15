@@ -38,11 +38,11 @@ libkcl.a: kcl.c kcl.h kcl_desc.h $(GEN)/gen9_pack.h
 # library units (refactor 2b: lib/gen9blas.c split into src/, shared state in src/internal.h)
 LIB_SRC = src/core.c src/gemm.c src/packed.c src/ops.c src/level3.c src/level12.c
 LIB_DEP = $(LIB_SRC) src/internal.h gen9blas.h
-libgen9blas.so: $(LIB_DEP) $(KCL_DEP) src/attn.c
-	gcc $(CFL) -I. -I$(GEN) -o $@ $(LIB_SRC) $(KCL_SRC) src/attn.c -lm
+libgen9blas.so: $(LIB_DEP) gen9blas_ml.h $(KCL_DEP) src/attn.c
+	gcc $(CFL) -fvisibility=hidden -I. -I$(GEN) -o $@ $(LIB_SRC) $(KCL_SRC) src/attn.c -lm -lpthread
 
 libgen9blas_neo.so: $(LIB_DEP)
-	gcc $(CFL) -I. -DGEN9BLAS_NEO -o $@ $(LIB_SRC) -lOpenCL -lm
+	gcc $(CFL) -fvisibility=hidden -I. -DGEN9BLAS_NEO -o $@ $(LIB_SRC) -lOpenCL -lm -lpthread
 
 test: libgen9blas.so
 	python3 test_basic.py

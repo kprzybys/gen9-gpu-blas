@@ -140,7 +140,7 @@ C (header `lib/gen9blas.h`, all matrices row-major; full reference in [docs/api.
 
 ```c
 #include "gen9blas.h"
-gen9blas_init("bench");                            /* directory with the kernel files (bench/) */
+gen9blas_init();                                   /* optional: the first call initializes the GPU */
 float *A = gen9blas_alloc(sizeof(float) * M * K);  /* USM; ordinary malloc memory also works */
 gen9blas_sgemm(M, N, K, 1.0, A, K, B, N, 0.0, C, N);
 ```

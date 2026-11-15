@@ -38,10 +38,7 @@ int gen9blas_rms_norm(int M, int K, const float *X, int ldx, const float *w, flo
     return ew_done(sync, xY, zY, bY, Y);
 }
 
-int gen9blas_binop_rows(int op, int M, int K, const float *A, int lda, const float *B, int ldb, float *C, int ldc, int sync) {
-    return gen9blas_binop_rows2(op, M, K, A, lda, B, ldb, 1, C, ldc, sync);
-}
-int gen9blas_binop_rows2(int op, int M, int K, const float *A, int lda, const float *B, int ldb, int bs0, float *C, int ldc, int sync) {
+int gen9blas_binop_rows(int op, int M, int K, const float *A, int lda, const float *B, int ldb, int bs0, float *C, int ldc, int sync) {
     NEW_OPERATION();
     if (!k_binop) FAIL("binop_rows: kernel not in this build");
     if (M <= 0 || K <= 0) return 0;
@@ -192,7 +189,6 @@ int gen9blas_rope(int n_dims, int nh, int n_tok, const float *X, long xs1, long 
 }
 
 // ggml SET_ROWS F32 -> F16 (gen9blas.h). src / dst strides in elements, index strides in bytes; dst_bytes = extent of dst.
-int gen9blas_set_rows_supported(void) { return k_setrows != NULL; }
 int gen9blas_set_rows_f16(int nc, int nr, int ne02, int ne03, const float *src, long s1, long s2, long s3,
                           const void *idx, size_t idx_bytes, long b10, long b11, long b12, int idx64, int ne11, int ne12,
                           uint16_t *dst, size_t dst_bytes, long d1, long d2, long d3, long ne1, int sync, int *bad) {
@@ -220,7 +216,6 @@ int gen9blas_set_rows_f16(int nc, int nr, int ne02, int ne03, const float *src, 
 }
 
 // ggml_rope_multi, mode MROPE (sections s[4]): pos holds 4 * n_tok positions (t, h, w, e). Layout rules as gen9blas_rope.
-int gen9blas_rope_multi_supported(void) { return k_rope_m != NULL; }
 int gen9blas_rope_multi(int n_dims, int nh, int n_tok, const float *X, long xs1, long xs2, float *Y, long ys1, long ys2,
                         const int *pos, const float *ff, const int sections[4], float freq_base, float freq_scale,
                         float ext_factor, float attn_factor, const float corr[2], int vision, int sync) {
@@ -258,11 +253,12 @@ static size_t extent4(const long ne[4], const long nb[4], size_t es) {
     for (int i = 0; i < 4; i++) e += (size_t)(ne[i] - 1) * (size_t)nb[i];
     return e;
 }
-int gen9blas_cpy_supported(void) { return k_cpy_any != NULL && k_upscale != NULL; }
 int gen9blas_cpy_any(const void *src, int tin, const long sne[4], const long snb[4], void *dst, int tout, const long dne[4],
                      const long dnb[4], int sync) {
     NEW_OPERATION();
     if (!k_cpy_any) FAIL("cpy_any: kernel not in this build");
+    if ((tin != GEN9BLAS_S && tin != GEN9BLAS_H) || (tout != GEN9BLAS_S && tout != GEN9BLAS_H)) FAIL("cpy_any: types F32 / F16 only");
+    tin = tin == GEN9BLAS_H; tout = tout == GEN9BLAS_H;   // kernel codes: 0 F32, 1 F16
     long n = 1, m = 1;
     for (int i = 0; i < 4; i++) {
         if (sne[i] <= 0 || dne[i] <= 0) return 0;
@@ -318,7 +314,9 @@ int gen9blas_upscale_f32(const float *src, const long sne[4], const long snb[4],
 }
 
 // Decoding attention over KV streams (gen9blas.h): split-K partial kernel + merge, queued (sync: wait at the end).
-int gen9blas_attn_dec_supported(int D, int G) { return k_dec_part && k_dec_comb && D == 128 && G >= 1 && G <= 8; }
+int gen9blas_attn_dec_supported(int D, int H, int HKV) {
+    return k_dec_part && k_dec_comb && D == 128 && HKV > 0 && H % HKV == 0 && H / HKV >= 1 && H / HKV <= 8;
+}
 int gen9blas_attn_dec(int D, int H, int HKV, int ns, int nq, int nk, const float *Q, long qt, long qh, long qs,
                       const uint16_t *K, long kk, long kh, long ks, size_t k_bytes, const uint16_t *V, long vk, long vh, long vs,
                       size_t v_bytes, float *O, float scale, const int *vis, int dvis, int chunk, int sync) {

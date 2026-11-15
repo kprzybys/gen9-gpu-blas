@@ -29,18 +29,23 @@ kernel driver itself, and a bug can hang the GPU.
   0 = none, 1 = transpose. `diag`: 0 = regular, 1 = unit diagonal.
 - Relative error (to the sum of |a·b|): `hgemm` ~1e-4, accurate FP16 (`HS`) ~1e-5, `sgemm` ~1e-8, FP64 ~1e-15.
 
-## C API (`lib/gen9blas.h`)
+## C API (`lib/gen9blas.h`, `lib/gen9blas_ml.h`)
 
-The header is the authority for signatures; this section lists what is there.
+The headers are the authority for signatures; this section lists what is there. `gen9blas.h`: BLAS (stable within a
+minor release). `gen9blas_ml.h`: neural-network operations for the ggml backend (unstable: follows ggml). Calls must be
+serialized by the caller (process-wide state); handles are freed by the caller after the work using them finished.
+Changes from 0.1: CHANGELOG.md (table old -> new).
 
 Initialization and memory:
 
 | Function | Purpose |
 |---|---|
-| `gen9blas_init(dir)` | initialize; must be called before anything else. `dir` is only used by the NEO builds (directory with the `.cl` sources and `gen_*.bin` binaries); in the default build the kernels are compiled in |
+| `gen9blas_version()` | version of the loaded library (`GEN9BLAS_VERSION` of its build); compare with the header's `GEN9BLAS_VERSION` |
+| `gen9blas_init()` | initialize once per process (thread-safe; a failure is final); `gen9blas_has()` and `gen9blas_alloc()` call it themselves. The NEO comparison builds read kernel sources from `GEN9BLAS_DIR` |
+| `gen9blas_device_gen()` | 9 (Gen9 / Gen9.5), 8 (Gen8 Cherryview), 0 (no device) |
+| `gen9blas_has(feature)` | 1 if a feature is available: `GEN9BLAS_FEAT_FP16/FP32/FP64`, `_SKINNY_PB`, `_EPILOG_EXT`, `_NORM_PACK`, `_ROPE_MULTI`, `_CPY`, `_SET_ROWS`; 0 for features unknown to the loaded library |
 | `gen9blas_alloc(bytes)`, `gen9blas_free(p)` | zero-copy memory: USM host memory (a GEM object mapped to the CPU, aligned to 4096 B) |
 | `gen9blas_is_usm(p, bytes)` | 1 if `[p, p+bytes)` lies inside one `gen9blas_alloc` allocation |
-| `gen9blas_available(type)` | 1 if the kernel of the given type has been loaded |
 | `gen9blas_last_time_ms()` | time of the last call (with `GEN9BLAS_PROFILE=1`: kernel time; without: the whole call) |
 | `gen9blas_last_zero_copy()` | GEMM: bits 1 = A, 2 = B, 4 = C went without a copy |
 | `gen9blas_error()` | text of the last error |
@@ -263,7 +268,7 @@ All variables are read once per process (on first use). "Value" lists what is ac
 | `GEN9BLAS_BLAS` | `auto` (default), `gpu`, `cpu` | mode of `libgen9blas_blas.so` (above) |
 | `GEN9BLAS_BLAS_INFO` | set (any value) | the BLAS layer prints each call and where it went (`GPU` / `CPU`) on stderr |
 | `GEN9BLAS_BLAS_CPU` | path; default `libopenblas.so.0`, then `/usr/lib/x86_64-linux-gnu/openblas-pthread/libblas.so.3` | the CPU BLAS used for forwarded and CPU-side calls |
-| `GEN9BLAS_DIR` | path; default `../bench` relative to the library | kernel directory passed to `gen9blas_init` (used by the NEO builds only) |
+| `GEN9BLAS_DIR` | path; default `lib/kernels` (the BLAS shim: `kernels/` next to the library) | kernel sources for the NEO comparison builds (the default kcl build has them compiled in) |
 | `GEN9BLAS_LIB` | path; default `libgen9blas.so` next to `gen9blas.py` | Python module: library to load (e.g. a NEO build) |
 | `GEN9BLAS_PROFILE` | set (any value) | profiling: stage times on stderr, `gen9blas_last_time_ms()` returns the kernel time. Off by default because queue profiling costs ~20 µs of CPU per event |
 | `GEN9BLAS_SKINNY` | integer; default: threshold 16 for FP16 and FP32, none for FP64 | skinny GEMM is used when min(M, N) <= n; `0` disables it (old packed path) |
