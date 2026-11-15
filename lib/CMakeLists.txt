@@ -19,9 +19,10 @@ option(GEN9BLAS_BUILD_TESTS "ctest: the Python GPU test suites (label gpu)" ON)
 set(GEN9BLAS_PREBUILT_KERNELS "" CACHE PATH "directory with prebuilt kernels.c and kernels_gen8.c (instead of ocloc)")
 set(GEN9BLAS_OCLOC_VERSION "24.35.30872.36" CACHE STRING "ocloc version the kernels are generated with")
 
-if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
-  set(CMAKE_BUILD_TYPE Release CACHE STRING "" FORCE)
-endif()
+list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
+include(gen9blasBuildOptions)   # default Release, hardening, reproducibility, LTO / -march / ccache options
+set(GEN9BLAS_KERNEL_CACHE "$ENV{HOME}/.cache/gen9blas-kernels" CACHE PATH
+    "cache of generated kernel tables and attention binaries by input hash (empty: off)")
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_EXTENSIONS ON)          # gnu11: statement expressions, __attribute__
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
@@ -30,6 +31,7 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_package(Threads REQUIRED)
 find_library(M_LIB m)
 set(MESA ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mesa)
+set(CACHED ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/cached_tables.py "${GEN9BLAS_KERNEL_CACHE}")
 set(ASM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../asm)
 
 # ---- kernel tables -----------------------------------------------------------------------------------------------
@@ -43,6 +45,8 @@ set(KERNELS_C ${CMAKE_CURRENT_BINARY_DIR}/kernels.c)
 set(KERNELS_GEN8_C ${CMAKE_CURRENT_BINARY_DIR}/kernels_gen8.c)
 set(ATTN_TOKC attn_qwen_tokc attn_llama_tokc attn_whisper_tokc attn_qwen7b_tokc attn_qwen3_tokc attn_nemo_tokc
               attn_paddle_tokc attn_ernie_tokc attn_ernie_stokc)
+set(ATTN_OTHER attn_qwen attn_llama attn_qwen_tok attn_llama_tok)   # also built by asm (benches)
+
 
 if(GEN9BLAS_PREBUILT_KERNELS)
   foreach(f kernels.c kernels_gen8.c)
@@ -76,19 +80,27 @@ else()
     COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/gen_dgemm.py ${KDIR}/sgemm.cl ${KDIR}/dgemm_core.cl > ${KDIR}/dgemm.cl
     DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/gen_dgemm.py ${KDIR}/sgemm.cl ${KDIR}/dgemm_core.cl VERBATIM)
   # attention binaries: hand-scheduled from asm/attn.cl by asm/attn_gen.py (pinned ocloc), written into the staging dir
+  # (each generator step runs through cached_tables.py: same inputs + ocloc version -> outputs from the cache)
   set(_attn)
+  set(_attn_all)
   foreach(b ${ATTN_TOKC})
     list(APPEND _attn ${KDIR}/${b}.bin)
   endforeach()
+  foreach(b ${ATTN_TOKC} ${ATTN_OTHER})
+    list(APPEND _attn_all ${KDIR}/${b}.bin)
+  endforeach()
   file(GLOB _asm_deps ${ASM_DIR}/attn*.py ${ASM_DIR}/isa.py ${ASM_DIR}/attn.cl ${ASM_DIR}/Makefile)
-  add_custom_command(OUTPUT ${_attn}
-    COMMAND make -s -C ${ASM_DIR} BIN_DIR=${KDIR} attn attn-paddle
-    DEPENDS ${_asm_deps} COMMENT "attention kernels (asm/attn_gen.py)" VERBATIM)
+  add_custom_command(OUTPUT ${_attn_all}
+    COMMAND ${CACHED} --key ${_asm_deps} --salt ${_ov} attn --out ${_attn_all}
+            -- make -s -C ${ASM_DIR} BIN_DIR=${KDIR} attn attn-paddle
+    DEPENDS ${_asm_deps} ${CMAKE_CURRENT_SOURCE_DIR}/cached_tables.py COMMENT "attention kernels (asm/attn_gen.py)" VERBATIM)
   add_custom_command(OUTPUT ${KERNELS_C}
-    COMMAND ${Python3_EXECUTABLE} ${GENK} ${KDIR} ${CMAKE_CURRENT_BINARY_DIR}/.kernels > ${KERNELS_C}
+    COMMAND ${CACHED} --key ${GENK} ${_staged} ${KDIR}/dgemm.cl ${_attn} --salt ${_ov} whl --out ${KERNELS_C} --stdout ${KERNELS_C}
+            -- ${Python3_EXECUTABLE} ${GENK} ${KDIR} ${CMAKE_CURRENT_BINARY_DIR}/.kernels
     DEPENDS ${GENK} ${_staged} ${KDIR}/dgemm.cl ${_attn} COMMENT "kernel table kernels.c (ocloc)" VERBATIM)
   add_custom_command(OUTPUT ${KERNELS_GEN8_C}
-    COMMAND ${Python3_EXECUTABLE} ${GENK} ${KDIR} ${CMAKE_CURRENT_BINARY_DIR}/.kernels_gen8 bdw > ${KERNELS_GEN8_C}
+    COMMAND ${CACHED} --key ${GENK} ${_staged} ${KDIR}/dgemm.cl --salt ${_ov} bdw --out ${KERNELS_GEN8_C} --stdout ${KERNELS_GEN8_C}
+            -- ${Python3_EXECUTABLE} ${GENK} ${KDIR} ${CMAKE_CURRENT_BINARY_DIR}/.kernels_gen8 bdw
     DEPENDS ${GENK} ${_staged} ${KDIR}/dgemm.cl COMMENT "Gen8 kernel table kernels_gen8.c (ocloc)" VERBATIM)
 endif()
 add_custom_target(gen9blas_kernel_tables DEPENDS ${KERNELS_C} ${KERNELS_GEN8_C})
@@ -102,6 +114,7 @@ add_library(gen9blas_kcl STATIC kcl.c)
 target_include_directories(gen9blas_kcl PRIVATE ${MESA}
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/gen9blas>)
 target_compile_options(gen9blas_kcl PRIVATE -Wall -fvisibility=hidden)
+gen9_build_options(gen9blas_kcl)
 set_target_properties(gen9blas_kcl PROPERTIES OUTPUT_NAME kcl EXPORT_NAME kcl)
 target_link_libraries(gen9blas_kcl PUBLIC ${M_LIB} Threads::Threads)
 
@@ -111,6 +124,7 @@ add_library(gen9blas SHARED ${LIB_SRC} src/attn.c ${KCL_SRC})
 target_include_directories(gen9blas PRIVATE ${MESA} src
   PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}> $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_compile_options(gen9blas PRIVATE -Wall -fvisibility=hidden)
+gen9_build_options(gen9blas)
 target_link_libraries(gen9blas PRIVATE ${M_LIB} Threads::Threads)
 set_target_properties(gen9blas PROPERTIES VERSION ${PROJECT_VERSION} SOVERSION ${PROJECT_VERSION_MAJOR}.${PROJECT_VERSION_MINOR}
   PUBLIC_HEADER "gen9blas.h;gen9blas_ml.h" INSTALL_RPATH "$ORIGIN" BUILD_WITH_INSTALL_RPATH ON)
@@ -130,6 +144,9 @@ if(GEN9BLAS_BUILD_BLAS_SHIM)
   add_library(gen9blas_blas SHARED ${LIB_SRC} ${KCL_SRC} src/cblas.c ${_cbd}/cblas_forward.c ${_cbd}/cblas_d.inc)
   target_include_directories(gen9blas_blas PRIVATE ${MESA} src . ${_cbd})
   target_compile_options(gen9blas_blas PRIVATE -Wall)
+  gen9_build_options(gen9blas_blas)
+  # the forwarding stubs (cblas_forward.c) carry no visibility attribute: keep default visibility for this one
+  set_target_properties(gen9blas_blas PROPERTIES C_VISIBILITY_PRESET default VISIBILITY_INLINES_HIDDEN OFF)
   target_link_libraries(gen9blas_blas PRIVATE ${M_LIB} ${CMAKE_DL_LIBS} Threads::Threads)
   set_target_properties(gen9blas_blas PROPERTIES INSTALL_RPATH "$ORIGIN")
 endif()
@@ -186,7 +203,7 @@ install(PROGRAMS gen_kernels.py DESTINATION ${CMAKE_INSTALL_DATADIR}/gen9blas)
 install(FILES gen9blas.py DESTINATION ${CMAKE_INSTALL_DATADIR}/gen9blas/python)
 list(TRANSFORM KERNEL_FILES PREPEND kernels/ OUTPUT_VARIABLE _kinst)   # for programs embedding library kernels
 install(FILES ${_kinst} DESTINATION ${CMAKE_INSTALL_DATADIR}/gen9blas/kernels)
-install(FILES cmake/gen9blasKernels.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gen9blas)
+install(FILES cmake/gen9blasKernels.cmake cmake/gen9blasBuildOptions.cmake DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gen9blas)
 install(EXPORT gen9blasTargets NAMESPACE gen9blas:: DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gen9blas)
 configure_package_config_file(cmake/gen9blasConfig.cmake.in ${CMAKE_CURRENT_BINARY_DIR}/gen9blasConfig.cmake
   INSTALL_DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/gen9blas PATH_VARS CMAKE_INSTALL_DATADIR)
@@ -197,6 +214,7 @@ configure_file(cmake/gen9blas.pc.in ${CMAKE_CURRENT_BINARY_DIR}/gen9blas.pc @ONL
 install(FILES ${CMAKE_CURRENT_BINARY_DIR}/gen9blas.pc DESTINATION ${CMAKE_INSTALL_LIBDIR}/pkgconfig)
 # in-tree users (top-level build): what find_package(gen9blas) provides
 if(NOT PROJECT_IS_TOP_LEVEL)
+  set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} PARENT_SCOPE)   # include(gen9blasBuildOptions) in sibling projects
   set(GEN9BLAS_GEN_KERNELS ${GENK} PARENT_SCOPE)
   set(GEN9BLAS_KERNELS_DIR ${CMAKE_CURRENT_SOURCE_DIR}/kernels PARENT_SCOPE)
   set(GEN9BLAS_OCLOC_VERSION ${GEN9BLAS_OCLOC_VERSION} PARENT_SCOPE)

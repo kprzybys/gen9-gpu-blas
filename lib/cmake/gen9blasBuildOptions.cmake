@@ -1,0 +1,67 @@
+# Shared build settings of gen9-gpu-blas and the projects built on it (docs/build-knowhow.md). Include after project():
+#   include(gen9blasBuildOptions)        # (installed with the package; in-tree: lib/cmake)
+#   gen9_build_options(<target>...)       # per target: visibility, reproducibility, hardening, LTO, -march
+# Options: GEN9_HARDENING (ON), GEN9_LTO (OFF), GEN9_MARCH (""), GEN9_CCACHE (ON when ccache is installed).
+include_guard(GLOBAL)
+
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE Release CACHE STRING "Build type (default Release: optimized)" FORCE)
+endif()
+option(GEN9_HARDENING "stack protector, stack-clash protection, CET, _FORTIFY_SOURCE=3, full RELRO" ON)
+option(GEN9_LTO "link-time optimization (checked with CheckIPOSupported)" OFF)
+set(GEN9_MARCH "" CACHE STRING "-march level (e.g. x86-64-v2, x86-64-v3); empty = compiler default; never native for distributed builds")
+find_program(GEN9_CCACHE_PROGRAM ccache)
+option(GEN9_CCACHE "compile through ccache when installed" ON)
+if(GEN9_CCACHE AND GEN9_CCACHE_PROGRAM)
+  foreach(lang C CXX)
+    if(NOT CMAKE_${lang}_COMPILER_LAUNCHER)
+      set(CMAKE_${lang}_COMPILER_LAUNCHER ${GEN9_CCACHE_PROGRAM})
+    endif()
+  endforeach()
+endif()
+if(GEN9_MARCH STREQUAL "native")
+  message(WARNING "GEN9_MARCH=native: the binaries may not run on another CPU")
+endif()
+if(GEN9_LTO)
+  include(CheckIPOSupported)
+  check_ipo_supported(RESULT _gen9_ipo OUTPUT _gen9_ipo_out)
+  if(NOT _gen9_ipo)
+    message(WARNING "GEN9_LTO: not supported here (${_gen9_ipo_out}); building without LTO")
+  endif()
+endif()
+
+# one-line summary per project, and a warning for unoptimized builds (the 2026-11-15 standalone-backend mistake)
+string(TOUPPER "${CMAKE_BUILD_TYPE}" _gen9_bt)
+set(_gen9_flags "${CMAKE_C_FLAGS} ${CMAKE_C_FLAGS_${_gen9_bt}}")
+message(STATUS "${PROJECT_NAME}: build type '${CMAKE_BUILD_TYPE}', flags '${_gen9_flags}', hardening ${GEN9_HARDENING}, "
+               "LTO ${GEN9_LTO}, march '${GEN9_MARCH}', ccache ${GEN9_CCACHE_PROGRAM}")
+if(NOT _gen9_flags MATCHES "-O[1-3s]")
+  message(WARNING "${PROJECT_NAME}: no optimization flag in '${_gen9_flags}' (build type '${CMAKE_BUILD_TYPE}')")
+endif()
+
+function(gen9_build_options)
+  foreach(t ${ARGN})
+    get_target_property(_type ${t} TYPE)
+    # reproducible: no absolute source / build paths in __FILE__ and debug info, no __DATE__ / __TIME__
+    target_compile_options(${t} PRIVATE "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=." "-ffile-prefix-map=${CMAKE_BINARY_DIR}=build"
+                                        -Werror=date-time)
+    if(_type STREQUAL "SHARED_LIBRARY" OR _type STREQUAL "MODULE_LIBRARY")
+      set_target_properties(${t} PROPERTIES C_VISIBILITY_PRESET hidden CXX_VISIBILITY_PRESET hidden
+                                            VISIBILITY_INLINES_HIDDEN ON)
+    endif()
+    if(GEN9_HARDENING)
+      target_compile_options(${t} PRIVATE -fstack-protector-strong -fstack-clash-protection -fcf-protection
+                                          -Wformat=2 -Wimplicit-fallthrough
+                                          $<$<NOT:$<CONFIG:Debug>>:-U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=3>)
+      if(NOT _type STREQUAL "STATIC_LIBRARY")
+        target_link_options(${t} PRIVATE -Wl,-z,relro -Wl,-z,now)
+      endif()
+    endif()
+    if(GEN9_MARCH)
+      target_compile_options(${t} PRIVATE -march=${GEN9_MARCH})
+    endif()
+    if(GEN9_LTO AND _gen9_ipo)
+      set_target_properties(${t} PROPERTIES INTERPROCEDURAL_OPTIMIZATION ON)
+    endif()
+  endforeach()
+endfunction()

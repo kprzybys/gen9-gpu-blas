@@ -1,0 +1,11 @@
+# -O2 vs -O3 for libgen9blas (host code), 2026-11-15, kp (UHD 620), docs/build-knowhow.md
+# us per call, median of the loop; columns: sgemm 64x64 (USM, 3000 calls), sgemv 700x900 (NumPy memory, 1000 calls), sgemm 1024 (30 calls)
+# r1 = -O3 -DNDEBUG (CMake Release default), r3 = -O2 -DNDEBUG; alternating, 3 rounds
+r1 142.6 238.7 7738.5
+r3 130.6 252.0 7786.7
+r1 132.1 295.1 7775.6
+r3 137.8 250.3 7374.2
+r1 132.7 281.8 7620.5
+r3 138.3 269.2 7358.6
+# sizes: -O3 4 009 448 B, -O2 3 993 360 B
+# Result: differences within run-to-run noise (+-5-10 %); large GEMM is GPU-bound. Default stays -O3 (golden verified with it).

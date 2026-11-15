@@ -162,7 +162,6 @@ int gen9blas_attn_f16kv_streams(int D, int H, int HKV, int ns, int nq, int nk, c
     if (ns < 1 || nq <= 0 || nk <= 0 || nk % (8 * NK) || (dvis != 0 && dvis != 1) || ((long)nq * G) % b->RQ ||
         (G % b->RQ && dvis != 0)) return GEN9BLAS_DECLINED;
     for (int st = 0; st < ns; st++) if (vis0[st] < 1) return GEN9BLAS_DECLINED;
-    const size_t row = (size_t)HKV * D * 2;
     const long qrow = (long)H * D;
     if (sq < (long)nq * qrow || sk < (long)nk * HKV * D || sv < (long)nk * HKV * D) return GEN9BLAS_DECLINED;
     if (k_bytes < ((size_t)(ns - 1) * sk + (size_t)nk * HKV * D) * 2 || v_bytes < ((size_t)(ns - 1) * sv + (size_t)nk * HKV * D) * 2) return GEN9BLAS_DECLINED;

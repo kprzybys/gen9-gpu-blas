@@ -1,3 +1,4 @@
+build Release  -O3 hardening=ON
 hgemm 64x64x64                   99ce0b5bfead1e88
 hgemm a/b 64x64x64               788b295648280d4f
 hgemm 129x77x300                 bc6e978ab9f3d94b
