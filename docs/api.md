@@ -269,6 +269,7 @@ All variables are read once per process (on first use). "Value" lists what is ac
 | `GEN9BLAS_BLAS_INFO` | set (any value) | the BLAS layer prints each call and where it went (`GPU` / `CPU`) on stderr |
 | `GEN9BLAS_BLAS_CPU` | path; default `libopenblas.so.0`, then `/usr/lib/x86_64-linux-gnu/openblas-pthread/libblas.so.3` | the CPU BLAS used for forwarded and CPU-side calls |
 | `GEN9BLAS_DIR` | path; default `lib/kernels` (the BLAS shim: `kernels/` next to the library) | kernel sources for the NEO comparison builds (the default kcl build has them compiled in) |
+| `KCL_CTX_PRIORITY` | integer, unset (default 0) | i915 priority of the library's GPU context; negative values (e.g. -512) need no privileges and let other clients (the compositor) go first among queued requests. A running batch is not interrupted: the latency others see is bounded by `GEN9BLAS_MAX_LAUNCH_MS` |
 | `GEN9BLAS_LIB` | path; default `libgen9blas.so` next to `gen9blas.py` | Python module: library to load (e.g. a NEO build) |
 | `GEN9BLAS_PROFILE` | set (any value) | profiling: stage times on stderr, `gen9blas_last_time_ms()` returns the kernel time. Off by default because queue profiling costs ~20 µs of CPU per event |
 | `GEN9BLAS_SKINNY` | integer; default: threshold 16 for FP16 and FP32, none for FP64 | skinny GEMM is used when min(M, N) <= n; `0` disables it (old packed path) |

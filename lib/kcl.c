@@ -539,6 +539,16 @@ static int init(void) {
     struct drm_i915_gem_context_create cc = { 0 };
     if (ioctl(fd, DRM_IOCTL_I915_GEM_CONTEXT_CREATE, &cc)) return -1;
     ctx_id = cc.ctx_id;
+    // KCL_CTX_PRIORITY=<n> (n < 0 needs no privileges, e.g. -512): i915 scheduling priority of this context, so that
+    // other clients (the compositor) are served first among queued requests. It does not interrupt a running batch
+    // (kcl inserts no arbitration points); latency for others is bounded by the launch length (GEN9BLAS_MAX_LAUNCH_MS).
+    const char *pe = getenv("KCL_CTX_PRIORITY");
+    if (pe && *pe) {
+        struct drm_i915_gem_context_param pp = { .ctx_id = ctx_id, .param = I915_CONTEXT_PARAM_PRIORITY,
+                                                 .value = (uint64_t)(int64_t)atoi(pe) };
+        if (ioctl(fd, DRM_IOCTL_I915_GEM_CONTEXT_SETPARAM, &pp))
+            fprintf(stderr, "kcl: KCL_CTX_PRIORITY=%s not applied (errno %d)\n", pe, errno);
+    }
     int chip = 0, eus = 0, subslices = 0, freq = 0;
     if (getparam(I915_PARAM_CHIPSET_ID, &chip) || getparam(I915_PARAM_EU_TOTAL, &eus) ||
         getparam(I915_PARAM_SUBSLICE_TOTAL, &subslices) || getparam(I915_PARAM_CS_TIMESTAMP_FREQUENCY, &freq) ||
