@@ -15,7 +15,7 @@ echo "kernel names defined in >1 file: $(python3 $T/kernels.py --dup | sed -n '/
 echo; echo "## duplication (tools/dup.sh)"; command -v npx > /dev/null && $T/dup.sh "${TMPDIR:-/tmp}/jscpd-metrics" | head -4
 echo; echo "## portability"
 echo "Makefiles: $(git ls-files '*Makefile' | wc -l)   CMakeLists: $(git ls-files '*CMakeLists.txt' | wc -l)"
-echo "copies of lib/kcl.c linked into other targets: $(grep -lE '\.\./lib/kcl\.c' */Makefile 2>/dev/null | wc -l)"
+echo "copies of lib/kcl.c compiled into other targets: $(grep -lE '\.\./lib/kcl\.c' */Makefile 2>/dev/null | wc -l) (targets linking lib/libkcl.a: $(grep -lE 'lib/libkcl\.a' */Makefile 2>/dev/null | wc -l))"
 echo "home paths / host names in code: $(git grep -cE '(~|\$HOME|/home/[a-z]+)/|\b(the 32-thread desktop|gp-gen9|tc-gen9|ssh gp|kp-laptop)\b' -- "${CODE[@]}" | awk -F: '{s+=$2;n++} END{print s+0" lines in "n+0" files"}')"
 echo "abspath defines in Makefiles: $(git grep -c 'abspath' -- '*Makefile' | awk -F: '{s+=$2} END{print s+0}')"
 echo "fixed device/ocloc target (-device whl, PCI ids): $(git grep -cE '\-device whl|0x3ea0|0x5917|0x1912' -- "${CODE[@]}" | awk -F: '{s+=$2;n++} END{print s+0" lines in "n+0" files"}')"

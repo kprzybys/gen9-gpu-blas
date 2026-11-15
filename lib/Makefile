@@ -30,6 +30,11 @@ bench_gen8: bench_gen8.c kcl.c kcl_gen8.c kernels.c kernels_gen8_probe.c kcl.h k
 test_gen8_probe: test_gen8_probe.c kcl.c kcl_gen8.c kernels.c kernels_gen8_probe.c kcl.h kcl_desc.h kcl_gen8.h $(GEN)/gen9_pack.h $(GEN)/gen8_pack.h
 	gcc -O2 -Wall -I$(GEN) -o $@ test_gen8_probe.c kcl.c kcl_gen8.c kernels.c kernels_gen8_probe.c -lm
 
+# libkcl.a: kcl for programs with their own kernel table (apps, bench): one build of kcl.c, symbols hidden, so every
+# shared object linking it keeps its own instance (as when each compiled kcl.c itself; refactor 2c)
+libkcl.a: kcl.c kcl.h kcl_desc.h $(GEN)/gen9_pack.h
+	mkdir -p .kcl && gcc -O2 -Wall -fPIC -fvisibility=hidden -I$(GEN) -c kcl.c -o .kcl/kcl.o && ar rcs $@ .kcl/kcl.o
+
 # library units (refactor 2b: lib/gen9blas.c split into src/, shared state in src/internal.h)
 LIB_SRC = src/core.c src/gemm.c src/packed.c src/ops.c src/level3.c src/level12.c
 LIB_DEP = $(LIB_SRC) src/internal.h gen9blas.h
@@ -58,7 +63,7 @@ check: libgen9blas.so libgen9blas_blas.so
 	GEN9BLAS_PACK_BAND_MB=1 SKIP_BIG=1 python3 test_packed.py
 
 clean:
-	rm -f libgen9blas.so libgen9blas_neo.so libgen9blas_blas.so libgen9blas_blas_neo.so kernels.c kernels_gen8.c kernels_gen8_probe.c test_gen8_probe bench_gen8
+	rm -rf .kcl libkcl.a; rm -f libgen9blas.so libgen9blas_neo.so libgen9blas_blas.so libgen9blas_blas_neo.so kernels.c kernels_gen8.c kernels_gen8_probe.c test_gen8_probe bench_gen8
 
 # Full BLAS/CBLAS: S/D functions on the GPU, the rest through jumps to OpenBLAS (src/cblas_forward.c generated from the symbol list).
 libgen9blas_blas.so: $(LIB_DEP) $(KCL_DEP) src/cblas.c src/cblas_d.inc src/cblas_forward.c

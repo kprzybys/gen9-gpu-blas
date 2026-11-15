@@ -57,3 +57,5 @@ compile_commands.json
 .serena/
 ggml-backend/test_dec
 ggml-backend/test_vision
+lib/.kcl/
+lib/libkcl.a

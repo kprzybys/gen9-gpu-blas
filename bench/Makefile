@@ -11,16 +11,16 @@ optional: gemm_clblast
 ATTN_KCL_BINS = attn_qwen_tok.bin attn_llama_tok.bin attn_qwen_tokc.bin attn_llama_tokc.bin attn_whisper_tokc.bin attn_qwen7b_tokc.bin attn_qwen3_tokc.bin
 attn_kernels.c: ../lib/gen_kernels.py $(addprefix ../lib/kernels/,$(ATTN_KCL_BINS))
 	python3 ../lib/gen_kernels.py ../lib/kernels .attn_kernels $(ATTN_KCL_BINS) > $@
-attn_kcl: attn_kcl.c attn_kernels.c ../lib/kcl.c ../lib/kcl.h ../lib/kcl_desc.h
-	gcc $(CFLAGS) -I../lib -I../lib/third_party/mesa -o $@ attn_kcl.c attn_kernels.c ../lib/kcl.c -lm -lpthread
+attn_kcl: attn_kcl.c attn_kernels.c ../lib/libkcl.a ../lib/kcl.h ../lib/kcl_desc.h
+	gcc $(CFLAGS) -I../lib -I../lib/third_party/mesa -o $@ attn_kcl.c attn_kernels.c ../lib/libkcl.a -lm -lpthread
 
 # kcl_const: regression test for program constants read through a binding-table slot (lib/kcl.c const_bti)
 kcl_const.bin: kcl_const.cl
 	ocloc compile -file kcl_const.cl -device whl -options "-cl-std=CL2.0" -output kcl_const -output_no_suffix -q
 kcl_const_kernels.c: kcl_const.bin ../lib/gen_kernels.py
 	python3 ../lib/gen_kernels.py . .kcl_const kcl_const.bin > $@
-kcl_const: kcl_const.c kcl_const_kernels.c ../lib/kcl.c ../lib/kcl.h ../lib/kcl_desc.h
-	gcc $(CFLAGS) -I../lib -I../lib/third_party/mesa -o $@ kcl_const.c kcl_const_kernels.c ../lib/kcl.c -lm -lpthread
+kcl_const: kcl_const.c kcl_const_kernels.c ../lib/libkcl.a ../lib/kcl.h ../lib/kcl_desc.h
+	gcc $(CFLAGS) -I../lib -I../lib/third_party/mesa -o $@ kcl_const.c kcl_const_kernels.c ../lib/libkcl.a -lm -lpthread
 
 $(CL_PROGRAMS): %: %.c
 	gcc $(CFLAGS) -o $@ $< -lOpenCL -lm
@@ -34,3 +34,6 @@ gemm_clblast: gemm_clblast.c
 clean:
 	rm -f $(CL_PROGRAMS) overhead gemm_clblast attn_kcl attn_kernels.c kcl_const kcl_const.bin kcl_const_kernels.c
 .PHONY: all optional clean
+
+../lib/libkcl.a: ../lib/kcl.c ../lib/kcl.h ../lib/kcl_desc.h
+	$(MAKE) -C ../lib libkcl.a
