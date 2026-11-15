@@ -1,0 +1,40 @@
+diff --git a/python/mlc_llm/support/auto_target.py b/python/mlc_llm/support/auto_target.py
+index fc097e8..21eb126 100644
+--- a/python/mlc_llm/support/auto_target.py
++++ b/python/mlc_llm/support/auto_target.py
+@@ -551,6 +551,35 @@ PRESET = {
+             "thread_warp_size": 1,
+         },
+     },
++    # Intel Gen9/Gen9.5 iGPU (UHD 620, HD 530). "device": "intel_gen9" selects the Gen9 branches of
++    # the DLight rules (tvm.s_tir.dlight.gpu: gemv, low_batch_gemv, matmul). Limits as reported by
++    # the UHD 620: OpenCL (NEO 24.35) work-group 256, local memory 64 KB; Vulkan (ANV) shared 64 KB,
++    # 1024 invocations, kept at 256 like OpenCL. No sub-group shuffles in the schedules.
++    "intel:gen9": {
++        "target": {
++            "kind": "opencl",
++            "device": "intel_gen9",
++            "max_threads_per_block": 256,
++            "max_shared_memory_per_block": 65536,
++            "thread_warp_size": 1,
++        },
++    },
++    "intel:gen9-vulkan": {
++        "target": {
++            "kind": "vulkan",
++            "device": "intel_gen9",
++            "max_threads_per_block": 256,
++            "max_shared_memory_per_block": 65536,
++            "thread_warp_size": 1,
++            "supports_float16": 1,
++            "supports_int64": 1,
++            "supports_int16": 1,
++            "supports_int8": 1,
++            "supports_8bit_buffer": 1,
++            "supports_16bit_buffer": 1,
++            "supports_storage_buffer_storage_class": 1,
++        },
++    },
+     "vulkan:generic": {
+         "target": {
+             "kind": "vulkan",

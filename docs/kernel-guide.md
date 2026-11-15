@@ -299,7 +299,9 @@ at mlc-llm `3b7663a` and relax `45221f267` (both 2026-11-14) [EXT]:
 Lessons for this project: the GEMV/GEMM crossover at 8 rows is confirmed by an independent design; the fixed
 rule-plus-constants model is what our generators already do, but with Gen9 constants found by our sweeps (section 4)
 instead of generic defaults. Possible use: one measurement of MLC on Vulkan as "compiler vs hand-written kernels",
-only on request, because building TVM + MLC is a large job (see also section 5).
+only on request, because building TVM + MLC is a large job (see also section 5). Gen9 branches for the DLight
+rules and an `intel:gen9` preset, with every constant traced to our measurements, are drafted (not built, not run)
+in [experiments/tvm-dlight-gen9](../experiments/tvm-dlight-gen9/README.md).
 
 ## 7. Open items
 

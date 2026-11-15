@@ -1,0 +1,106 @@
+diff --git a/python/tvm/s_tir/dlight/gpu/gemv.py b/python/tvm/s_tir/dlight/gpu/gemv.py
+index b47960fc1..415519e46 100644
+--- a/python/tvm/s_tir/dlight/gpu/gemv.py
++++ b/python/tvm/s_tir/dlight/gpu/gemv.py
+@@ -402,6 +402,29 @@ class GEMV(GPUScheduleRule):
+             LOAD_V_VEC = -1
+             UNROLL = 64
+             TS, TR = 1, 64
++        elif target.kind.name in ("opencl", "vulkan") and "intel_gen9" in str(target.attrs):
++            # Intel Gen9/Gen9.5 iGPU (UHD 620, HD 530). Constants derived from gen9-gpu-blas
++            # measurements (docs/skinny-gemm.md, docs/performance-model.md), not yet tuned in TVM:
++            # - lanes along K (threadIdx.x) so a sub-group reads one contiguous stretch of a row;
++            # - VEC_C = 4: 8 B per lane in FP16 (skinny_r), 16 B in FP32 (one 64 B line per message);
++            # - TR = 128 x 8 B = 1 KB contiguous per row per step (256 B: 14-18 GB/s, 1 KB: 21-24 GB/s);
++            # - few rows per group (TS = 2-4): many rows touched at once cost 2x on 4 KB pages;
++            # - 256 threads = CL_DEVICE_MAX_WORK_GROUP_SIZE on Gen9;
++            # - no shared copy of the vector (L3 ~155 GB/s vs SLM ~177 GB/s, barrier not worth it);
++            # - VEC_LOAD = 8 B per lane for quantized words (2 x uint32 = 16 int4 values);
++            # - UNROLL 16: at least two reads in flight per thread without register spills.
++            VEC_C = 4
++            LOAD_V_SHARED = False
++            LOAD_V_VEC = -1
++            VEC_LOAD = 8
++            UNROLL = 16
++            if isinstance(len_S, int):
++                if len_S > len_R:
++                    TS, TR = 2, 128
++                else:
++                    TS, TR = 4, 64
++            else:
++                TS, TR = 1, 256
+         else:
+             VEC_C = 1
+             LOAD_V_SHARED = False
+@@ -603,6 +626,16 @@ class GEMV(GPUScheduleRule):
+             LOAD_V_SHARED = False
+             LOAD_V_VEC = 4
+             LOAD_V_TILE = 4
++        elif target.kind.name in ("opencl", "vulkan") and "intel_gen9" in str(target.attrs):
++            # Intel Gen9: like skinny_n4 in gen9-gpu-blas, a work-item owns consecutive columns
++            # (lanes along N), few threads along K; 64 x 4 = 256 threads.
++            TAG_S, TAG_R = "threadIdx.x", "threadIdx.y"
++            VEC_C = 4
++            UNROLL = 8
++            TS, TR = 64, 4
++            LOAD_V_SHARED = False
++            LOAD_V_VEC = 4
++            LOAD_V_TILE = 1
+         else:
+             return None
+ 
+diff --git a/python/tvm/s_tir/dlight/gpu/low_batch_gemv.py b/python/tvm/s_tir/dlight/gpu/low_batch_gemv.py
+index 3b0653cec..0a39e9531 100644
+--- a/python/tvm/s_tir/dlight/gpu/low_batch_gemv.py
++++ b/python/tvm/s_tir/dlight/gpu/low_batch_gemv.py
+@@ -586,6 +586,18 @@ class LowBatchGEMV(GPUScheduleRule):
+                     TS, TR = 4, 32
+                 else:
+                     TS, TR = 16, 32
++        elif target.kind.name in ("opencl", "vulkan") and "intel_gen9" in str(target.attrs):
++            # Intel Gen9: same row-stream constants as GEMV; each thread owns TILE_S = 2 rows x bucket
++            # batch accumulators (<= 8 floats per lane, well below the ~128 B/lane spill limit).
++            VEC_C = 4
++            LOAD_V_SHARED = False
++            LOAD_V_VEC = -1
++            UNROLL = 16
++            if isinstance(len_s, int):
++                if len_s > len_r:
++                    TS, TR = 2, 128
++                else:
++                    TS, TR = 4, 64
+         elif target.kind.name == "opencl" and "mali" in str(target.attrs):
+             VEC_C = 8
+             LOAD_V_SHARED = False
+diff --git a/python/tvm/s_tir/dlight/gpu/matmul.py b/python/tvm/s_tir/dlight/gpu/matmul.py
+index 42299c2a1..5db466510 100644
+--- a/python/tvm/s_tir/dlight/gpu/matmul.py
++++ b/python/tvm/s_tir/dlight/gpu/matmul.py
+@@ -521,6 +521,27 @@ class Matmul(GPUScheduleRule):
+                 storage_align=False,
+                 inner_x=True,
+             )
++        elif target.kind.name in ("opencl", "vulkan") and "intel_gen9" in str(target.attrs):
++            # Intel Gen9: 64 x 64 output tile per work-group (CLBlast's tuned MWG = NWG = 64 on the
++            # UHD 620), 16 x 8 = 128 threads, 4 x 8 = 32 FP32 accumulators per thread (128 B per lane:
++            # the largest private array IGC 24.35 keeps in registers), 16 B vector loads into shared
++            # memory (one 64 B line per SIMD-4 group of lanes), padded shared rows (stride-2 SLM reads
++            # run at about half speed). use_shared is a candidate: CLBlast picks no local memory on the
++            # UHD 620; sweep both.
++            return Matmul.Config(
++                block_size_x=16,
++                block_size_y=8,
++                vthread_x=1,
++                vthread_y=1,
++                micro_size_x=4,
++                micro_size_y=8,
++                micro_size_k=16,
++                vector_size=4,
++                unroll=64,
++                use_shared=True,
++                storage_align=True,
++                inner_x=False,
++            )
+         else:
+             return Matmul.Config()
+ 
