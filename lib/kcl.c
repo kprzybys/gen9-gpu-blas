@@ -877,7 +877,7 @@ static cl_int enqueue_(cl_command_queue q, cl_kernel k, cl_uint dim, const size_
         kbo *cb = consts[k->prog];
         if (!cb || !tab) { fprintf(stderr, "kcl: %s: constants through bti %d but no constant buffer\n", o->name, o->const_bti); return CL_INVALID_KERNEL; }
         add_bo(cb);
-        const uint64_t len = ((kcl_programs[k->prog].nconstants + 3) & ~3ull) - 1;
+        const uint64_t len = ((dev.progs[k->prog].nconstants + 3) & ~3ull) - 1;
         struct GFX9_RENDER_SURFACE_STATE ss = { .SurfaceType = SURFTYPE_BUFFER, .SurfaceFormat = 0x1ff /* RAW */,
             .SurfaceVerticalAlignment = VALIGN_4, .TileMode = LINEAR, .MOCS = MOCS_WB,
             .Width = len & 0x7f, .Height = (len >> 7) & 0x3fff, .Depth = (len >> 21) & 0x7ff,

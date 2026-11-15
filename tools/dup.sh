@@ -6,7 +6,7 @@ set -eu
 cd "$(git -C "$(dirname "$0")" rev-parse --show-toplevel)"
 OUT=${1:-${TMPDIR:-/tmp}/jscpd-$$}; mkdir -p "$OUT"
 npx --yes jscpd@4.0.5 --silent --min-tokens 70 --formats-exts "c:c,h,cl;cpp:cpp,hpp;python:py;bash:sh" \
-  --ignore "asm/*.cl,lib/kernels/dgemm.cl,**/third_party/**,**/results/**,**/research_notes/**,**/reports/**,**/build/**,**/kcl_build/**,**/*_kernels.c,**/kernels.c" \
+  --ignore "**/.venv/**,**/target/**,asm/*.cl,lib/kernels/dgemm.cl,**/third_party/**,**/results/**,**/research_notes/**,**/reports/**,**/build/**,**/kcl_build/**,**/*_kernels.c,**/kernels.c" \
   --reporters json --output "$OUT" . > /dev/null
 python3 - "$OUT/jscpd-report.json" <<'PY'
 import json, sys, collections

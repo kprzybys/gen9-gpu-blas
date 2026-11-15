@@ -1,0 +1,76 @@
+# refactor metrics  57fc567-dirty  2026-11-15
+
+## size (tokei, code lines)
+ C                        49         9051         7984          655          412
+ C++                       6         2437         2116          227           94
+ C Header                 18         2328         2058          211           59
+ Language              Files        Lines         Code     Comments       Blanks
+ Makefile                  4          258          177           54           27
+ OpenCL                   34         8020         7731            0          289
+ Python                  131        13529        11834          271         1424
+ Shell                    43         1398         1103          268           27
+ Total                   285        37021        33003         1686         2332
+
+## cross-directory code edges (tools/depgraph.py --dirs)
+asm            -> .                 1
+asm            -> bench             3
+asm            -> experiments       2
+asm            -> lib               7
+asr            -> .                 2
+asr            -> bench             2
+asr            -> mel               1
+bench          -> .                 3
+bench          -> asm              38
+bench          -> emb               2
+bench          -> experiments       3
+bench          -> lib              60
+dec            -> asm               2
+dec            -> lib               6
+emb            -> asm               3
+emb            -> bench             1
+emb            -> lib               6
+experiments    -> asm               8
+experiments    -> bench             5
+experiments    -> lib              20
+ggml-backend   -> lib               2
+ina            -> asm               3
+ina            -> bench             1
+ina            -> lib               7
+lib            -> asm              18
+lib            -> bench            11
+lib            -> experiments       8
+mel            -> .                 1
+mel            -> lib               1
+scripts        -> .                 1
+scripts        -> bench             1
+scripts        -> experiments       1
+scripts        -> lib               2
+silero         -> asm               4
+silero         -> lib              11
+tools          -> .                 1
+tools          -> asm               2
+tools          -> bench             2
+tools          -> bindings          3
+tools          -> experiments       4
+tools          -> ina               1
+tools          -> lib              11
+
+## edges breaking repo order (tools/depgraph.py --check)
+edges breaking repo deps: 0
+
+## kernels (tools/kernels.py)
+TOTAL                                        325  222    103     138
+kernel names defined in >1 file: 50
+
+## duplication (tools/dup.sh)
+lines 32097  duplicated 1279 (4.0 %)  clones 148
+  bash      1355 lines      0 dup (0.0 %)  0 clones
+  c        16832 lines    900 dup (5.3 %)  106 clones
+  cpp        512 lines     39 dup (7.6 %)  5 clones
+
+## portability
+Makefiles: 4   CMakeLists: 10
+copies of lib/kcl.c compiled into other targets: 1 (targets linking lib/libkcl.a: 1)
+home paths / host names in code: 89 lines in 32 files
+abspath defines in Makefiles: 2
+fixed device/ocloc target (-device whl, PCI ids): 16 lines in 6 files
