@@ -13,7 +13,7 @@ authors:
     orcid: 0009-0001-9311-2022
     affiliation: 1
 affiliations:
-  - name: TODO (affiliation, to be confirmed by the author)
+  - name: Liceum i Technikum Infotech, Poland
     index: 1
 date: 15 November 2026
 bibliography: paper.bib
