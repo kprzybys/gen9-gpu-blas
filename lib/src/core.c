@@ -20,6 +20,7 @@ double last_ms;
 int profile;   // GEN9BLAS_PROFILE=1: profiling queue, kernel times
 int last_zc;
 char errbuf[1200];
+int gst;
 static clHostMemAllocINTEL_fn usm_alloc;          // cl_intel_unified_shared_memory (see get_obj())
 clMemBlockingFreeINTEL_fn usm_free;
 static clGetMemAllocInfoINTEL_fn usm_info;
@@ -37,14 +38,14 @@ static __attribute__((unused)) unsigned char *load_file(const char *p, size_t *l
 static int program_bin(const char *dir, const char *file, const char *kernel, cl_kernel *k) {
 #ifndef GEN9BLAS_NEO   // built-in kernels (kernels.c, generated at build time from the same files)
     (void)dir; cl_program pr; cl_int err;
-    if (kcl_program(file, NULL, &pr) != CL_SUCCESS) FAIL("no built-in program %s", file);
+    if (kcl_program(file, NULL, &pr) != CL_SUCCESS) FAILC(GEN9BLAS_ERR_UNSUPPORTED, "no built-in program %s", file);
     *k = clCreateKernel(pr, kernel, &err); CHECK(err);
     return 0;
 #else
     char p[1024]; size_t len; cl_int err, bst;
     snprintf(p, sizeof p, "%s/%s", dir, file);
     unsigned char *bin = load_file(p, &len);
-    if (!bin) FAIL("missing %.900s (build: make -C asm)", p);
+    if (!bin) FAILC(GEN9BLAS_ERR_UNSUPPORTED, "missing %.900s (build: make -C asm)", p);
     cl_program pb = clCreateProgramWithBinary(ctx, 1, &dev, &len, (const unsigned char **)&bin, &bst, &err);
     free(bin); CHECK(err); CHECK(bst); CHECK(clBuildProgram(pb, 1, &dev, "", NULL, NULL));
     *k = clCreateKernel(pb, kernel, &err); CHECK(err);
@@ -55,16 +56,16 @@ static int program_bin(const char *dir, const char *file, const char *kernel, cl
 static int program_src(const char *dir, const char *file, const char *options, cl_program *pr) {
 #ifndef GEN9BLAS_NEO
     (void)dir;
-    if (kcl_program(file, options, pr) != CL_SUCCESS) FAIL("no built-in program %s [%s]", file, options);
+    if (kcl_program(file, options, pr) != CL_SUCCESS) FAILC(GEN9BLAS_ERR_UNSUPPORTED, "no built-in program %s [%s]", file, options);
     return 0;
 #else
     char p[1024]; size_t len; cl_int err;
     snprintf(p, sizeof p, "%s/%s", dir, file);
     char *src = (char *)load_file(p, &len);
-    if (!src) FAIL("missing %.900s", p);
+    if (!src) FAILC(GEN9BLAS_ERR_UNSUPPORTED, "missing %.900s", p);
     *pr = clCreateProgramWithSource(ctx, 1, (const char **)&src, NULL, &err); free(src); CHECK(err);
     if (clBuildProgram(*pr, 1, &dev, options, NULL, NULL) != CL_SUCCESS) {
-        clGetProgramBuildInfo(*pr, dev, CL_PROGRAM_BUILD_LOG, sizeof errbuf, errbuf, NULL); return -1;
+        clGetProgramBuildInfo(*pr, dev, CL_PROGRAM_BUILD_LOG, sizeof errbuf, errbuf, NULL); return ERR_RET;
     }
     return 0;
 #endif
@@ -81,7 +82,7 @@ static int init_l12(const char *dir) {
         if (gen8 && i == 0) continue;
         cl_program pr; const char *suf = "hfd" + i, *opc[3] = { "-cl-std=CL3.0 -DHALF", "-cl-std=CL3.0", "-cl-std=CL3.0 -DDBL" };
         char n[32], sf[2] = { *suf, 0 };
-        if (program_src(dir, "level12.cl", opc[i], &pr)) return -1;
+        if (program_src(dir, "level12.cl", opc[i], &pr)) return ERR_RET;
         l12_t *k = &L12[i]; k->es = i == 0 ? 2 : i == 1 ? 4 : 8; suf = sf;
         struct { const char *n; cl_kernel *k; } t[] = { { "axpy", &k->axpy }, { "scal", &k->scal }, { "copy", &k->copy }, { "copy16", &k->copy16 },
             { "rot", &k->rot }, { "red", &k->red }, { "iamax", &k->iamax }, { "gemv_n", &k->gemv_n }, { "gemv_nw", &k->gemv_nw },
@@ -126,13 +127,13 @@ static int init_impl(const char *dir) {
 #endif
     cl_program ph, ps, pd;
     if (program_src(dir, "hgemm.cl", "", &ph) || program_src(dir, "sgemm.cl", "", &ps) ||
-        program_src(dir, "dgemm.cl", "", &pd)) return -1;
+        program_src(dir, "dgemm.cl", "", &pd)) return ERR_RET;
     usm_alloc = (clHostMemAllocINTEL_fn)clGetExtensionFunctionAddressForPlatform(plat, "clHostMemAllocINTEL");
     usm_free = (clMemBlockingFreeINTEL_fn)clGetExtensionFunctionAddressForPlatform(plat, "clMemBlockingFreeINTEL");
     usm_info = (clGetMemAllocInfoINTEL_fn)clGetExtensionFunctionAddressForPlatform(plat, "clGetMemAllocInfoINTEL");
     usm_arg = (clSetKernelArgMemPointerINTEL_fn)clGetExtensionFunctionAddressForPlatform(plat, "clSetKernelArgMemPointerINTEL");
-    if (!usm_alloc || !usm_free || !usm_info || !usm_arg) FAIL("missing cl_intel_unified_shared_memory extension");
-    if (init_l12(dir)) return -1;
+    if (!usm_alloc || !usm_free || !usm_info || !usm_arg) FAILC(GEN9BLAS_ERR_UNSUPPORTED, "missing cl_intel_unified_shared_memory extension");
+    if (init_l12(dir)) return ERR_RET;
     KER(ph, "pk_a3_f32", k_pa3_f32); KER(ph, "gen9blas_epilog_hf", k_epi_hf); KER(ph, "gen9blas_swiglu_pack_a3", k_swiglu);   // F16 weights x F32 activations
     { cl_int e4; k_dequant = clCreateKernel(ph, "gen9blas_dequant_b16", &e4); if (e4) k_dequant = NULL; }
     { cl_int e5; k_dequant2 = clCreateKernel(ph, "gen9blas_dequant_b16s", &e5); if (e5) k_dequant2 = NULL; }
@@ -177,7 +178,7 @@ static int init_impl(const char *dir) {
         if (gen8 && t[i].es == 2) continue;   // FP16: not on Gen8 yet
         type_t *r = &types[t[i].r]; char n[64];
         const char *bin = gen8 ? NULL : t[i].bin;   // Gen8: sgemm_v from sgemm.cl (same arguments as gen_s.bin)
-        if (bin ? program_bin(dir, bin, t[i].k, &r->main) : 0) return -1;
+        if (bin ? program_bin(dir, bin, t[i].k, &r->main) : 0) return ERR_RET;
         if (!bin) KER(t[i].pr, t[i].k, r->main);
         KER(t[i].pr, t[i].pa, r->pa); KER(t[i].pr, t[i].pb, r->pb); KER(t[i].pr, t[i].epi, r->epi);
         KER(t[i].pr, t[i].tri, r->epi_tri);
@@ -213,7 +214,7 @@ static void init_run(void) {
 }
 int gen9blas_init(void) {
     pthread_once(&init_once, init_run);
-    if (init_status) { snprintf(errbuf, sizeof errbuf, "%s", init_err); return -1; }
+    if (init_status) { snprintf(errbuf, sizeof errbuf, "%s", init_err); gst = GEN9BLAS_ERR_NO_DEVICE; return gst; }
     return 0;
 }
 int gen9blas_version(void) { return GEN9BLAS_VERSION; }
@@ -238,7 +239,7 @@ int gen9blas_has(int f) {
 // on the CPU (~6 W). Marker + clFlush, then polling the state every 20 µs .. 0.5 ms. GEN9BLAS_WAIT=busy: clFinish.
 int wait_gpu(void) {
 #ifndef GEN9BLAS_NEO   // kcl: submit the batch buffer and GEM_WAIT (sleeps in the Linux kernel until the GPU interrupt)
-    if (kcl_wait() != CL_SUCCESS) FAIL("GPU execution error (kcl)");
+    if (kcl_wait() != CL_SUCCESS) FAILC(GEN9BLAS_ERR, "GPU execution error (kcl)");
     return 0;
 #else
     static int busy = -1;
@@ -251,7 +252,7 @@ int wait_gpu(void) {
         if (ns < 500000) ns *= 2;
     }
     clReleaseEvent(e);
-    if (st < 0) FAIL("GPU execution error (%d)", st);
+    if (st < 0) FAILC(GEN9BLAS_ERR, "GPU execution error (%d)", st);
     return 0;
 #endif
 }
@@ -288,7 +289,7 @@ void *gen9blas_alloc(size_t bytes) {
     cl_int err;
     if (!usm_alloc && gen9blas_init()) return NULL;   // initializes on first use
     void *p = usm_alloc(ctx, NULL, bytes ? bytes : 1, 4096, &err);
-    if (err != CL_SUCCESS) { snprintf(errbuf, sizeof errbuf, "clHostMemAllocINTEL(%zu) = %d", bytes, err); return NULL; }
+    if (err != CL_SUCCESS) { snprintf(errbuf, sizeof errbuf, "clHostMemAllocINTEL(%zu) = %d", bytes, err); gst = GEN9BLAS_ERR_OUT_OF_MEMORY; return NULL; }
     return p;
 }
 void gen9blas_free(void *p) { if (p && usm_free) usm_free(ctx, p); }
@@ -333,7 +334,7 @@ int get_obj(const void *ptr, size_t bytes, work_t *u, int copy_in, int writes, b
 #else
     (void)writes;
 #endif
-    if (wait_gpu() || ensure_work(u, bytes)) return -1;
+    if (wait_gpu() || ensure_work(u, bytes)) return ERR_RET;
     if (copy_in) memcpy(u->p, ptr, bytes);
     *result = (bf_t){ NULL, u->p }; *zc = 0; return 0;
 }
@@ -360,7 +361,7 @@ cl_int arg_scalar(const type_t *r, cl_kernel k, int i, double v) {
 // End of a call: sleeping wait, then copy of the result to host memory (when it went through a work buffer).
 // UHD 620 shares the LLC with the CPU, and NEO flushes the GPU cache at the end of a job: a result in USM is visible without map/unmap.
 int to_host(bf_t x, int zc, size_t bytes, void *host) {
-    if (wait_gpu()) return -1;
+    if (wait_gpu()) return ERR_RET;
     if (!zc) memcpy(host, x.p, bytes);
     return 0;
 }
@@ -384,3 +385,8 @@ cl_kernel pack_kernel(type_t *r, int roleB, int trans, size_t Rp, size_t Kp, siz
 double gen9blas_last_time_ms(void) { return last_ms; }
 int gen9blas_last_zero_copy(void) { return last_zc; }
 const char *gen9blas_error(void) { return errbuf; }
+int gen9blas_last_status(void) { return gst; }
+int lib_fail(int code, const char *fmt, ...) {   // error text + status for units without the macros (attn.c)
+    va_list ap; va_start(ap, fmt); vsnprintf(errbuf, sizeof errbuf, fmt, ap); va_end(ap);
+    gst = code; return code;
+}

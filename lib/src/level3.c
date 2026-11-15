@@ -12,7 +12,7 @@ static int num_blocks(int n) { const char *e = getenv("GEN9BLAS_BLOCKS"); if (e)
 // sym=0 triangular with zeros (diag=1: unit diagonal); tr=1: transposed result.
 static int full_dev(type_t *r, const void *A, int lda, int n, int uplo, int sym, int diag, int tr) {
     size_t bA = ((size_t)(n - 1) * lda + n) * r->es; bf_t xA; int z;
-    if (ensure_buf(&dT, &sT, (size_t)n * n * r->es) || get_obj(A, bA, &uA, 1, 0, &xA, &z)) return -1;
+    if (ensure_buf(&dT, &sT, (size_t)n * n * r->es) || get_obj(A, bA, &uA, 1, 0, &xA, &z)) return ERR_RET;
     cl_kernel k = r->expand;
     ARGB(k, 0, xA); ARG(k, 1, lda); ARG(k, 2, dT); ARG(k, 3, n); ARG(k, 4, uplo); ARG(k, 5, sym); ARG(k, 6, diag); ARG(k, 7, tr);
     size_t g[2] = { (size_t)(n + 15) / 16 * 16, (size_t)(n + 15) / 16 * 16 }, l[2] = { 16, 16 };
@@ -30,10 +30,10 @@ static int f_times_b(type_t *r, int left, int shape, int M, int N, const void *B
     int Mp = (M + 63) / 64 * 64, Np = (N + 63) / 64 * 64, Kp = left ? Mp : Np;
     if (ensure_buf(&dAp, &sAp, (size_t)Mp * Kp * es + 4096) || ensure_buf(&dBp, &sBp, (size_t)Np * Kp * es + 4096) ||
         ensure_buf(&dCp, &sCp, (size_t)Mp * Np * es))
-        return -1;
+        return ERR_RET;
     if (left) w = pack_dev(r, 0, 0, BM(dT), n, M, M, Mp, Kp, dAp, 0, 0) || pack_host(r, 1, 0, B, ldb, N, M, Np, Kp, dBp);
     else      w = pack_host(r, 0, 0, B, ldb, M, N, Mp, Kp, dAp) || pack_dev(r, 1, 0, BM(dT), n, N, N, Np, Kp, dBp, 0, 0);
-    if (w) return -1;
+    if (w) return ERR_RET;
     int p = shape ? num_blocks(n) : 1, dim = left ? Mp : Np, nb = ((dim + p - 1) / p + 63) / 64 * 64;
     nev = 0;
     for (int i0 = 0; i0 < dim && !w; i0 += nb) {
@@ -48,7 +48,7 @@ static int f_times_b(type_t *r, int left, int shape, int M, int N, const void *B
                         Mp, b, Np, k1 - k0, Kp, 1);
         }
     }
-    if (w || epilogue_host(r, dCp, Np, C, M, N, ldc, alpha, beta, 2)) return -1;
+    if (w || epilogue_host(r, dCp, Np, C, M, N, ldc, alpha, beta, 2)) return ERR_RET;
     { double tz = event_times(); last_ms = tz >= 0 ? tz : (now_s() - t_in) * 1e3; }
     return 0;
 }
@@ -57,7 +57,7 @@ int gen9blas_symm(int type, int side, int uplo, int M, int N, double alpha, cons
              const void *B, int ldb, double beta, void *C, int ldc) {
     CHECK_TYPE(type);
     type_t *r = &types[type]; int left = side == GEN9BLAS_LEFT;
-    if (full_dev(r, A, lda, left ? M : N, uplo, 1, 0, 0)) return -1;
+    if (full_dev(r, A, lda, left ? M : N, uplo, 1, 0, 0)) return ERR_RET;
     return f_times_b(r, left, 0, M, N, B, ldb, alpha, beta, C, ldc);
 }
 
@@ -66,7 +66,7 @@ int gen9blas_trmm(int type, int side, int uplo, int transA, int diag, int M, int
     // B = alpha·op(A)·B (left) or alpha·B·op(A) (right). F = op(A) explicitly (lower when uplo=L xor transA).
     CHECK_TYPE(type);
     type_t *r = &types[type]; int left = side == GEN9BLAS_LEFT, lower = (uplo == GEN9BLAS_LOWER) != (transA != 0);
-    if (full_dev(r, A, lda, left ? M : N, uplo, 0, diag, transA)) return -1;
+    if (full_dev(r, A, lda, left ? M : N, uplo, 0, diag, transA)) return ERR_RET;
     return f_times_b(r, left, lower ? 1 : 2, M, N, B, ldb, alpha, 0.0f, B, ldb);
 }
 
@@ -77,7 +77,7 @@ static int tri_pack(type_t *r, int tX, int N, int K, bf_t X, int ldx, bf_t Y, in
     int es = r->es, Np = (N + 63) / 64 * 64, Kp = (K + r->km - 1) / r->km * r->km;
     if (ensure_buf(&dAp, &sAp, (size_t)Np * Kp * es + 4096) || ensure_buf(&dBp, &sBp, (size_t)Np * Kp * es + 4096) ||
         ensure_buf(&dCp, &sCp, (size_t)Np * Np * es))
-        return -1;
+        return ERR_RET;
     return pack_dev(r, 0, tX, X, ldx, N, K, Np, Kp, dAp, 0, 0) || pack_dev(r, 1, !tX, Y, ldy, N, K, Np, Kp, dBp, 0, 0) ? -1 : 0;
 }
 static int tri_compute(type_t *r, int uplo, int N, int K, double alpha, double beta, void *C, int ldc) {
@@ -89,9 +89,9 @@ static int tri_compute(type_t *r, int uplo, int N, int K, double alpha, double b
         int b = Np - i0 < nb ? Np - i0 : nb;
         int c0 = uplo == GEN9BLAS_LOWER ? 0 : i0, c1 = uplo == GEN9BLAS_LOWER ? i0 + b : Np;
         if (launch(r, dAp, (size_t)i0 * Kp * es, dBp, (size_t)c0 * Kp * es, dCp, ((size_t)i0 * Np + c0) * es,
-                    b, c1 - c0, Np, Kp, Kp, 1)) return -1;
+                    b, c1 - c0, Np, Kp, Kp, 1)) return ERR_RET;
     }
-    if (epilogue_host(r, dCp, Np, C, N, N, ldc, alpha, beta, uplo)) return -1;
+    if (epilogue_host(r, dCp, Np, C, N, N, ldc, alpha, beta, uplo)) return ERR_RET;
     { double tz = event_times(); last_ms = tz >= 0 ? tz : (now_s() - t_in) * 1e3; }
     return 0;
 }
@@ -101,7 +101,7 @@ int gen9blas_syrk(int type, int uplo, int trans, int N, int K, double alpha, con
     CHECK_TYPE(type);
     type_t *r = &types[type];
     size_t bA = (trans ? (size_t)(K - 1) * lda + N : (size_t)(N - 1) * lda + K) * r->es; bf_t xA; int z;
-    if (get_obj(A, bA, &uA, 1, 0, &xA, &z) || tri_pack(r, trans, N, K, xA, lda, xA, lda)) return -1;
+    if (get_obj(A, bA, &uA, 1, 0, &xA, &z) || tri_pack(r, trans, N, K, xA, lda, xA, lda)) return ERR_RET;
     return tri_compute(r, uplo, N, K, alpha, beta, C, ldc);
 }
 
@@ -115,12 +115,12 @@ int gen9blas_syr2k(int type, int uplo, int trans, int N, int K, double alpha, co
     int zA, zB; bf_t xA, xB;
     if (ensure_buf(&dX, &sX, (size_t)N * K2 * es) || ensure_buf(&dY, &sY, (size_t)N * K2 * es) ||
         get_obj(A, bA, &uA, 1, 0, &xA, &zA) || get_obj(B, bB, &uB, 1, 0, &xB, &zB))
-        return -1;
+        return ERR_RET;
     cl_kernel k = r->syr2k_merge;
     ARGB(k, 0, xA); ARG(k, 1, lda); ARGB(k, 2, xB); ARG(k, 3, ldb); ARG(k, 4, dX); ARG(k, 5, dY); ARG(k, 6, K); ARG(k, 7, trans);
     size_t g[2] = { (size_t)K, (size_t)N };
     CHECK(clEnqueueNDRangeKernel(q, k, 2, NULL, g, NULL, 0, NULL, NULL));
-    if (tri_pack(r, 0, N, K2, BM(dX), K2, BM(dY), K2)) return -1;
+    if (tri_pack(r, 0, N, K2, BM(dX), K2, BM(dY), K2)) return ERR_RET;
     return tri_compute(r, uplo, N, K2, alpha, beta, C, ldc);
 }
 
@@ -141,7 +141,7 @@ int gen9blas_trsm(int type, int side, int uplo, int transA, int diag, int M, int
     // A and B for the GPU (B: input and output)
     size_t bA = ((size_t)(n - 1) * lda + n) * es, bB = ((size_t)(M - 1) * ldb + N) * es;
     bf_t xA, xB; int zA, zB; cl_event evi = NULL, evi2 = NULL;
-    if (get_obj(A, bA, &uA, 1, 0, &xA, &zA) || get_obj(B, bB, &uB, 1, 1, &xB, &zB)) return -1;
+    if (get_obj(A, bA, &uA, 1, 0, &xA, &zA) || get_obj(B, bB, &uB, 1, 1, &xB, &zB)) return ERR_RET;
     // TRSM work buffers (kept between calls): L, Y, Y packed, inv(L_ii) packed, R_i packed,
     // block inverses (element type), X and Tm (FP64, inversion)
     static cl_mem Ldv, Yd, Yp, Ip, Rp, Inv, Xd, Tm;
@@ -151,7 +151,7 @@ int gen9blas_trsm(int type, int side, int uplo, int transA, int diag, int M, int
         ensure_buf(&Yp, &sYp, (size_t)mp * np * es + 4096) || ensure_buf(&Ip, &sIp, (size_t)nb * nb * es + 4096) ||
         ensure_buf(&Rp, &sRp, (size_t)mp * nb * es + 4096) || ensure_buf(&Inv, &sInv, blk * es) ||
         ensure_buf(&Xd, &sXd, blk * sizeof(double)) || ensure_buf(&Tm, &sTm, blk * sizeof(double)))
-        return -1;
+        return ERR_RET;
     if (ensure_buf(&dAp, &sAp, (size_t)np * np * es + 4096) || ensure_buf(&dCp, &sCp, (size_t)nb * mp * es)) w = -1;
     if (!w) {   // L = f(A), Y = alpha·R(B), inverses of the L blocks; L packed once
         cl_kernel k = r->tL; int u = uplo;

@@ -46,10 +46,12 @@ libgen9blas_neo.so: $(LIB_DEP)
 
 test: libgen9blas.so
 	python3 test_basic.py
+	python3 test_errors.py
 
 # Builds and runs all 10 test suites in sequence; stops on the first failure.
 check: libgen9blas.so libgen9blas_blas.so
 	python3 test_basic.py
+	python3 test_errors.py
 	python3 test_level3.py
 	python3 test_level12.py
 	python3 test_userptr.py

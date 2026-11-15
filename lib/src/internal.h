@@ -13,6 +13,7 @@
 #include <limits.h>
 #include <pthread.h>
 #include <math.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -24,17 +25,23 @@ typedef struct {
     int es, tn, km, ready;
     int sg;   // work-items per C tile in the main kernel: its subgroup size (16; Gen8 sgemm8_v32: 8)
 } type_t;
-#define CHECK(x) do { cl_int e_ = (x); if (e_ != CL_SUCCESS) { snprintf(errbuf, sizeof errbuf, "%s:%d: %s = %d", __FILE__, __LINE__, #x, e_); return -1; } } while (0)
-#define FAIL(...) do { snprintf(errbuf, sizeof errbuf, __VA_ARGS__); return -1; } while (0)
+// Errors (API 0.2 step 2): FAILC / CHECK write errbuf, set gst (gen9blas_status of the current call) and return it;
+// callers propagate with `return ERR_RET`. gst is reset at the start of each operation (NEW_OPERATION).
+#define FAILC(code, ...) do { snprintf(errbuf, sizeof errbuf, __VA_ARGS__); gst = (code); return gst; } while (0)
+#define FAIL(...) FAILC(GEN9BLAS_ERR, __VA_ARGS__)
+#define CL_STATUS(e) ((e) == CL_OUT_OF_RESOURCES || (e) == CL_OUT_OF_HOST_MEMORY || (e) == CL_MEM_OBJECT_ALLOCATION_FAILURE \
+                      ? GEN9BLAS_ERR_OUT_OF_MEMORY : GEN9BLAS_ERR)
+#define CHECK(x) do { cl_int e_ = (x); if (e_ != CL_SUCCESS) FAILC(CL_STATUS(e_), "%s:%d: %s = %d", __FILE__, __LINE__, #x, e_); } while (0)
+#define ERR_RET (gst < 0 ? gst : GEN9BLAS_ERR)
 #define KER(pr, name, dst) do { cl_int e2_; dst = clCreateKernel(pr, name, &e2_); CHECK(e2_); } while (0)
 typedef struct { cl_kernel axpy, scal, copy, copy16, rot, red, iamax, gemv_n, gemv_nw, gemv_t1, gemv_t1b, gemv_t2, ger, syr2, to_f, from_f, trsv_block, trsv_upd_n, trsv_upd_t, rotm, pmv, psv, spr2, symv1, symv2, skinny_k1, skinny_k4, skinny_k8, skinny_r4, skinny_r8, skinny_n4, skinny_n2; int es; } l12_t;
 typedef struct { cl_mem m; void *p; } bf_t;
 #define BM(x) ((bf_t){ (x), NULL })
 #define ARGB(k, i, b) CHECK(set_arg(k, i, b))
 #ifndef GEN9BLAS_NEO
-#define NEW_OPERATION() kcl_new_operation()
+#define NEW_OPERATION() (gst = 0, kcl_new_operation())
 #else
-#define NEW_OPERATION() ((void)0)
+#define NEW_OPERATION() ((void)(gst = 0))
 #endif
 typedef struct { void *p; size_t n; } work_t;
 #define ARG(k, i, v) CHECK(clSetKernelArg(k, i, sizeof(v), &(v)))
@@ -43,13 +50,13 @@ struct gen9blas_packed_b { int type, K, N, Np, Kp; cl_mem buf; size_t bufsize; }
 #define SPARES 4
 typedef struct { const float *bias; int gelu; const float *R; int ldr; } epi_ext_t;
 struct gen9blas_packed_a { cl_mem buf; size_t cap; int M, K, Kp; };
-#define CHECK_TYPE(type) do { NEW_OPERATION(); if ((type) < 0 || (type) > 3 || !types[type].ready) FAIL("type %d unavailable", type); } while (0)
+#define CHECK_TYPE(type) do { NEW_OPERATION(); if ((type) < 0 || (type) > 3 || !types[type].ready) FAILC(GEN9BLAS_ERR_UNSUPPORTED, "type %d unavailable", type); } while (0)
 #define GROUPS 96         // work-groups (of 256) in reductions: 24 EUs × 4
 #define ARGR(K, i, v) CHECK(argr(K, i, v, k->es))
 #define RS(k) ((k)->es == 8 ? sizeof(double) : sizeof(float))   // size of the compute type
 typedef struct { const void *p; size_t b; bf_t g; int zc; } op_t;
-#define BEGIN(n, ...) l12_t *k; int es; if (l12_type(type, &k, &es)) return -1; if ((n) <= 0) return 0; \
-                     if (__VA_ARGS__) FAIL("vector increment 0")
+#define BEGIN(n, ...) l12_t *k; int es; if (l12_type(type, &k, &es)) return ERR_RET; if ((n) <= 0) return 0; \
+                     if (__VA_ARGS__) FAILC(GEN9BLAS_ERR_INVALID_ARG, "vector increment 0")
 #define SKINNY_S 16   // subgroups per group in skinny_r (like SKINNY_S in level12.cl)
 #pragma GCC visibility push(hidden)
 double now_s(void);
@@ -62,6 +69,8 @@ extern double last_ms;
 extern int profile;
 extern int last_zc;
 extern char errbuf[1200];
+extern int gst;   // gen9blas_status of the current call (gen9blas_last_status)
+int lib_fail(int code, const char *fmt, ...);
 extern clMemBlockingFreeINTEL_fn usm_free;
 extern clSetKernelArgMemPointerINTEL_fn usm_arg;
 extern l12_t L12[3];

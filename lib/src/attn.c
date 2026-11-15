@@ -32,11 +32,12 @@ static attn_bin_t bins[] = {
     { 128, 8, 2, 2, 2, 0, 0, "attn_ernie_tokc.bin", NULL, NULL, 0 },   // PaddleOCR-VL text model (ERNIE 4.5 0.3B, sched4)
 };
 static cl_mem dKt; static size_t sKt;
-static char aerr[512];
-#define AFAIL(...) do { snprintf(aerr, sizeof aerr, __VA_ARGS__); return -1; } while (0)
+// Errors go to the library's error text and status (gen9blas_error / gen9blas_last_status; core.c lib_fail).
+__attribute__((visibility("hidden"))) int lib_fail(int code, const char *fmt, ...);
+#define AFAILC(code, ...) return lib_fail(code, __VA_ARGS__)
+#define AFAIL(...) AFAILC(GEN9BLAS_ERR, __VA_ARGS__)
 #define ACHECK(x) do { cl_int e_ = (x); if (e_ != CL_SUCCESS) AFAIL("%s:%d: %s = %d", __FILE__, __LINE__, #x, e_); } while (0)
 
-const char *gen9blas_attn_error(void) { return aerr; }
 
 // KV-stream binaries (asm/attn.cl -DSTREAMS): grid dimension 1 = stream, per-stream visible counts (gen9blas_attn_f16kv_streams)
 static attn_bin_t sbins[] = {
@@ -56,7 +57,7 @@ static attn_bin_t *find_in(attn_bin_t *tab, size_t n, int D, int H, int HKV) {
                 b->attn = clCreateKernel(pr, "k_attn", &e2);
                 if (e1 == CL_SUCCESS && e2 == CL_SUCCESS) b->state = 1;
             }
-            if (b->state < 0) snprintf(aerr, sizeof aerr, "attention binary %s not in the kernel table", b->bin);
+            if (b->state < 0) lib_fail(GEN9BLAS_ERR_UNSUPPORTED, "attention binary %s not in the kernel table", b->bin);
         }
         return b->state > 0 ? b : NULL;
     }
@@ -82,28 +83,28 @@ static size_t local_size(size_t global) {   // work-group 64 (section 10), small
 int gen9blas_attn_f16kv(int D, int H, int HKV, int nq, int nk, const float *Q, const uint16_t *K, size_t k_bytes,
                         const uint16_t *V, size_t v_bytes, float *O, float scale, int vis0, int dvis, int *launches) {
     attn_bin_t *b = find_bin(D, H, HKV);
-    if (!b) return 1;
+    if (!b) return GEN9BLAS_DECLINED;
     const int G = H / HKV, NK = b->NK;
     // rows (token-major, row = t * G + head) split into whole RQ-row subgroups: every launch slice is a multiple of 8
     // tokens except the last, so 8 * G and nq * G must divide by RQ (G % RQ for the GQA shapes; whisper G 1, RQ 4)
     // (rowvis binaries: the last slice may have n_q*G odd; the kernel rounds the subgroup count up and clamps rows)
     if (nq <= 0 || nk <= 0 || nk % (8 * NK) || vis0 < 1 || (dvis != 0 && dvis != 1) || (8 * G) % b->RQ ||
-        (!b->rowvis && ((long)nq * G) % b->RQ)) return 1;
+        (!b->rowvis && ((long)nq * G) % b->RQ)) return GEN9BLAS_DECLINED;
     // asm/attn.cl without ROWVIS computes the visible key count once per subgroup, from the token of its first row:
     // right only when all RQ rows are one token (G % RQ == 0) or every token sees the same count (dvis 0); G 1 with
     // causal: unsupported. ROWVIS binaries take each row's own count (rows differ by at most dvis * (RQ - 1) keys,
     // all in the last block: RQ <= 2 asserted by attn_gen.py).
-    if (G % b->RQ && dvis != 0 && !b->rowvis) return 1;
-    if (b->plain && (dvis != 0 || (vis0 < nk ? vis0 : nk) % (8 * NK))) return 1;
+    if (G % b->RQ && dvis != 0 && !b->rowvis) return GEN9BLAS_DECLINED;
+    if (b->plain && (dvis != 0 || (vis0 < nk ? vis0 : nk) % (8 * NK))) return GEN9BLAS_DECLINED;
     const size_t row = (size_t)HKV * D * 2;
-    if (k_bytes < (size_t)nk * row || v_bytes < (size_t)nk * row) return 1;
-    if (((uintptr_t)Q | (uintptr_t)K | (uintptr_t)V | (uintptr_t)O) & 15) return 1;   // OWord block reads / writes
+    if (k_bytes < (size_t)nk * row || v_bytes < (size_t)nk * row) return GEN9BLAS_DECLINED;
+    if (((uintptr_t)Q | (uintptr_t)K | (uintptr_t)V | (uintptr_t)O) & 15) return GEN9BLAS_DECLINED;   // OWord block reads / writes
     const size_t ktb = (size_t)nk * row + (size_t)NK * D * 16;
     cl_int err;
     if (sKt < ktb) {
         if (dKt) clReleaseMemObject(dKt);
         dKt = clCreateBuffer(NULL, CL_MEM_READ_WRITE, ktb, NULL, &err);
-        if (err != CL_SUCCESS) { dKt = NULL; sKt = 0; AFAIL("Kt buffer of %zu B: %d", ktb, err); }
+        if (err != CL_SUCCESS) { dKt = NULL; sKt = 0; AFAILC(GEN9BLAS_ERR_OUT_OF_MEMORY, "Kt buffer of %zu B: %d", ktb, err); }
         sKt = ktb;
     }
     cl_command_queue q = NULL;   // kcl: one implicit queue
@@ -111,7 +112,7 @@ int gen9blas_attn_f16kv(int D, int H, int HKV, int nq, int nk, const float *Q, c
     kcl_new_operation();
     cl_mem mK = kcl_userptr(K, k_bytes, 0), mV = kcl_userptr(V, v_bytes, 0);
     cl_mem mQ = kcl_userptr(Q, nq * qrow * 4, 0), mO = kcl_userptr(O, nq * qrow * 4, 1);
-    if (!mK || !mV || !mQ || !mO) { snprintf(aerr, sizeof aerr, "kcl_userptr failed (K/V %zu B: over KCL_USERPTR_MB?)", k_bytes); return 1; }
+    if (!mK || !mV || !mQ || !mO) { lib_fail(GEN9BLAS_DECLINED, "kcl_userptr failed (K/V %zu B: over KCL_USERPTR_MB?)", k_bytes); return GEN9BLAS_DECLINED; }
     size_t gkt = (size_t)nk * HKV * D, lkt = 256;
     ACHECK(clSetKernelArg(b->kt, 0, sizeof mK, &mK)); ACHECK(clSetKernelArg(b->kt, 1, sizeof dKt, &dKt));
     ACHECK(clSetKernelArg(b->kt, 2, sizeof nk, &nk));
@@ -156,29 +157,29 @@ int gen9blas_attn_f16kv_streams(int D, int H, int HKV, int ns, int nq, int nk, c
                                 const int *vis0, int dvis, int *launches) {
     static int visb[1024] __attribute__((aligned(4096)));
     attn_bin_t *b = find_sbin(D, H, HKV);
-    if (!b) return 1;
+    if (!b) return GEN9BLAS_DECLINED;
     const int G = H / HKV, NK = b->NK;
     if (ns < 1 || nq <= 0 || nk <= 0 || nk % (8 * NK) || (dvis != 0 && dvis != 1) || ((long)nq * G) % b->RQ ||
-        (G % b->RQ && dvis != 0)) return 1;
-    for (int st = 0; st < ns; st++) if (vis0[st] < 1) return 1;
+        (G % b->RQ && dvis != 0)) return GEN9BLAS_DECLINED;
+    for (int st = 0; st < ns; st++) if (vis0[st] < 1) return GEN9BLAS_DECLINED;
     const size_t row = (size_t)HKV * D * 2;
     const long qrow = (long)H * D;
-    if (sq < (long)nq * qrow || sk < (long)nk * HKV * D || sv < (long)nk * HKV * D) return 1;
-    if (k_bytes < ((size_t)(ns - 1) * sk + (size_t)nk * HKV * D) * 2 || v_bytes < ((size_t)(ns - 1) * sv + (size_t)nk * HKV * D) * 2) return 1;
-    if (((uintptr_t)Q | (uintptr_t)K | (uintptr_t)V | (uintptr_t)O | (uintptr_t)(sq * 4) | (uintptr_t)(sk * 2) | (uintptr_t)(sv * 2)) & 15) return 1;
+    if (sq < (long)nq * qrow || sk < (long)nk * HKV * D || sv < (long)nk * HKV * D) return GEN9BLAS_DECLINED;
+    if (k_bytes < ((size_t)(ns - 1) * sk + (size_t)nk * HKV * D) * 2 || v_bytes < ((size_t)(ns - 1) * sv + (size_t)nk * HKV * D) * 2) return GEN9BLAS_DECLINED;
+    if (((uintptr_t)Q | (uintptr_t)K | (uintptr_t)V | (uintptr_t)O | (uintptr_t)(sq * 4) | (uintptr_t)(sk * 2) | (uintptr_t)(sv * 2)) & 15) return GEN9BLAS_DECLINED;
     double fl = 0;   // one launch: decline what would be long (the single-stream path splits, this one does not)
     for (int st = 0; st < ns; st++) for (int t = 0; t < nq; t++) { long v = vis0[st] + (long)dvis * t; fl += 4.0 * H * D * (v < nk ? v : nk); }
-    if (fl > 2 * max_flop()) return 1;
+    if (fl > 2 * max_flop()) return GEN9BLAS_DECLINED;
     const long skt = (long)nk * HKV * D;
     const size_t ktb = (size_t)ns * skt * 2 + (size_t)NK * D * 16;
     cl_int err;
     if (sKt < ktb) {
         if (dKt) clReleaseMemObject(dKt);
         dKt = clCreateBuffer(NULL, CL_MEM_READ_WRITE, ktb, NULL, &err);
-        if (err != CL_SUCCESS) { dKt = NULL; sKt = 0; AFAIL("Kt buffer of %zu B: %d", ktb, err); }
+        if (err != CL_SUCCESS) { dKt = NULL; sKt = 0; AFAILC(GEN9BLAS_ERR_OUT_OF_MEMORY, "Kt buffer of %zu B: %d", ktb, err); }
         sKt = ktb;
     }
-    if (ns > 1024) return 1;
+    if (ns > 1024) return GEN9BLAS_DECLINED;
     memcpy(visb, vis0, (size_t)ns * 4);   // read by k_attn through userptr (the previous user waited before returning)
     cl_command_queue q = NULL;
     kcl_new_operation();
@@ -186,7 +187,7 @@ int gen9blas_attn_f16kv_streams(int D, int H, int HKV, int ns, int nq, int nk, c
     cl_mem mK = kcl_userptr(K, k_bytes, 0), mV = kcl_userptr(V, v_bytes, 0);
     cl_mem mQ = kcl_userptr(Q, qb, 0), mO = kcl_userptr(O, qb, 1);
     cl_mem mVis = kcl_userptr(visb, (size_t)ns * 4, 0);
-    if (!mK || !mV || !mQ || !mO || !mVis) { snprintf(aerr, sizeof aerr, "kcl_userptr failed (K/V %zu B)", k_bytes); return 1; }
+    if (!mK || !mV || !mQ || !mO || !mVis) { lib_fail(GEN9BLAS_DECLINED, "kcl_userptr failed (K/V %zu B)", k_bytes); return GEN9BLAS_DECLINED; }
     size_t gkt[2] = { (size_t)nk * HKV * D, (size_t)ns }, lkt[2] = { 256, 1 };
     cl_long a_sk = sk, a_skt = skt, a_sq = sq, a_sv = sv;
     ACHECK(clSetKernelArg(b->kt, 0, sizeof mK, &mK)); ACHECK(clSetKernelArg(b->kt, 1, sizeof dKt, &dKt));

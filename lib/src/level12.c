@@ -10,7 +10,7 @@ static double *red_out;      // reduction results (USM host: the GPU writes, the
 int l12_type(int type, l12_t **k, int *es) {
     NEW_OPERATION();
     int i = type == GEN9BLAS_S ? 1 : type == GEN9BLAS_D ? 2 : type == GEN9BLAS_H || type == GEN9BLAS_HS ? 0 : -1;
-    if (i < 0 || !L12[i].axpy) FAIL("type %d unavailable", type);
+    if (i < 0 || !L12[i].axpy) FAILC(GEN9BLAS_ERR_UNSUPPORTED, "type %d unavailable", type);
     *k = &L12[i]; *es = L12[i].es; return 0;
 }
 // Scalar for a kernel in the compute type R (double for FP64, float for FP16/FP32).
@@ -22,7 +22,7 @@ cl_int argr(cl_kernel K, int i, double v, int es) {
 static work_t *const work_l12[3] = { &uA, &uB, &uC };
 static int load_operands(op_t *w, int n, const int *copy_in, const int *written) {
     for (int i = 0; i < n; i++)
-        if (get_obj(w[i].p, w[i].b, work_l12[i], copy_in[i], written ? written[i] : 0, &w[i].g, &w[i].zc)) return -1;
+        if (get_obj(w[i].p, w[i].b, work_l12[i], copy_in[i], written ? written[i] : 0, &w[i].g, &w[i].zc)) return ERR_RET;
     return 0;
 }
 // Vector region: n elements spaced inc apart. inc < 0 as in BLAS: pointer to the lowest address, element 0 at the end.
@@ -30,7 +30,7 @@ static size_t vec_bytes(int n, int inc, int es) { return ((size_t)(n - 1) * (siz
 static cl_long vec_off(int n, int inc) { return inc < 0 ? (cl_long)(n - 1) * -inc : 0; }
 // End: wait, copy the written non-USM operands back to host memory.
 static int finish(op_t *w, int n, const int *written) {
-    if (wait_gpu()) return -1;
+    if (wait_gpu()) return ERR_RET;
     for (int i = 0; i < n; i++) if (written[i] && !w[i].zc) memcpy((void *)w[i].p, w[i].g.p, w[i].b);
     return 0;
 }
@@ -45,7 +45,7 @@ static int start1(cl_kernel k, int n) {
 int gen9blas_axpy(int type, int n, double a, const void *x, int incx, void *y, int incy) {
     BEGIN(n, !incx || !incy);
     op_t w[2] = { { x, vec_bytes(n, incx, es) }, { y, vec_bytes(n, incy, es) } }; const int cin[2] = { 1, 1 }, cout[2] = { 0, 1 };
-    if (load_operands(w, 2, cin, cout)) return -1;
+    if (load_operands(w, 2, cin, cout)) return ERR_RET;
     cl_long ox = vec_off(n, incx), oy = vec_off(n, incy), ix = incx, iy = incy; cl_kernel K = k->axpy;
     ARG(K, 0, n); ARGR(K, 1, a); ARGB(K, 2, w[0].g); ARG(K, 3, ox); ARG(K, 4, ix); ARGB(K, 5, w[1].g); ARG(K, 6, oy); ARG(K, 7, iy);
     return start4(K, n) || finish(w, 2, cout) ? -1 : 0;
@@ -54,7 +54,7 @@ int gen9blas_axpy(int type, int n, double a, const void *x, int incx, void *y, i
 int gen9blas_scal(int type, int n, double a, void *x, int incx) {
     BEGIN(n, !incx);
     op_t w[1] = { { x, vec_bytes(n, incx, es) } }; const int cin[1] = { 1 };
-    if (load_operands(w, 1, cin, cin)) return -1;
+    if (load_operands(w, 1, cin, cin)) return ERR_RET;
     cl_long ox = vec_off(n, incx), ix = incx; cl_kernel K = k->scal;
     ARG(K, 0, n); ARGR(K, 1, a); ARGB(K, 2, w[0].g); ARG(K, 3, ox); ARG(K, 4, ix);
     return start4(K, n) || finish(w, 1, cin) ? -1 : 0;
@@ -64,7 +64,7 @@ int gen9blas_copy(int type, int n, const void *x, int incx, void *y, int incy) {
     BEGIN(n, !incx || !incy);
     // y is also copied into the work buffer for COPY: with increment > 1 the gaps between elements must stay unchanged
     op_t w[2] = { { x, vec_bytes(n, incx, es) }, { y, vec_bytes(n, incy, es) } }; const int cin[2] = { 1, incy != 1 && incy != -1 }, cout[2] = { 0, 1 };
-    if (load_operands(w, 2, cin, cout)) return -1;
+    if (load_operands(w, 2, cin, cout)) return ERR_RET;
     cl_long ox = vec_off(n, incx), oy = vec_off(n, incy), ix = incx, iy = incy;
     if (incx == 1 && incy == 1) {   // 16 B per lane in every type (copy16): FP64 17 -> 24 GB/s
         // FP16: the compiler turns vload8/vstore8 of half into SIMD8 with 4 B byte reads (16 GB/s) -- copying does not depend
@@ -83,7 +83,7 @@ int gen9blas_copy(int type, int n, const void *x, int incx, void *y, int incy) {
 static int rot(int type, int n, void *x, int incx, void *y, int incy, double c, double s, int swap_flag) {
     BEGIN(n, !incx || !incy);
     op_t w[2] = { { x, vec_bytes(n, incx, es) }, { y, vec_bytes(n, incy, es) } }; const int cin[2] = { 1, 1 };
-    if (load_operands(w, 2, cin, cin)) return -1;
+    if (load_operands(w, 2, cin, cin)) return ERR_RET;
     cl_long ox = vec_off(n, incx), oy = vec_off(n, incy), ix = incx, iy = incy; cl_kernel K = k->rot;
     ARG(K, 0, n); ARGB(K, 1, w[0].g); ARG(K, 2, ox); ARG(K, 3, ix); ARGB(K, 4, w[1].g); ARG(K, 5, oy); ARG(K, 6, iy);
     ARGR(K, 7, c); ARGR(K, 8, s); ARG(K, 9, swap_flag);
@@ -99,7 +99,7 @@ int gen9blas_rotm(int type, int n, void *x, int incx, void *y, int incy, const d
     else { h11 = param[1]; h21 = -1; h12 = 1; h22 = param[4]; }
     BEGIN(n, !incx || !incy);
     op_t w[2] = { { x, vec_bytes(n, incx, es) }, { y, vec_bytes(n, incy, es) } }; const int cin[2] = { 1, 1 };
-    if (load_operands(w, 2, cin, cin)) return -1;
+    if (load_operands(w, 2, cin, cin)) return ERR_RET;
     cl_long ox = vec_off(n, incx), oy = vec_off(n, incy), ix = incx, iy = incy; cl_kernel K = k->rotm;
     ARG(K, 0, n); ARGB(K, 1, w[0].g); ARG(K, 2, ox); ARG(K, 3, ix); ARGB(K, 4, w[1].g); ARG(K, 5, oy); ARG(K, 6, iy);
     ARGR(K, 7, h11); ARGR(K, 8, h12); ARGR(K, 9, h21); ARGR(K, 10, h22);
@@ -165,14 +165,14 @@ int gen9blas_swap(int type, int n, void *x, int incx, void *y, int incy) { retur
 int gen9blas_rot(int type, int n, void *x, int incx, void *y, int incy, double c, double s) { return rot(type, n, x, incx, y, incy, c, s, 0); }
 
 static int alloc_red_out(void) {
-    if (!red_out && !(red_out = gen9blas_alloc(2 * GROUPS * sizeof(double)))) return -1;
+    if (!red_out && !(red_out = gen9blas_alloc(2 * GROUPS * sizeof(double)))) return ERR_RET;
     return 0;
 }
 static int reduction(int type, int mode, int n, const void *x, int incx, const void *y, int incy, double *result) {
     *result = 0;
     BEGIN(n, !incx || (mode == 0 && !incy));
     op_t w[2] = { { x, vec_bytes(n, incx, es) }, { y, mode == 0 ? vec_bytes(n, incy, es) : 0 } }; const int cin[2] = { 1, 1 };
-    if (load_operands(w, mode == 0 ? 2 : 1, cin, NULL) || alloc_red_out()) return -1;
+    if (load_operands(w, mode == 0 ? 2 : 1, cin, NULL) || alloc_red_out()) return ERR_RET;
     if (mode) { w[1] = w[0]; incy = incx; }
     int g = (n + 255) / 256 < GROUPS ? (n + 255) / 256 : GROUPS;
     cl_long ox = vec_off(n, incx), oy = vec_off(n, incy), ix = incx, iy = incy; cl_kernel K = k->red;
@@ -180,7 +180,7 @@ static int reduction(int type, int mode, int n, const void *x, int incx, const v
     CHECK(usm_arg(K, 8, red_out));
     size_t G = (size_t)g * 256, Lw = 256;
     CHECK(clEnqueueNDRangeKernel(q, K, 1, NULL, &G, &Lw, 0, NULL, NULL));
-    if (wait_gpu()) return -1;
+    if (wait_gpu()) return ERR_RET;
     double s = 0; for (int i = 0; i < g; i++) s += red_out[i];
     *result = mode == 2 ? sqrt(s) : s;
     return 0;
@@ -193,13 +193,13 @@ int gen9blas_iamax(int type, int n, const void *x, int incx, long *result) {
     *result = -1;
     BEGIN(n, !incx);
     op_t w[1] = { { x, vec_bytes(n, incx, es) } }; const int cin[1] = { 1 };
-    if (load_operands(w, 1, cin, NULL) || alloc_red_out()) return -1;
+    if (load_operands(w, 1, cin, NULL) || alloc_red_out()) return ERR_RET;
     int g = (n + 255) / 256 < GROUPS ? (n + 255) / 256 : GROUPS;
     cl_long ox = vec_off(n, incx), ix = incx; cl_kernel K = k->iamax;
     ARG(K, 0, n); ARGB(K, 1, w[0].g); ARG(K, 2, ox); ARG(K, 3, ix); CHECK(usm_arg(K, 4, red_out));
     size_t G = (size_t)g * 256, Lw = 256;
     CHECK(clEnqueueNDRangeKernel(q, K, 1, NULL, &G, &Lw, 0, NULL, NULL));
-    if (wait_gpu()) return -1;
+    if (wait_gpu()) return ERR_RET;
     // values in the compute type (float or double), int indices after the 96 values
     const int *ci = (const int *)((const char *)red_out + GROUPS * RS(k));
     double cv[GROUPS];
@@ -234,7 +234,7 @@ static int gemv_inner(l12_t *k, int trans, int M, int N, double alpha, bf_t A, i
     int cols4 = (N + 3) / 4, parts = (16384 + cols4 - 1) / cols4;   // ~16 thousand work-items
     if (parts > M) parts = M;
     int rpp = (M + parts - 1) / parts; parts = (M + rpp - 1) / rpp;
-    if (ensure_buf(&dP, &sP, (size_t)parts * N * RS(k))) return -1;
+    if (ensure_buf(&dP, &sP, (size_t)parts * N * RS(k))) return ERR_RET;
     cl_kernel K;
     if (k->es == 2 && !mode && !unit) {   // FP16, full matrix: block reads (gemv_t1b; results/message-16B-...)
         K = k->gemv_t1b;
@@ -255,12 +255,12 @@ static int gemv_inner(l12_t *k, int trans, int M, int N, double alpha, bf_t A, i
 int gen9blas_gemv(int type, int trans, int M, int N, double alpha, const void *A, int lda, const void *x, int incx,
              double beta, void *y, int incy) {
     BEGIN(M < N ? M : N, !incx || !incy);
-    if (lda < N) FAIL("lda < N");
+    if (lda < N) FAILC(GEN9BLAS_ERR_INVALID_ARG, "lda < N");
     int nx = trans ? M : N, ny = trans ? N : M;
     op_t w[3] = { { A, ((size_t)(M - 1) * lda + N) * es }, { x, vec_bytes(nx, incx, es) }, { y, vec_bytes(ny, incy, es) } };
     const int cin[3] = { 1, 1, beta != 0.0f || (incy != 1 && incy != -1) }, cout[3] = { 0, 0, 1 };
-    if (load_operands(w, 3, cin, cout)) return -1;
-    if (gemv_inner(k, trans, M, N, alpha, w[0].g, lda, w[1].g, vec_off(nx, incx), incx, beta, w[2].g, vec_off(ny, incy), incy, 0, 0)) return -1;
+    if (load_operands(w, 3, cin, cout)) return ERR_RET;
+    if (gemv_inner(k, trans, M, N, alpha, w[0].g, lda, w[1].g, vec_off(nx, incx), incx, beta, w[2].g, vec_off(ny, incy), incy, 0, 0)) return ERR_RET;
     return finish(w, 3, cout);
 }
 
@@ -271,14 +271,14 @@ size_t sQ;
 int gen9blas_symv(int type, int uplo, int n, double alpha, const void *A, int lda, const void *x, int incx,
              double beta, void *y, int incy) {
     BEGIN(n, !incx || !incy);
-    if (lda < n) FAIL("lda < n");
+    if (lda < n) FAILC(GEN9BLAS_ERR_INVALID_ARG, "lda < n");
     op_t w[3] = { { A, ((size_t)(n - 1) * lda + n) * es }, { x, vec_bytes(n, incx, es) }, { y, vec_bytes(n, incy, es) } };
     const int cin[3] = { 1, 1, beta != 0.0f || (incy != 1 && incy != -1) }, cout[3] = { 0, 0, 1 };
-    if (load_operands(w, 3, cin, cout)) return -1;
+    if (load_operands(w, 3, cin, cout)) return ERR_RET;
     int upper = uplo == GEN9BLAS_UPPER, cols4 = (n + 3) / 4, parts = (16384 + cols4 - 1) / cols4, ng = (n + 63) / 64;
     if (parts > n) parts = n;
     int rpp = (n + parts - 1) / parts; parts = (n + rpp - 1) / rpp;
-    if (ensure_buf(&dP, &sP, (size_t)parts * n * RS(k)) || ensure_buf(&dQ, &sQ, (size_t)ng * n * RS(k))) return -1;
+    if (ensure_buf(&dP, &sP, (size_t)parts * n * RS(k)) || ensure_buf(&dQ, &sQ, (size_t)ng * n * RS(k))) return ERR_RET;
     cl_long oa = 0, ox = vec_off(n, incx), oy = vec_off(n, incy), ix = incx, iy = incy;
     cl_kernel K = k->symv1;
     ARG(K, 0, n); ARG(K, 1, rpp); ARG(K, 2, upper); ARGB(K, 3, w[0].g); ARG(K, 4, oa); ARG(K, 5, lda); ARGB(K, 6, w[1].g);
@@ -289,7 +289,7 @@ int gen9blas_symv(int type, int uplo, int n, double alpha, const void *A, int ld
     K = k->symv2;
     ARG(K, 0, n); ARG(K, 1, parts); ARG(K, 2, upper); ARG(K, 3, dP); ARG(K, 4, dQ); ARGR(K, 5, alpha); ARGR(K, 6, beta);
     ARGB(K, 7, w[2].g); ARG(K, 8, oy); ARG(K, 9, iy);
-    if (start1(K, n)) return -1;
+    if (start1(K, n)) return ERR_RET;
     return finish(w, 3, cout);
 }
 
@@ -299,13 +299,13 @@ static size_t sTv, sXf;
 // TRMV: x = op(A)·x, A triangular n×n (uplo; diag = 1: unit diagonal). The result goes to a buffer, then is copied to x.
 int gen9blas_trmv(int type, int uplo, int trans, int diag, int n, const void *A, int lda, void *x, int incx) {
     BEGIN(n, !incx);
-    if (lda < n) FAIL("lda < n");
+    if (lda < n) FAILC(GEN9BLAS_ERR_INVALID_ARG, "lda < n");
     op_t w[2] = { { A, ((size_t)(n - 1) * lda + n) * es }, { x, vec_bytes(n, incx, es) } };
     const int cin[2] = { 1, 1 }, cout[2] = { 0, 1 };
-    if (load_operands(w, 2, cin, cout) || ensure_buf(&dTv, &sTv, (size_t)n * es)) return -1;
+    if (load_operands(w, 2, cin, cout) || ensure_buf(&dTv, &sTv, (size_t)n * es)) return ERR_RET;
     int upper = uplo == GEN9BLAS_UPPER, mode = diag ? (upper ? 4 : 3) : (upper ? 2 : 1);
     cl_long ox = vec_off(n, incx), ix = incx, z = 0, j = 1;
-    if (gemv_inner(k, trans, n, n, 1.0f, w[0].g, lda, w[1].g, ox, incx, 0.0f, BM(dTv), 0, 1, mode, diag)) return -1;
+    if (gemv_inner(k, trans, n, n, 1.0f, w[0].g, lda, w[1].g, ox, incx, 0.0f, BM(dTv), 0, 1, mode, diag)) return ERR_RET;
     cl_kernel K = k->copy;
     ARG(K, 0, n); ARG(K, 1, dTv); ARG(K, 2, z); ARG(K, 3, j); ARGB(K, 4, w[1].g); ARG(K, 5, ox); ARG(K, 6, ix);
     return start4(K, n) || finish(w, 2, cout) ? -1 : 0;
@@ -316,15 +316,15 @@ int gen9blas_trmv(int type, int uplo, int trans, int diag, int n, const void *A,
 // op(A) lower: forward. (A single-launch version without global synchronization: slower, docs/pitfalls.md.)
 int gen9blas_trsv(int type, int uplo, int trans, int diag, int n, const void *A, int lda, void *x, int incx) {
     BEGIN(n, !incx);
-    if (lda < n) FAIL("lda < n");
+    if (lda < n) FAILC(GEN9BLAS_ERR_INVALID_ARG, "lda < n");
     op_t w[2] = { { A, ((size_t)(n - 1) * lda + n) * es }, { x, vec_bytes(n, incx, es) } };
     const int cin[2] = { 1, 1 }, cout[2] = { 0, 1 };
-    if (load_operands(w, 2, cin, cout) || ensure_buf(&dXf, &sXf, (size_t)n * RS(k))) return -1;
+    if (load_operands(w, 2, cin, cout) || ensure_buf(&dXf, &sXf, (size_t)n * RS(k))) return ERR_RET;
     cl_long ox = vec_off(n, incx), ix = incx, oa = 0;
     int lower = (uplo == GEN9BLAS_LOWER) != (trans != 0), tr = trans != 0, dg = diag != 0;
     cl_kernel K = k->to_f;
     ARG(K, 0, n); ARGB(K, 1, w[1].g); ARG(K, 2, ox); ARG(K, 3, ix); ARG(K, 4, dXf);
-    if (start1(K, n)) return -1;
+    if (start1(K, n)) return ERR_RET;
     const int nb = 256, nbl = (n + nb - 1) / nb;   // = NBT in level12.cl
     static int prof = -1; if (prof < 0) prof = getenv("GEN9BLAS_PROFILE") != NULL;
     cl_event ev[2 * 1024]; int ne = 0;
@@ -344,7 +344,7 @@ int gen9blas_trsv(int type, int uplo, int trans, int diag, int n, const void *A,
         CHECK(clEnqueueNDRangeKernel(q, K, 1, NULL, &g, &l, 0, NULL, prof ? &ev[ne++] : NULL));
     }
     if (prof) {   // GEN9BLAS_PROFILE=1: kernel times (diagonal blocks / updates) and the gaps between them
-        if (wait_gpu()) return -1;
+        if (wait_gpu()) return ERR_RET;
         double tb = 0, ta = 0; cl_ulong first_t = 0, last_t = 0;
         for (int i = 0; i < ne; i++) {
             cl_ulong t0, t1; clGetEventProfilingInfo(ev[i], CL_PROFILING_COMMAND_START, 8, &t0, NULL);
@@ -363,11 +363,11 @@ int gen9blas_trsv(int type, int uplo, int trans, int diag, int n, const void *A,
 // SYR / SYR2 on the uplo triangle: A = alpha·x·xᵀ + A or A = alpha·(x·yᵀ + y·xᵀ) + A.
 static int syr2(int type, int uplo, int n, double alpha, const void *x, int incx, const void *y, int incy, void *A, int lda) {
     BEGIN(n, !incx || (y && !incy));
-    if (lda < n) FAIL("lda < n");
+    if (lda < n) FAILC(GEN9BLAS_ERR_INVALID_ARG, "lda < n");
     int two = y != NULL;
     op_t w[3] = { { A, ((size_t)(n - 1) * lda + n) * es }, { x, vec_bytes(n, incx, es) }, { two ? y : x, vec_bytes(n, two ? incy : incx, es) } };
     const int cin[3] = { 1, 1, 1 }, cout[3] = { 1, 0, 0 };
-    if (load_operands(w, two ? 3 : 2, cin, cout)) return -1;
+    if (load_operands(w, two ? 3 : 2, cin, cout)) return ERR_RET;
     if (!two) { w[2] = w[1]; incy = incx; }
     cl_long ox = vec_off(n, incx), oy = vec_off(n, incy), oa = 0, ix = incx, iy = incy;
     int mode = uplo == GEN9BLAS_UPPER ? 2 : 1; cl_kernel K = k->syr2;
@@ -386,10 +386,10 @@ int gen9blas_syr2(int type, int uplo, int n, double alpha, const void *x, int in
 
 int gen9blas_ger(int type, int M, int N, double alpha, const void *x, int incx, const void *y, int incy, void *A, int lda) {
     BEGIN(M < N ? M : N, !incx || !incy);
-    if (lda < N) FAIL("lda < N");
+    if (lda < N) FAILC(GEN9BLAS_ERR_INVALID_ARG, "lda < N");
     op_t w[3] = { { x, vec_bytes(M, incx, es) }, { y, vec_bytes(N, incy, es) }, { A, ((size_t)(M - 1) * lda + N) * es } };
     const int cin[3] = { 1, 1, 1 }, cout[3] = { 0, 0, 1 };
-    if (load_operands(w, 3, cin, cout)) return -1;
+    if (load_operands(w, 3, cin, cout)) return ERR_RET;
     cl_long ox = vec_off(M, incx), oy = vec_off(N, incy), oa = 0, ix = incx, iy = incy; cl_kernel K = k->ger;
     ARG(K, 0, M); ARG(K, 1, N); ARGR(K, 2, alpha); ARGB(K, 3, w[0].g); ARG(K, 4, ox); ARG(K, 5, ix); ARGB(K, 6, w[1].g);
     ARG(K, 7, oy); ARG(K, 8, iy); ARGB(K, 9, w[2].g); ARG(K, 10, oa); ARG(K, 11, lda);
@@ -420,21 +420,21 @@ static int pmv_y(int type, int M, int N, int fmt, int KL, int KU, int tr, int sy
     BEGIN(nx < ny ? nx : ny, !incx || !incy);
     op_t w[3] = { { A, bA }, { x, vec_bytes(nx, incx, es) }, { y, vec_bytes(ny, incy, es) } };
     const int cin[3] = { 1, 1, beta != 0.0f || (incy != 1 && incy != -1) }, cout[3] = { 0, 0, 1 };
-    if (load_operands(w, 3, cin, cout)) return -1;
+    if (load_operands(w, 3, cin, cout)) return ERR_RET;
     if (pmv_inner(k, ny, nx, fmt, KL, KU, N, w[0].g, lda, w[1].g, vec_off(nx, incx), incx, alpha, beta, w[2].g, vec_off(ny, incy), incy,
-                tr, sym, upper, 0, lo, hi)) return -1;
+                tr, sym, upper, 0, lo, hi)) return ERR_RET;
     return finish(w, 3, cout);
 }
 int gen9blas_gbmv(int type, int trans, int M, int N, int KL, int KU, double alpha, const void *A, int lda, const void *x, int incx,
              double beta, void *y, int incy) {
-    if (KL < 0 || KU < 0 || lda < KL + KU + 1) FAIL("gbmv: KL, KU, lda");
+    if (KL < 0 || KU < 0 || lda < KL + KU + 1) FAILC(GEN9BLAS_ERR_INVALID_ARG, "gbmv: KL, KU, lda");
     int es = elem_size(type);
     return pmv_y(type, M, N, BAND, KL, KU, trans != 0, 0, 0, trans ? KU : KL, trans ? KL : KU, alpha, A,
                  M > 0 ? band_bytes(M, lda, KL, KU, es) : 0, lda, x, incx, beta, y, incy);
 }
 int gen9blas_sbmv(int type, int uplo, int N, int K, double alpha, const void *A, int lda, const void *x, int incx,
              double beta, void *y, int incy) {
-    if (K < 0 || lda < K + 1) FAIL("sbmv: K, lda");
+    if (K < 0 || lda < K + 1) FAILC(GEN9BLAS_ERR_INVALID_ARG, "sbmv: K, lda");
     int es = elem_size(type), g = uplo == GEN9BLAS_UPPER;
     return pmv_y(type, N, N, BAND, g ? 0 : K, g ? K : 0, 0, 1, g, K, K, alpha, A, N > 0 ? band_bytes(N, lda, 0, K, es) : 0,
                  lda, x, incx, beta, y, incy);
@@ -450,9 +450,9 @@ static int pmv_x(int type, int N, int fmt, int KL, int KU, int tr, int unit, int
     BEGIN(N, !incx);
     op_t w[2] = { { A, bA }, { x, vec_bytes(N, incx, es) } };
     const int cin[2] = { 1, 1 }, cout[2] = { 0, 1 };
-    if (load_operands(w, 2, cin, cout) || ensure_buf(&dTv, &sTv, (size_t)N * es)) return -1;
+    if (load_operands(w, 2, cin, cout) || ensure_buf(&dTv, &sTv, (size_t)N * es)) return ERR_RET;
     cl_long ox = vec_off(N, incx), ix = incx, z = 0, j = 1;
-    if (pmv_inner(k, N, N, fmt, KL, KU, N, w[0].g, lda, w[1].g, ox, ix, 1.0f, 0.0f, BM(dTv), 0, 1, tr, 0, 0, unit, lo, hi)) return -1;
+    if (pmv_inner(k, N, N, fmt, KL, KU, N, w[0].g, lda, w[1].g, ox, ix, 1.0f, 0.0f, BM(dTv), 0, 1, tr, 0, 0, unit, lo, hi)) return ERR_RET;
     cl_kernel K = k->copy;
     ARG(K, 0, N); ARG(K, 1, dTv); ARG(K, 2, z); ARG(K, 3, j); ARGB(K, 4, w[1].g); ARG(K, 5, ox); ARG(K, 6, ix);
     return start4(K, N) || finish(w, 2, cout) ? -1 : 0;
@@ -463,11 +463,11 @@ static int psv(int type, int N, int fmt, int KL, int KU, int tr, int lower, int 
     BEGIN(N, !incx);
     op_t w[2] = { { A, bA }, { x, vec_bytes(N, incx, es) } };
     const int cin[2] = { 1, 1 }, cout[2] = { 0, 1 };
-    if (load_operands(w, 2, cin, cout) || ensure_buf(&dXf, &sXf, (size_t)N * RS(k))) return -1;
+    if (load_operands(w, 2, cin, cout) || ensure_buf(&dXf, &sXf, (size_t)N * RS(k))) return ERR_RET;
     cl_long ox = vec_off(N, incx), ix = incx, oa = 0;
     cl_kernel K = k->to_f;
     ARG(K, 0, N); ARGB(K, 1, w[1].g); ARG(K, 2, ox); ARG(K, 3, ix); ARG(K, 4, dXf);
-    if (start1(K, N)) return -1;
+    if (start1(K, N)) return ERR_RET;
     K = k->psv;
     ARG(K, 0, N); ARG(K, 1, fmt); ARG(K, 2, KL); ARG(K, 3, KU); ARGB(K, 4, w[0].g); ARG(K, 5, oa); ARG(K, 6, lda); ARG(K, 7, dXf);
     ARG(K, 8, tr); ARG(K, 9, lower); ARG(K, 10, unit); ARG(K, 11, K_);
@@ -479,7 +479,7 @@ static int psv(int type, int N, int fmt, int KL, int KU, int tr, int lower, int 
 }
 // op(A) lower <=> (uplo lower) xor trans. Nonzero range of op(A) in a row: lower [i − K, i], upper [i, i + K].
 int gen9blas_tbmv(int type, int uplo, int trans, int diag, int N, int K, const void *A, int lda, void *x, int incx) {
-    if (K < 0 || lda < K + 1) FAIL("tbmv: K, lda");
+    if (K < 0 || lda < K + 1) FAILC(GEN9BLAS_ERR_INVALID_ARG, "tbmv: K, lda");
     int es = elem_size(type), g = uplo == GEN9BLAS_UPPER, low = !g != (trans != 0);
     return pmv_x(type, N, BAND, g ? 0 : K, g ? K : 0, trans != 0, diag != 0, low ? K : 0, low ? 0 : K, A,
                  N > 0 ? band_bytes(N, lda, 0, K, es) : 0, lda, x, incx);
@@ -489,7 +489,7 @@ int gen9blas_tpmv(int type, int uplo, int trans, int diag, int N, const void *Ap
     return pmv_x(type, N, g ? PACK_U : PACK_L, 0, 0, trans != 0, diag != 0, low ? N : 0, low ? 0 : N, Ap, packed_bytes(N, es), 0, x, incx);
 }
 int gen9blas_tbsv(int type, int uplo, int trans, int diag, int N, int K, const void *A, int lda, void *x, int incx) {
-    if (K < 0 || lda < K + 1) FAIL("tbsv: K, lda");
+    if (K < 0 || lda < K + 1) FAILC(GEN9BLAS_ERR_INVALID_ARG, "tbsv: K, lda");
     int es = elem_size(type), g = uplo == GEN9BLAS_UPPER;
     return psv(type, N, BAND, g ? 0 : K, g ? K : 0, trans != 0, !g != (trans != 0), diag != 0, K, A,
                N > 0 ? band_bytes(N, lda, 0, K, es) : 0, lda, x, incx);
@@ -504,7 +504,7 @@ static int spr2(int type, int uplo, int n, double alpha, const void *x, int incx
     int two = y != NULL, fmt = uplo == GEN9BLAS_UPPER ? PACK_U : PACK_L;
     op_t w[3] = { { Ap, packed_bytes(n, es) }, { x, vec_bytes(n, incx, es) }, { two ? y : x, vec_bytes(n, two ? incy : incx, es) } };
     const int cin[3] = { 1, 1, 1 }, cout[3] = { 1, 0, 0 };
-    if (load_operands(w, two ? 3 : 2, cin, cout)) return -1;
+    if (load_operands(w, two ? 3 : 2, cin, cout)) return ERR_RET;
     if (!two) { w[2] = w[1]; incy = incx; }
     cl_long ox = vec_off(n, incx), oy = vec_off(n, incy), oa = 0, ix = incx, iy = incy; cl_kernel K = k->spr2;
     ARG(K, 0, n); ARG(K, 1, fmt); ARGR(K, 2, alpha); ARGB(K, 3, w[1].g); ARG(K, 4, ox); ARG(K, 5, ix); ARGB(K, 6, w[2].g);

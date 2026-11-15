@@ -6,7 +6,7 @@ int gen9blas_gemm_batched(int type, int tA, int tB, int M, int N, int K, double 
                      const void *A, int lda, long sA, const void *B, int ldb, long sB,
                      double beta, void *C, int ldc, long sC, int count) {
     NEW_OPERATION();
-    if (type < 0 || type > 3 || !types[type].ready) FAIL("type %d unavailable", type);
+    if (type < 0 || type > 3 || !types[type].ready) FAILC(GEN9BLAS_ERR_UNSUPPORTED, "type %d unavailable", type);
     if (M <= 0 || N <= 0 || K <= 0 || count <= 0) return 0;
     if (count == 1 && (M < N ? M : N) <= skinny_threshold(type))   // small M or N: skinny kernel without packing
         return gemm_skinny(type, tA, tB, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
@@ -19,11 +19,11 @@ int gen9blas_gemm_batched(int type, int tA, int tB, int M, int N, int K, double 
     size_t bC = c1 * sC * es + ((size_t)(M - 1) * ldc + N) * es;
     bf_t xA, xB, xC; int zA, zB, zC;
     if (get_obj(A, bA, &uA, 1, 0, &xA, &zA) || get_obj(B, bB, &uB, 1, 0, &xB, &zB) || get_obj(C, bC, &uC, beta != 0.0f, 1, &xC, &zC))
-        return -1;
+        return ERR_RET;
     last_zc = zA | zB << 1 | zC << 2;
     if (ensure_buf(&dAp, &sAp, (size_t)count * Mp * Kp * es + 4096) || ensure_buf(&dBp, &sBp, (size_t)count * Np * Kp * es + 4096) ||
         ensure_buf(&dCp, &sCp, (size_t)count * Mp * Np * es))
-        return -1;
+        return ERR_RET;
     cl_long lA = sA, lB = sB, lC = sC;
     size_t ga[3], gb[3];
     cl_kernel ka = pack_kernel(r, 0, tA, Mp, Kp, count, ga), kb = pack_kernel(r, 1, tB, Np, Kp, count, gb);
@@ -46,14 +46,14 @@ int gen9blas_gemm_batched(int type, int tA, int tB, int M, int N, int K, double 
         nev = 0;
         for (int b = 0; b < count; b++)
             if (launch(r, dAp, (size_t)b * Mp * Kp * es, dBp, (size_t)b * Np * Kp * es, dCp, (size_t)b * Mp * Np * es,
-                       Mp, Np, Np, Kp, Kp, 1)) return -1;
+                       Mp, Np, Np, Kp, Kp, 1)) return ERR_RET;
     }
     ARG(r->epi, 0, dCp); ARG(r->epi, 1, Np); ARG(r->epi, 2, Mp); ARGB(r->epi, 3, xC); ARG(r->epi, 4, ldc); ARG(r->epi, 5, lC);
     ARGS(r->epi, 6, alpha); ARGS(r->epi, 7, beta);
     size_t ge[3] = { (size_t)N, (size_t)M, (size_t)count };
     if (direct) CHECK(clEnqueueMarkerWithWaitList(q, 0, NULL, &evp[2]));
     else CHECK(clEnqueueNDRangeKernel(q, r->epi, 3, NULL, ge, NULL, 0, NULL, &evp[2]));
-    if (to_host(xC, zC, bC, C)) return -1;
+    if (to_host(xC, zC, bC, C)) return ERR_RET;
     if (split) { double tz = event_times(); last_ms = tz >= 0 ? tz : (now_s() - t_start) * 1e3; }
     else if (profile) {
         cl_ulong t0, t1;
@@ -95,14 +95,14 @@ int pack_host(type_t *r, int roleB, int trans, const void *X, int ld, int Rr, in
     size_t bX = (roleB ? (trans ? (size_t)(Rr - 1) * ld + K : (size_t)(K - 1) * ld + Rr)
                        : (trans ? (size_t)(K - 1) * ld + Rr : (size_t)(Rr - 1) * ld + K)) * r->es;
     bf_t xX; int z;
-    if (get_obj(X, bX, roleB ? &uB : &uA, 1, 0, &xX, &z)) return -1;
+    if (get_obj(X, bX, roleB ? &uB : &uA, 1, 0, &xX, &z)) return ERR_RET;
     return pack_dev(r, roleB, trans, xX, ld, Rr, K, Rp, Kp, target, 0, 0);
 }
 
 cl_mem subbuffer(cl_mem b, size_t off, size_t size) {
     cl_int err; cl_buffer_region reg = { off, size };
     cl_mem s = clCreateSubBuffer(b, CL_MEM_READ_WRITE, CL_BUFFER_CREATE_TYPE_REGION, &reg, &err);
-    if (err != CL_SUCCESS) { snprintf(errbuf, sizeof errbuf, "clCreateSubBuffer = %d", err); return NULL; }
+    if (err != CL_SUCCESS) { snprintf(errbuf, sizeof errbuf, "clCreateSubBuffer = %d", err); gst = GEN9BLAS_ERR_OUT_OF_MEMORY; return NULL; }
     return s;
 }
 
@@ -158,7 +158,7 @@ int launch(type_t *r, cl_mem Ap, size_t oA, cl_mem Bp, size_t oB, cl_mem Cp, siz
     for (int i0 = 0; i0 < M; i0 += mb) {
         int b = M - i0 < mb ? M - i0 : mb;
         if (launch1(r, Ap, oA + (size_t)i0 * Kfull * r->es, Bp, oB, Cp, oC + (size_t)i0 * ldc * r->es, b, N, ldc, K, Kfull, measure))
-            return -1;
+            return ERR_RET;
     }
     return 0;
 }
@@ -166,7 +166,7 @@ int launch(type_t *r, cl_mem Ap, size_t oA, cl_mem Bp, size_t oB, cl_mem Cp, siz
 // Epilogue to host memory: C = alpha·Cp + beta·C on the uplo triangle (0 lower, 1 upper, 2 whole).
 int epilogue_host(type_t *r, cl_mem Cp, int ldp, void *C, int M, int N, int ldc, double alpha, double beta, int uplo) {
     size_t bC = ((size_t)(M - 1) * ldc + N) * r->es; bf_t xC; int zC;
-    if (get_obj(C, bC, &uC, beta != 0.0f || uplo != 2, 1, &xC, &zC)) return -1;
+    if (get_obj(C, bC, &uC, beta != 0.0f || uplo != 2, 1, &xC, &zC)) return ERR_RET;
     ARG(r->epi_tri, 0, Cp); ARG(r->epi_tri, 1, ldp); ARGB(r->epi_tri, 2, xC); ARG(r->epi_tri, 3, ldc);
     ARGS(r->epi_tri, 4, alpha); ARGS(r->epi_tri, 5, beta); ARG(r->epi_tri, 6, uplo);
     size_t g[2] = { (size_t)N, (size_t)M };
@@ -206,7 +206,7 @@ int gemm_skinny(int type, int tA, int tB, int M, int N, int K, double alpha, con
     size_t bC = ((size_t)(M - 1) * ldc + N) * es;
     bf_t xA, xB, xC; int zA, zB, zC;
     if (get_obj(A, bA, &uA, 1, 0, &xA, &zA) || get_obj(B, bB, &uB, 1, 0, &xB, &zB) || get_obj(C, bC, &uC, beta != 0.0, 1, &xC, &zC))
-        return -1;
+        return ERR_RET;
     last_zc = zA | zB << 1 | zC << 2;
     // a: Mc × K (strides sam, sak); w: element (k, n) = w[n·swn + k·swk]; C[m][n] = C[m·scm + n·scn]
     int Mc, Nc; bf_t xa, xw; cl_long sam, sak, swn, swk, scm, scn;
@@ -247,7 +247,7 @@ int gemm_skinny(int type, int tA, int tB, int M, int N, int K, double alpha, con
         const int MT = 4, cols4 = (Nc + 3) / 4, tiles = (Mc + MT - 1) / MT;
         int parts = (8192 + cols4 - 1) / cols4; if (parts > K) parts = K; if (parts < 1) parts = 1;   // ~8 thousand work-items per M tile
         int kpp = (K + parts - 1) / parts; parts = (K + kpp - 1) / kpp;
-        if (ensure_buf(&dQ, &sQ, (size_t)parts * Mc * Nc * sizeof(float))) return -1;
+        if (ensure_buf(&dQ, &sQ, (size_t)parts * Mc * Nc * sizeof(float))) return ERR_RET;
         cl_kernel Kn = k->skinny_n4;
         ARG(Kn, 0, iM); ARG(Kn, 1, iN); ARG(Kn, 2, iK); ARG(Kn, 3, kpp); ARGB(Kn, 4, xa); ARG(Kn, 5, sam); ARG(Kn, 6, sak);
         ARGB(Kn, 7, xw); ARG(Kn, 8, swk); ARG(Kn, 9, dQ);

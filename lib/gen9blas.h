@@ -3,8 +3,9 @@
 //
 // Conventions
 // - All matrices are row-major. Elements: uint16_t (FP16), float (FP32) or double (FP64), passed as void*.
-// - Result: 0 = success, -1 = error (description: gen9blas_error()). Functions documented to return 1 use it for
-//   "not handled, nothing was written" (the caller computes another way).
+// - Result: a gen9blas_status: 0 = success, < 0 = error (description: gen9blas_error()), GEN9BLAS_DECLINED (1) =
+//   "not handled, nothing was written" (only functions documented to decline; the caller computes another way).
+//   Functions returning a pointer return NULL on error; gen9blas_last_status() gives the status of the last call.
 // - Threads: the library has process-wide state (work buffers, the last error, no-wait mode). Calls must be serialized
 //   by the caller (one thread at a time, e.g. under one mutex); gen9blas_error() is valid until the next call.
 // - Lifetime: handles (gen9blas_packed_b, gen9blas_packed_a) are owned by the caller and freed with their _free function;
@@ -34,6 +35,16 @@ enum { GEN9BLAS_LEFT = 0, GEN9BLAS_RIGHT = 1 };          // side
 enum { GEN9BLAS_LOWER = 0, GEN9BLAS_UPPER = 1 };         // uplo
 enum { GEN9BLAS_NON_UNIT = 0, GEN9BLAS_UNIT = 1 };       // diag
 
+typedef enum {
+    GEN9BLAS_OK = 0,
+    GEN9BLAS_DECLINED = 1,                // not handled (shape / memory the fast path does not take); nothing was written
+    GEN9BLAS_ERR = -1,                    // GPU execution or driver error, or an error without a finer class
+    GEN9BLAS_ERR_UNSUPPORTED = -2,        // type / kernel / layout not available in this build or on this device
+    GEN9BLAS_ERR_INVALID_ARG = -3,        // invalid arguments (leading dimensions, mismatched handles, ...)
+    GEN9BLAS_ERR_OUT_OF_MEMORY = -4,      // GPU or host allocation failed
+    GEN9BLAS_ERR_NO_DEVICE = -5,          // initialization failed: no usable GPU (permanent for the process)
+} gen9blas_status;
+
 // ---- Library ----
 // Version of the loaded library (GEN9BLAS_VERSION of its build): compare with GEN9BLAS_VERSION to detect a mismatch.
 GEN9BLAS_API int gen9blas_version(void);
@@ -56,6 +67,7 @@ enum {
 // 1 if the feature is available on this device and build, 0 otherwise (also for features unknown to this library).
 GEN9BLAS_API int gen9blas_has(int feature);
 GEN9BLAS_API const char *gen9blas_error(void);
+GEN9BLAS_API int gen9blas_last_status(void);   // gen9blas_status of the last call (for functions returning pointers)
 GEN9BLAS_API double gen9blas_last_time_ms(void);  // GEN9BLAS_PROFILE=1: GEMM kernel time of the last call; else the whole call
 GEN9BLAS_API int gen9blas_last_zero_copy(void);   // GEMM: bits 1 = A, 2 = B, 4 = C zero-copy
 

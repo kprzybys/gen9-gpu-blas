@@ -133,9 +133,8 @@ GEN9BLAS_API int gen9blas_attn_dec(int D, int H, int HKV, int ns, int nq, int nk
 // K and V F16 rows of HKV*D values (row j, head h at h*D), the first nk rows used (nk a multiple of 16); k_bytes / v_bytes:
 // bytes from K / V to the end of the whole KV tensor (pinned once). Token t attends to keys 0 .. min(nk, vis0 + dvis*t) - 1
 // (dvis 1: causal, 0: the same count for all), scores scaled by scale, FP32 accumulation. Shapes: those with a built-in
-// binary (gen9blas_attn_supported). Returns 0 (done), 1 (not handled: unsupported shape or memory not mappable; nothing
-// was written), -1 (GPU error: O is undefined, recompute it). *launches (may be NULL): k_attn launches (split at ~2e10 FLOP).
-// Error text: gen9blas_attn_error().
+// binary (gen9blas_attn_supported). Returns 0 (done), GEN9BLAS_DECLINED (not handled: unsupported shape or memory not
+// mappable; nothing was written), < 0 (error: O is undefined, recompute it). *launches (may be NULL): k_attn launches (split at ~2e10 FLOP).
 GEN9BLAS_API int gen9blas_attn_supported(int D, int H, int HKV);
 GEN9BLAS_API int gen9blas_attn_f16kv(int D, int H, int HKV, int nq, int nk, const float *Q, const uint16_t *K, size_t k_bytes,
                                      const uint16_t *V, size_t v_bytes, float *O, float scale, int vis0, int dvis,
@@ -148,7 +147,6 @@ GEN9BLAS_API int gen9blas_attn_streams_supported(int D, int H, int HKV);
 GEN9BLAS_API int gen9blas_attn_f16kv_streams(int D, int H, int HKV, int ns, int nq, int nk, const float *Q, int64_t sq,
                                              const uint16_t *K, int64_t sk, size_t k_bytes, const uint16_t *V, int64_t sv,
                                              size_t v_bytes, float *O, float scale, const int *vis0, int dvis, int *launches);
-GEN9BLAS_API const char *gen9blas_attn_error(void);
 
 #ifdef __cplusplus
 }

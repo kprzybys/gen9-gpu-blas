@@ -36,6 +36,9 @@ Breaking release: the API is reorganized; GPU arithmetic is unchanged (same kern
 | `gen9blas_cpy_any`: `tin` / `tout` 0 = F32, 1 = F16 | `GEN9BLAS_S` / `GEN9BLAS_H` (note: the numeric values swap) |
 | `long` strides, offsets and `iamax` result | `int64_t` (same ABI on 64-bit Linux) |
 | — | named constants `GEN9BLAS_NO_TRANS/TRANS`, `GEN9BLAS_NON_UNIT/UNIT` (parameters stay `int`) |
+| `0` / `-1` (and `1` in some functions) | `gen9blas_status`: `GEN9BLAS_OK` 0, `GEN9BLAS_DECLINED` 1, `GEN9BLAS_ERR` -1, `_ERR_UNSUPPORTED` -2, `_ERR_INVALID_ARG` -3, `_ERR_OUT_OF_MEMORY` -4, `_ERR_NO_DEVICE` -5 (checks `!= 0` / `< 0` keep working) |
+| — | `gen9blas_last_status()` (status of the last call; for functions returning pointers) |
+| `gen9blas_attn_error()` | `gen9blas_error()` (attention writes the library's error text) |
 
 ### Fixes
 - `libgen9blas_blas`: the error text is read under the GPU lock (was read after releasing it).
