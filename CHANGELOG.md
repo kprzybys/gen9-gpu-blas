@@ -5,6 +5,8 @@
 Breaking release: the API is reorganized; GPU arithmetic is unchanged (same kernels, bit-identical results).
 
 ### Layout
+- The repository is split: the ggml backend moved to ggml-intel-igpu; the applications and the research material
+  moved to separate repositories. This repository keeps the library, its kernels and generators, docs and results.
 - Library kernels moved from `bench/` to `lib/kernels/`; `lib/gen9blas.c` split into `lib/src/` (`core`, `gemm`,
   `packed`, `ops`, `level3`, `level12`, `attn`, `cblas`).
 - Public headers: `gen9blas.h` (BLAS) and the new `gen9blas_ml.h` (neural-network operations for the ggml backend;

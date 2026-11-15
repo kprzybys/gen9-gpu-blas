@@ -113,6 +113,9 @@ The ggml row goes through a different framework path (graph call, FP32 B), so it
 kernel test. Energy per call and CPU load (the library leaves the CPU almost idle: 4–8% of one core for large GEMM)
 are in `results/compare-l3-power-2026-11-11.txt` and `results/compare-onednn-2026-11-11.txt`.
 
+Related repositories: [ggml-intel-igpu](https://github.com/kprzybys/ggml-intel-igpu), the GEN9 ggml backend for
+llama.cpp and whisper.cpp built on this library.
+
 ## Quick start
 
 Requirements: Linux with `i915` and read/write access to `/dev/dri/renderD128` (usually the `render` group), `gcc`, CMake >= 3.21,
