@@ -266,9 +266,14 @@ the kernels are generated from TIR by **DLight** schedule rules (`python/tvm/s_t
 at mlc-llm `3b7663a` and relax `45221f267` (both 2026-11-14) [EXT]:
 
 - **No tuning, no Intel preset.** The pipeline (`python/mlc_llm/compiler_pass/pipeline.py`) applies fixed rules in
-  order `Matmul`, `GEMV`, `Reduction`, `GeneralReduction`, `Fallback`; no MetaSchedule search. The ready targets
-  (`support/auto_target.py`) are `vulkan:generic` (256 threads, 32 KB shared) and OpenCL only for Android (Adreno,
-  Mali). The DLight rules contain no Intel branch, no sub-group or block-read path.
+  order `Matmul`, `GEMV`, `Reduction`, `GeneralReduction`, `Fallback`; no MetaSchedule search. A preset
+  (`support/auto_target.py`, `PRESET`) is only a TVM target dictionary: `vulkan:generic` (256 threads, 32 KB shared,
+  `thread_warp_size` 1, FP16/INT8/16-bit buffer support flags), `opencl:generic` (just `{"kind": "opencl"}`), and
+  Android OpenCL presets for Adreno (`"device": "adreno"`, 512 threads) and Mali. `--device auto` builds the target
+  from the detected device instead (`Target.from_device`), filling limits such as `max_num_threads`. DLight picks
+  its branch from `target.kind.name` and substrings (`"adreno"`, `"mali"`, `"android"`) in the target, so a
+  hand-written Intel target string changes only the limits, not the schedule. The DLight rules contain no Intel
+  branch, no sub-group or block-read path.
 - **Constants per target kind, picked on one device.** `GEMV` has branches for `cuda`, `metal` ("tuned on M2 Ultra
   for 7B"), `rocm`, Adreno, `vulkan` and Mali; an Intel GPU through OpenCL falls into the generic branch:
   `VEC_C = 1` (scalar loads), no shared memory, `TS, TR = 1, 64`, unroll 64. Through Vulkan: `VEC_C = 4`, vector in
