@@ -1,0 +1,52 @@
+Host CPU share of a ggml prefill, and -march=x86-64-v3 for the backend (2026-11-15, gp: i5-8265U / UHD 620, mains power,
+idle machine, under gpu-lock). Library be976d2 (Release, prebuilt kernel tables from kp), backend ggml-intel-igpu f1a6a5c,
+llama.cpp 2cbe0ec build-cpu, llama-bench -ngl 0 -p 512 -n 0.
+
+Question: would a faster host binary (compiler options) speed up the GPU path? Where does the CPU do real work?
+
+1. Profile (GEN9_INFO=1 GEN9_PROF=1, default build): share of graph_compute per branch.
+   qwen2.5-1.5b
+     | qwen2 1.5B Q4_K - Medium       |   1.04 GiB |     1.78 B | GEN9       |   0 |           pp512 |        227.93 ± 0.65 |
+     gen9: quantized weights dequantized 193 (on the GPU: 193; to F32 because of FP16 range: 0), 1.78 s (GPU 1.78; CPU path: alloc 0.00, to_float+FP16 0.00, pack_b 0.00)
+     gen9: IM2COL on the GPU 0; CPY/CONT/DUP on the GPU 0 (misaligned -> ggml-cpu 0); UPSCALE 0; ROPE vision 0
+     gen9: PROF graph_compute 10.692 s, of it in the branches below 10.689 s (rest: loop, no-op nodes)
+     gen9: PROF FFN fused                    108 calls     8.458 s  79.1 %     4566.1 GFLOP  539.8 GFLOPS
+     gen9: PROF Q/K/V group                  112 calls     0.298 s   2.8 %       90.2 GFLOP  302.8 GFLOPS
+     gen9: PROF MUL_MAT+epilogue             112 calls     0.589 s   5.5 %      270.6 GFLOP  459.7 GFLOPS
+     gen9: PROF MUL_MAT                      112 calls     0.577 s   5.4 %      270.6 GFLOP  468.8 GFLOPS
+     gen9: PROF RMS_NORM(+MUL)               220 calls     0.114 s   1.1 %
+     gen9: PROF ADD/MUL                      440 calls     0.197 s   1.8 %
+     gen9: PROF ROPE                         224 calls     0.095 s   0.9 %
+     gen9: PROF FLASH_ATTN                   112 calls     0.361 s   3.4 %
+   llama-3.2-1b
+     | llama 1B Q4_K - Medium         | 762.81 MiB |     1.24 B | GEN9       |   0 |           pp512 |        314.79 ± 1.27 |
+     gen9: quantized weights dequantized 109 (on the GPU: 109; to F32 because of FP16 range: 0), 1.36 s (GPU 1.36; CPU path: alloc 0.00, to_float+FP16 0.00, pack_b 0.00)
+     gen9: IM2COL on the GPU 0; CPY/CONT/DUP on the GPU 0 (misaligned -> ggml-cpu 0); UPSCALE 0; ROPE vision 0
+     gen9: PROF graph_compute 7.733 s, of it in the branches below 7.731 s (rest: loop, no-op nodes)
+     gen9: PROF FFN fused                     60 calls     5.648 s  73.0 %     3092.4 GFLOP  547.5 GFLOPS
+     gen9: PROF Q/K/V group                   64 calls     0.339 s   4.4 %      137.4 GFLOP  405.9 GFLOPS
+     gen9: PROF MUL_MAT                      128 calls     1.151 s  14.9 %      549.8 GFLOP  477.6 GFLOPS
+     gen9: PROF RMS_NORM(+MUL)               124 calls     0.102 s   1.3 %
+     gen9: PROF ADD/MUL                      120 calls     0.119 s   1.5 %
+     gen9: PROF ROPE                         128 calls     0.111 s   1.4 %
+     gen9: PROF FLASH_ATTN                    64 calls     0.262 s   3.4 %
+   GPU branches (FFN, MUL_MAT, Q/K/V, FLASH_ATTN, norms, ADD/MUL, ROPE) are ~100 % of graph_compute; the host-side paths
+   (CPU dequantization, CPU element-wise "ggml-cpu inside GEN9") were not used at all: 0.00 s, 0 calls. Packing runs as
+   GPU kernels. The host part of a call is ~3-4 us of ~48 us (results/overhead-2026-11-12.txt).
+
+2. Throughput A/B, backend built default (-O3) vs GEN9_MARCH=x86-64-v3 (AVX2, F16C, FMA), alternating, -r 5:
+   round 1 def qwen2.5-1.5b         232.57 ± 0.49 
+   round 1 def llama-3.2-1b         319.30 ± 0.37 
+   round 1 v3 qwen2.5-1.5b         233.32 ± 0.85 
+   round 1 v3 llama-3.2-1b         319.27 ± 2.07 
+   round 2 def qwen2.5-1.5b         233.46 ± 0.43 
+   round 2 def llama-3.2-1b         319.46 ± 0.93 
+   round 2 v3 qwen2.5-1.5b         233.19 ± 0.74 
+   round 2 v3 llama-3.2-1b         319.43 ± 0.68 
+   Difference within noise (< 0.4 %). Backend size 150 224 B default, 162 512 B with x86-64-v3.
+
+Conclusion: for LLM prefill the binary's CPU code does not limit speed; compiler options (-O2/-O3, -march) change
+nothing measurable. Host-side loops exist only on fallback paths (CPU dequantization when GPU dequantization is
+unavailable, F32 K/V attention of NeMo, F16 gather of PaddleOCR-VL); measure those workloads before optimizing them.
+Found along the way: the library's top-level CMakeLists.txt failed when ~/src/llama.cpp existed (it still added the
+removed ggml-backend/ directory), and the flag summary warned "no optimization flag" in C++-only projects; both fixed.
