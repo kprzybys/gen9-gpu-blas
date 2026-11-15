@@ -42,7 +42,7 @@ type by a macro. Memory-bound; GPU pays off only for large vectors and when the 
 
 ## 3. ggml backend operations (`ggml-backend/ggml-gen9.cpp`, kernels in `lib/kernels/hgemm.cl`)
 
-Used by llama.cpp, whisper.cpp and NeMo-Speech.cpp ([ggml-backend-design.md](ggml-backend-design.md)).
+Used by llama.cpp, whisper.cpp and NeMo-Speech.cpp ([ggml-backend-design.md](https://github.com/kprzybys/ggml-intel-igpu/blob/main/docs/ggml-backend-design.md)).
 
 | ggml op | Kernel | Notes |
 |---|---|---|
@@ -61,9 +61,9 @@ large-v3-turbo Polish RTF 0.41; Nemotron diarization 1 h in 66.5 s (CPU 278 s).
 
 | Directory | Kernels | Purpose | Result |
 |---|---|---|---|
-| `mel/` (`mel.cl`) | `mel_power`, `mel_power_fft`, `mel_log`, `mel_log_sparse`, `mel_fused`, `mel_norm` | whisper log-mel spectrogram (STFT as GEMM-like work) | ~0.3 % of a transcription ([whisper-gpu.md](whisper-gpu.md)) |
-| `ina/` (`ina.cl`, 18) | `ina_mel`, `ina_gate`, `ina_smooth`, `ina_patches`, `ina_minval`, `ina_conv1p`, `ina_conv3`, `ina_pool`, `ina_pool_br`, `ina_dense`, `ina_head`, `ina_head_c`, `ina_im2col` (`_p`, `_v`), `ina_stats`, `ina_c1s`, `ina_c1pool` + `sgemm_v` | inaSpeechSegmenter (speech / music / noise, gender) entirely on the GPU | ~34 s per hour, segments identical to the original ([ina-gpu-report.md](ina-gpu-report.md)) |
-| `silero/` (`silero.cl`, `lstm.cl`) | front end `sg_im`, `sgx_im0..45`, `sgy_im1..3`, `sgz_im1`, `sgh_im0..2` (im2col into tile layout) + 6 GEMMs through `sgemm_v`; `lstm_steps` (persistent LSTM, 2 streams per work-group); `sil_head` | Silero VAD v6, file split into independent 30 s streams; library `gen9vad` + whisper.cpp hook | 1 h in 0.75 s (11x CPU 4 threads), probabilities within 1e-5 of silero-vad ([silero-gpu.md](silero-gpu.md)) |
+| `mel/` (`mel.cl`) | `mel_power`, `mel_power_fft`, `mel_log`, `mel_log_sparse`, `mel_fused`, `mel_norm` | whisper log-mel spectrogram (STFT as GEMM-like work) | ~0.3 % of a transcription (whisper-gpu.md) |
+| `ina/` (`ina.cl`, 18) | `ina_mel`, `ina_gate`, `ina_smooth`, `ina_patches`, `ina_minval`, `ina_conv1p`, `ina_conv3`, `ina_pool`, `ina_pool_br`, `ina_dense`, `ina_head`, `ina_head_c`, `ina_im2col` (`_p`, `_v`), `ina_stats`, `ina_c1s`, `ina_c1pool` + `sgemm_v` | inaSpeechSegmenter (speech / music / noise, gender) entirely on the GPU | ~34 s per hour, segments identical to the original (ina-gpu-report.md) |
+| `silero/` (`silero.cl`, `lstm.cl`) | front end `sg_im`, `sgx_im0..45`, `sgy_im1..3`, `sgz_im1`, `sgh_im0..2` (im2col into tile layout) + 6 GEMMs through `sgemm_v`; `lstm_steps` (persistent LSTM, 2 streams per work-group); `sil_head` | Silero VAD v6, file split into independent 30 s streams; library `gen9vad` + whisper.cpp hook | 1 h in 0.75 s (11x CPU 4 threads), probabilities within 1e-5 of silero-vad (silero-gpu.md) |
 | `emb/` (`emb.cl`, 11) | FP16 (default): `emb_pk_b16`, `emb_im2col_hv` (SLM, 16 B stores), `emb_im2col_ph`, `emb_resid_h`, `emb_stats_h` + `hgemm_kc_v`; FP32 (`EMB_F16=0`): `emb_im2col_v`, `emb_im2col_p`, `emb_resid`, `emb_stats` + `sgemm_v`; `emb_head` | WeSpeaker ResNet34-LM speaker embedding (diarization, speaker identification) | 15.7 ms per second of audio (OpenVINO FP16 17.6), cos >= 0.99999 vs ONNX Runtime; ParlaSpeech-PL EER 0.75 % |
 
 Applications built on them: `bench/diar/hybrid.py` (diarization), `bench/diar/voices.py` (speaker identification),

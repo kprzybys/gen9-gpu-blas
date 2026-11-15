@@ -14,7 +14,7 @@ Evidence tags as in performance-model.md: **[MEAS]** results file, **[SW]** beha
 **[SPEC]** PRM, **[EST]** Mesa heuristics, **[HYP]** unconfirmed. **[EXT]** marks a published external result that
 this project has not reproduced (different driver, other hardware or other conditions); treat it as a hypothesis
 until measured here. External sources are collected in
-[reports/Generatory kerneli dla Gen9.md](../reports/Generatory%20kerneli%20dla%20Gen9.md) (2026-11-13, in Polish).
+reports/Generatory kerneli dla Gen9.md (2026-11-13, in Polish).
 
 ## 1. Order of work
 
