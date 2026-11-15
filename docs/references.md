@@ -130,6 +130,14 @@ Read to understand `DRM_IOCTL_I915_GEM_USERPTR` (page pinning with `pin_user_pag
 mapping through the IOMMU, invalidation by mmu notifier) and execbuffer rules, which explain the measured userptr costs
 ([no-neo.md](no-neo.md), `results/userptr-2026-11-12.txt`). License: GPL-2.0, not redistributed.
 
+### IPEX-LLM (`ipex-llm`, commit `de6bce2`, 2026-01-28, archived)
+
+Source: `https://github.com/intel/ipex-llm`, directory `python/llm/src/ipex_llm/transformers` (`low_bit_linear.py`,
+`utils.py`, `models/utils.py`) and `python/llm/setup.py`. Read 2026-11-16 for its GPU dispatch strategy; the kernels
+themselves are closed binaries (`bigdl-core-xe-*` wheels) and were not inspected. Summary and lessons:
+[kernel-guide.md](kernel-guide.md) section 6. License: Apache-2.0, nothing copied.
+Related user report (Gen9.5 UHD 630 not supported): `https://nikolasent.github.io/hardware/deeplearning/2025/02/09/iGPU-Benchmark-VLM.html`.
+
 ## 4. Software compared against (not part of the repository)
 
 | Software | Version | Role |

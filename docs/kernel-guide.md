@@ -218,7 +218,45 @@ None of them produces competitive Gen9 code (state November 2026, details in the
 
 Use them as a source of ideas (sections 2-4), not of code.
 
-## 6. Open items
+## 6. Vendor LLM libraries: IPEX-LLM
+
+IPEX-LLM (formerly BigDL-LLM, Intel) ran LLMs on Intel CPU, iGPU, Arc/Flex/Max and NPU on top of PyTorch + IPEX and
+SYCL/oneAPI (Level Zero, not OpenCL). The repository was **archived on 2026-01-28** and is read-only; Intel gives no
+further support. Its ideas live on in llama.cpp's SYCL backend and PyTorch's `xpu` device, both aimed at Xe. Read on
+2026-11-16 at commit `de6bce2` of `github.com/intel/ipex-llm` [EXT]:
+
+- **No kernel source.** The GPU code ships only as closed binary wheels `bigdl-core-xe-*` (Python modules
+  `xe_linear`, `xe_batch`, `xe_addons`; `python/llm/setup.py`). The repository holds only the Python that prepares
+  weights and picks a kernel, so it teaches dispatch strategy, not kernel code. Inspecting the wheels (symbols,
+  embedded SPIR-V) is not worth it: the binaries target XMX/DPAS, which Gen9 lacks.
+- **Weights:** quantized with ggml's own code (32-value blocks; `sym_int4` ~ Q4_0, `sym_int8`, `Q4_K`, `Q6_K`, NF4,
+  FP8, optional imatrix), then **repacked once at load** into a GPU layout (`ggml_q_format_convet_cpu2xpu`). Same
+  approach as our backend's pack-at-first-use.
+- **Dispatch by row count (tokens) and GPU family** (`transformers/low_bit_linear.py`, `use_batch_forward` and the
+  linear `forward`):
+  - FP8 weights: `xe_linear.run_linear_fp8`;
+  - **up to 48 rows** (64 when K % 256 == 0 and N % 64 == 0): `xe_batch.batch_forward`, a separate kernel that
+    reads the quantized weights directly; requires K % 128 == 0 (K % 256 for SYM_INT8/Q4_K/Q6_K), F16/F32 input,
+    and for several types only `arc`, `pvc`, `mtl`, `arl`;
+  - otherwise: `xe_linear.forward_new`; F32 activations with more than one row are cast to F16 first.
+  Compare: our skinny path is used for `min(M, N) <= 16` ([skinny-gemm.md](skinny-gemm.md)), the backend's
+  small-batch threshold is 8. Their higher crossover comes from XMX making the big-GEMM path expensive to enter for
+  small M; on Gen9 (no XMX) do not copy 48-64, measure our own crossover.
+- **Every fast path is gated by a device-family name** (`get_xpu_device_name`: `arc`, `pvc`, `mtl`, `lnl`, `bmg`,
+  `arl`, `legacy`, `unknown`). Gen9 would be `legacy`, for which no fast path is enabled. A user report on a UHD 630
+  (Gen9.5) says IPEX-LLM did not run at all (driver requirement for 11th gen and newer) [EXT, single source].
+- **FP8 KV cache** (`transformers/models/utils.py`, `use_quantize_kv_cache`): K/V stored as FP8 (uint8) with
+  dequantization in `xe_addons.dequantize_key_value`; enabled automatically for quantized models with
+  `num_kv_heads >= 4` and, on iGPUs (`mtl`, `lnl`, `arl`), `num_heads / num_kv_heads <= 4`; env
+  `IPEX_LLM_QUANTIZE_KV_CACHE` overrides. Our KV cache is not quantized; for long contexts on a memory-bound Gen9
+  this halves KV traffic against F16 [HYP, not modelled here yet]. The only idea from IPEX-LLM not already in this
+  project.
+
+Lessons for this project: split kernels by row count (GEMV-like vs packed GEMM) and repack weights once, as we
+already do; choose the crossover by measurement on Gen9, not by copying an XMX library's threshold; candidate idea:
+FP8 (or Q8) KV cache, model it first ([performance-model.md](performance-model.md)) before writing a kernel.
+
+## 7. Open items
 
 - Shared generator check (section 3, rule 1); touches `asm/attn_gen.py`, coordinate with the attention work.
 - Two-bank model: check what IGC's `hasBankCollision()` returns for SKL (the comment in `visa/GraphColor.cpp` says
