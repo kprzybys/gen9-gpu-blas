@@ -37,7 +37,7 @@ time. `bench/level3_power.py` and `bench/compare/l3_power.sh` wrap it for level-
 
 ## 3. Reproducing each result file
 
-Build prerequisites: `make -C lib libgen9blas.so libgen9blas_blas.so` (and `make -C lib libgen9blas_neo.so` for NEO
+Build prerequisites: the CMake build in `build/` (`cmake -S . -B build && cmake --build build`; `-DGEN9BLAS_BUILD_NEO=ON` for NEO
 comparisons); the measurement programs are built with `make -C bench` (`hgemm`, `sgemm`, `clbench`, `packing`, `l12`, `overhead`)
 and `make -C bench optional` (`gemm_clblast`, needs CLBlast and OpenBLAS); library comparisons: `make -C bench/compare`. Run scripts from the repository root unless noted; the shell scripts
 `cd` to their own directory. Comparison binaries need CLBlast (`libclblast`), OpenBLAS and an OpenCL ICD (NEO).

@@ -15,6 +15,8 @@ import os
 import re
 import subprocess
 import sys
+# staged kernel sources of the CMake build (they include the generated dgemm.cl); GEN9BLAS_KERNELS_DIR overrides
+KDIR = os.environ.get("GEN9BLAS_KERNELS_DIR") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build", "lib", "kernels")
 
 work = sys.argv[1]
 here = os.path.dirname(os.path.abspath(__file__))
@@ -24,7 +26,7 @@ ARG = re.compile(r"\{(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+),(-?\d+)\}")
 def build(target):
     out = os.path.join(work, f"kernels_{target}.c")
     with open(out, "w") as f:
-        subprocess.run([sys.executable, os.path.join(here, "gen_kernels.py"), os.path.join(here, "kernels"),
+        subprocess.run([sys.executable, os.path.join(here, "gen_kernels.py"), KDIR,
                         os.path.join(work, target), target], stdout=f, check=True)
     text = open(out).read()
     isa = dict(re.findall(r"static const uint8_t (p\d+_k\d+_isa)\[\d+\] = \{\n(.*?)\};", text, re.S))

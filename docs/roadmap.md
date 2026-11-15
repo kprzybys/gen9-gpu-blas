@@ -20,7 +20,7 @@ Implemented ([api.md](api.md)):
 - **No NEO**: `lib/kcl.c` submits command buffers straight to i915 ([no-neo.md](no-neo.md)); NEO builds remain for comparisons.
 - **Zero-copy**: ordinary process memory through i915 userptr, USM host memory with a pool in Python, slices and `.T` views
   without a copy.
-- Python wrapper `lib/gen9blas.py`; eight test suites (`make -C lib check`).
+- Python wrapper `lib/gen9blas.py`; test suites (`ctest -L gpu`).
 
 ### Performance level
 

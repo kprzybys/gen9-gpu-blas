@@ -1,6 +1,6 @@
 """libgen9blas test: correctness (types, transposes, zero-copy, alpha/beta, odd sizes) and speed.
 
-Run: make -C lib test
+Run: ctest --test-dir build -R gen9blas_basic   (or python3 test_basic.py with GEN9BLAS_LIB=build/lib/libgen9blas.so)
 Relative error e = |C - ref| / (|alpha|·Σ|a·b| + |beta·c|). Criteria (mean / maximum):
   hgemm:          ≤ 4.9e-4 (1 FP16 rounding) / ≤ 5e-3
   hgemm accurate: ≤ 4.9e-4 / ≤ 5e-3 for K < 256 (a short sum fits in one FP16 chunk),

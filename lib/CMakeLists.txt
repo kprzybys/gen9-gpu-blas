@@ -143,6 +143,20 @@ if(GEN9BLAS_BUILD_NEO)
   target_link_libraries(gen9blas_neo PRIVATE OpenCL::OpenCL ${M_LIB} Threads::Threads)
 endif()
 
+# ---- Gen8 bring-up tools (docs/gen8.md 6a; run on a Gen8 Cherryview only) ----------------------------------------
+option(GEN9BLAS_BUILD_GEN8_TOOLS "test_gen8_probe / bench_gen8 (own Gen8 table with the probe kernel; needs ocloc)" OFF)
+if(GEN9BLAS_BUILD_GEN8_TOOLS AND NOT GEN9BLAS_PREBUILT_KERNELS)
+  set(_probe_c ${CMAKE_CURRENT_BINARY_DIR}/kernels_gen8_probe.c)
+  add_custom_command(OUTPUT ${_probe_c}
+    COMMAND ${Python3_EXECUTABLE} ${GENK} ${KDIR} ${CMAKE_CURRENT_BINARY_DIR}/.kernels_gen8_probe bdw-probe > ${_probe_c}
+    DEPENDS ${GENK} ${_staged} ${KDIR}/dgemm.cl VERBATIM)
+  foreach(t test_gen8_probe bench_gen8)
+    add_executable(${t} ${t}.c kcl.c kcl_gen8.c ${KERNELS_C} ${_probe_c})
+    target_include_directories(${t} PRIVATE ${MESA} .)
+    target_link_libraries(${t} PRIVATE ${M_LIB} Threads::Threads)
+  endforeach()
+endif()
+
 # ---- tests (Python suites against NumPy / OpenBLAS; need the GPU) ---------------------------------------------------
 if(GEN9BLAS_BUILD_TESTS)
   enable_testing()

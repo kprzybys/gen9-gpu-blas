@@ -1,7 +1,7 @@
 // Gen8 Cherryview probe (docs/gen8.md 6a): runs one kernel of lib/kernels/gen8_probe.cl through kcl and checks it on the CPU.
 //   ./test_gen8_probe df      probe_df_dword: DF arithmetic, dword messages only
 //   ./test_gen8_probe qword   probe_qword: A64 QWord scattered read (the message of the hanging kernels), no DF type
-// Build: make -C lib test_gen8_probe (kcl only, no gen9blas). Exit code 0 = correct.
+// Build: cmake -DGEN9BLAS_BUILD_GEN8_TOOLS=ON, target test_gen8_probe (kcl only, no gen9blas). Exit code 0 = correct.
 #include "kcl.h"
 #include <stdio.h>
 #include <string.h>

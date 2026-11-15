@@ -23,7 +23,11 @@ import weakref
 import numpy as np
 
 _HERE = os.path.dirname(os.path.realpath(__file__))
-_lib = ctypes.CDLL(os.environ.get("GEN9BLAS_LIB", os.path.join(_HERE, "libgen9blas.so")))   # GEN9BLAS_LIB: another build of the library
+def _find(name):   # GEN9BLAS_LIB, then next to this file (installed), then the CMake build tree (build/lib)
+    for d in (_HERE, os.path.join(_HERE, "..", "build", "lib")):
+        if os.path.exists(os.path.join(d, name)): return os.path.join(d, name)
+    return name   # the dynamic loader's search path
+_lib = ctypes.CDLL(os.environ.get("GEN9BLAS_LIB") or _find("libgen9blas.so"))
 _i, _f, _p, _l, _d = ctypes.c_int, ctypes.c_float, ctypes.c_void_p, ctypes.c_long, ctypes.c_double
 _lib.gen9blas_init.argtypes = []
 _lib.gen9blas_gemm.argtypes = [_i, _i, _i, _i, _i, _i, _d, _p, _i, _p, _i, _d, _p, _i]

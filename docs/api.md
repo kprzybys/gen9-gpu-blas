@@ -5,7 +5,7 @@ hand-written Gen9 assembly GEMM loops (see [performance-model.md](performance-mo
 through the Linux i915 driver, without Intel's OpenCL runtime (NEO): `lib/kcl.c` implements the small subset of OpenCL the
 library needs on top of i915 command buffers ([no-neo.md](no-neo.md)). The library does not link `libOpenCL`.
 
-Four artifacts are built by `make -C lib`:
+Four artifacts are built by the CMake build (`cmake -S . -B build && cmake --build build`; outputs in `build/lib/`):
 
 | File | What it is |
 |---|---|
@@ -255,7 +255,7 @@ compositor) waits for the GPU, i915 resets the engine and the work is lost [MEAS
   (`gen9blas_error()`: "GPU execution error (kcl)"; the BLAS layer then computes the call on the CPU) instead of a wrong result.
 
 The NEO builds are not affected in the same way: NEO computes DGEMM n = 4096 in one launch without a reset [MEAS], presumably
-because it enables mid-thread preemption [HYP]. Test: `lib/test_long_launch.py` (part of `make -C lib check`).
+because it enables mid-thread preemption [HYP]. Test: `lib/test_long_launch.py` (part of `ctest -L gpu`).
 
 ## Environment variables
 
@@ -305,13 +305,13 @@ need `libOpenCL` and a working NEO. The assembly GEMM binaries (`lib/kernels/gen
 tracked; they are rebuilt without a GPU by `make -C asm`.
 
 ```
-make -C lib           # kernels.c (from bench/*.cl and bench/gen_*.bin through ocloc), libgen9blas.so, libgen9blas_blas.so, *_neo.so
-make -C lib check     # builds, then runs all 10 test suites in sequence and stops at the first failure
-make -C lib test      # only test_basic.py
-make -C lib clean
+cmake -S . -B build -G Ninja [-DGEN9BLAS_BUILD_NEO=ON]   # kernels.c (lib/kernels/*.cl + asm binaries through ocloc), libraries
+cmake --build build
+ctest --test-dir build -L gpu          # all test suites (GPU); one: ctest --test-dir build -R gen9blas_basic
+cmake --install build --prefix <dir>   # find_package(gen9blas) / pkg-config gen9blas
 ```
 
-The suites run by `check`: `test_basic.py`, `test_level3.py`, `test_level12.py`, `test_userptr.py`, `test_skinny.py`,
+The suites run by `ctest -L gpu`: `test_basic.py`, `test_level3.py`, `test_level12.py`, `test_userptr.py`, `test_skinny.py`,
 `test_blas.py`, `test_blas_d.py`, `test_blas_banded.py` (in `lib/`). The build generator `lib/gen_kernels.py` rejects kernels
 that spill registers to scratch memory, because `kcl` does not configure scratch ([pitfalls.md](pitfalls.md)).
 

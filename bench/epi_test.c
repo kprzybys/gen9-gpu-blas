@@ -1,7 +1,7 @@
 // epi_test.c -- gen9blas_gemm_pb_f16w_ex (bias / GELU / residual fused into the GEMM epilogue) must be bit-identical
 // to gemm_pb_f16w followed by the separate GPU kernels (binop_rows ADD, gelu, binop_rows ADD), as the ggml backend
 // runs them today. Shapes of whisper large-v3-turbo's encoder (K 1280, N 1280 / 5120), M rows of activations.
-// Build: gcc -O2 -Wall -I../lib -o epi_test epi_test.c -L../lib -lgen9blas -Wl,-rpath,$(realpath ../lib) -lm
+// Build: gcc -O2 -Wall -I../lib -o epi_test epi_test.c -L../build/lib -lgen9blas -Wl,-rpath,$(realpath ../build/lib) -lm
 // Run:   ./epi_test [M=600]       exit 0 = all cases bit-identical
 #include "gen9blas_ml.h"
 #include <math.h>

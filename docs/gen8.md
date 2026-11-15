@@ -36,8 +36,8 @@ All cited sources: `sh scripts/fetch_docs.sh`.
 - The bdw output is a patch-token binary (`PTM.txt`, `*_KernelHeap.asm`), not zebin, and `-internal_options
   -cl-intel-enable-zebin` does not change that [EXP]. `lib/gen_kernels.py` therefore has a patch-token reader (token
   layouts: IGC `patch_list.h`/`patch_shared.h`, mapping as in NEO `kernel_descriptor_from_patchtokens.cpp`);
-  `make -C lib kernels_gen8.c` builds the Gen8 table `kcl_programs_gen8` (the six `.cl` programs of the library, `-noFP64bRegion`; kernels with A64 QWord messages are marked unsupported; the probes of `lib/kernels/gen8_probe.cl` go only into `kernels_gen8_probe.c` for `lib/test_gen8_probe`).
-- Check of the reader (`make -C lib check-patchtokens`): Gen9.5 compiled in both formats; of the kernels with identical
+  the CMake build generates the Gen8 table (`build/lib/kernels_gen8.c`) `kcl_programs_gen8` (the six `.cl` programs of the library, `-noFP64bRegion`; kernels with A64 QWord messages are marked unsupported; the probes of `lib/kernels/gen8_probe.cl` go only into `kernels_gen8_probe.c` for `lib/test_gen8_probe`).
+- Check of the reader (`python3 lib/check_patchtokens.py <work dir>`): Gen9.5 compiled in both formats; of the kernels with identical
   ISA, 235 have identical descriptors and 8 differ only in accepted ways (both readers' rules in
   `lib/check_patchtokens.py`), 0 errors; 16 kernels get different code from the two compile paths and are not compared
   [EXP]. Side finding: 6 Gen9 GEMV kernels (`gemv_n_*`, `gemv_nw_*`) declare 1 KB scratch in `.ze_info`

@@ -115,15 +115,18 @@ are in `results/compare-l3-power-2026-11-11.txt` and `results/compare-onednn-202
 
 ## Quick start
 
-Requirements: Linux with `i915` and read/write access to `/dev/dri/renderD128` (usually the `render` group), `gcc`,
+Requirements: Linux with `i915` and read/write access to `/dev/dri/renderD128` (usually the `render` group), `gcc`, CMake >= 3.21,
 the OpenCL headers (`CL/cl.h`; Debian/Ubuntu package `opencl-c-headers`, also for the NEO-free build),
-`ocloc` 24.35 (generates the kernels), Python 3 + NumPy. OpenBLAS (`libopenblas.so.0`) is needed for the BLAS layer.
+`ocloc` 24.35.30872.36 (generates the kernels; without it pass `-DGEN9BLAS_PREBUILT_KERNELS=<dir>` with a `kernels.c`
+and `kernels_gen8.c` generated elsewhere), Python 3 + NumPy + PyYAML (`uv sync` sets them up). OpenBLAS
+(`libopenblas.so.0`) is needed for the BLAS layer.
 
 ```sh
 sh scripts/fetch_docs.sh                         # optional: reference documents/sources into third_party/ (not needed to build)
 make -C asm check                                # optional, no GPU: rebuild the 6 assembly binaries, compare with the tracked ones
-make -C lib libgen9blas.so libgen9blas_blas.so   # NEO-free libraries (plain `make -C lib` also builds the *_neo.so variants, needs libOpenCL)
-make -C lib check                                # runs all 10 test suites on the GPU
+cmake -S . -B build -G Ninja && cmake --build build   # libgen9blas.so, libgen9blas_blas.so, libkcl.a (+ ggml backend and apps if found)
+ctest --test-dir build -L gpu                    # the test suites on the GPU
+cmake --install build --prefix ~/.local          # headers, libraries (RUNPATH $ORIGIN), gen9blasConfig.cmake, gen9blas.pc
 ```
 
 Python (NumPy arrays, zero-copy through `userptr`):

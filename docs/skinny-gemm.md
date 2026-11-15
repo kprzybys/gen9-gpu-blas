@@ -183,7 +183,7 @@ skinny case.
 `python3 lib/test_skinny.py` forces the skinny kernels for `min(M, N) <= 64` (`GEN9BLAS_SKINNY=64`) and compares with NumPy in
 FP64: both weight layouts, transposes of A and B (`.T` views), small N (role swap), alpha/beta, C as a slice (row stride), odd
 sizes and K tails (K mod 8, K mod 128), M around the tile sizes (1, 3, 4, 5, 8, 9, 16, 17, 33, 64), USM and plain memory, FP16 and
-FP32. It is part of `make -C lib check`.
+FP32. It is part of `ctest -L gpu`.
 
 ## Open work
 

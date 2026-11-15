@@ -5,7 +5,7 @@
 // Per decoder step (per layer: self Q K V O, cross Q O = 6 x 1280x1280, fc1 5120x1280, fc2 1280x5120; x 4 layers; +
 // vocabulary 51866x1280; cross K/V are computed once per window and not counted). Each call includes its own wait,
 // like the backend today. Prints ms per step, ms per token (/ M) and weight GB/s.
-// Build (kp): gcc -O2 -Wall -I../lib -o decoder_gemm decoder_gemm.c -L../lib -lgen9blas -Wl,-rpath,$(realpath ../lib) -lm
+// Build (kp): gcc -O2 -Wall -I../lib -o decoder_gemm decoder_gemm.c -L../build/lib -lgen9blas -Wl,-rpath,$(realpath ../build/lib) -lm
 // Run:  ./decoder_gemm [reps=5]
 #include "gen9blas_ml.h"
 #include <stdint.h>

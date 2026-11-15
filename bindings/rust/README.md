@@ -9,7 +9,7 @@
   available through `gen9blas::ffi`.
 
 ```sh
-make -C lib libgen9blas.so            # the library (see the top-level README)
+cmake -S ../.. -B ../../build && cmake --build ../../build   # the library (see the top-level README)
 cd bindings/rust
 cargo test                            # no GPU needed: F16 conversion, shape checks
 cargo test -- --ignored               # GPU tests against a CPU reference (Gen9 iGPU; under the GPU lock on shared hosts)
@@ -17,7 +17,7 @@ cargo run --release --example sgemm 2048
 ```
 
 Linking: `GEN9BLAS_LIB_DIR` (directory with `libgen9blas.so`) or `GEN9BLAS_PREFIX` (an install prefix). Without
-either, the build uses `lib/` of this repository. Tests and examples get an rpath to that directory. Other crates
+either, the build uses `build/lib` of this repository (`cmake -B build`). Tests and examples get an rpath to that directory. Other crates
 find the library through the system paths, `LD_LIBRARY_PATH` or their own rpath.
 
 ```rust
