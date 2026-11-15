@@ -100,6 +100,10 @@ $(BIN_DIR)/attn_paddle_tokc.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-dev
 attn-paddle: $(BIN_DIR)/attn_ernie_tokc.bin
 $(BIN_DIR)/attn_ernie_tokc.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-device
 	DEVICE=$(DEVICE) python3 -I attn_gen.py sched4 attn.cl "$(ATTN_OPTS) -DD=128 -DG=8 -DHKV=2 -DRQ=2 -DNK=2 -DQTOK -DCAUSAL=1" $@
+# The same with KV streams (llama-server -np N: one cache stream per slot; asm/attn.cl -DSTREAMS): grid dimension 1 = stream.
+attn-paddle: $(BIN_DIR)/attn_ernie_stokc.bin
+$(BIN_DIR)/attn_ernie_stokc.bin: attn.cl attn_gen.py isa.py $(BIN_DIR)/.attn-device
+	DEVICE=$(DEVICE) python3 -I attn_gen.py sched4 attn.cl "$(ATTN_OPTS) -DD=128 -DG=8 -DHKV=2 -DRQ=2 -DNK=2 -DQTOK -DCAUSAL=1 -DSTREAMS=1" $@
 FORCE:
 
 attn-check:

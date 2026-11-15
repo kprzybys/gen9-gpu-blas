@@ -50,6 +50,13 @@ int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed 
 int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
 // Small batches, 1 <= M <= 16 (several sequences decoded together): C = A . Bp with F32 activations read directly (no packing),
 // FP32 products and sums, F32 result. Returns 1 (nothing done) if the kernels are missing or M is out of range.
+// No-wait mode for chains of small products (decoding several sequences): while on, gen9blas_gemm_pb_f16w(_ex),
+// gen9blas_ffn_f16w and gen9blas_gemm_multi_f16w queue their work and return without waiting whenever their output is
+// zero-copy (USM, userptr or a registered span), with *nonfinite left 0; the GPU sets one flag slot per call on FP16
+// overflow. After gen9blas_flush() (GPU idle), gen9blas_nowait_check() returns how many calls overflowed and clears the
+// slots; the caller must then recompute (or fail) everything that used those results.
+void gen9blas_nowait(int on);
+int gen9blas_nowait_check(void);
 int gen9blas_gemm_pb_skinny(int M, const float *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
 int gen9blas_skinny_pb_supported(void);
 // gen9blas_gemm_pb_f16w with the following ops fused into the epilogue (whisper encoder): C = [gelu](A.Bp + bias) [+ R].
@@ -210,6 +217,14 @@ const char *gen9blas_error(void);
 int gen9blas_attn_supported(int D, int H, int HKV);
 int gen9blas_attn_f16kv(int D, int H, int HKV, int nq, int nk, const float *Q, const uint16_t *K, size_t k_bytes,
                         const uint16_t *V, size_t v_bytes, float *O, float scale, int vis0, int dvis, int *launches);
+// Several KV streams (llama-server -np N: ggml ne[3]) in one operation: stream s has Q/O at Q + s*sq (floats, rows
+// [t][h][d]), K/V at K + s*sk / V + s*sv (halves, rows of HKV*D), visible keys min(nk, vis0[s] + dvis*t). One k_kt, one
+// k_attn launch over all streams, one wait. Returns 1 (not handled) if no stream binary exists for (D, H/HKV, HKV), the
+// layout does not fit or the work would need more than one launch; -1 on a GPU error.
+int gen9blas_attn_f16kv_streams(int D, int H, int HKV, int ns, int nq, int nk, const float *Q, long sq, const uint16_t *K,
+                                long sk, size_t k_bytes, const uint16_t *V, long sv, size_t v_bytes, float *O, float scale,
+                                const int *vis0, int dvis, int *launches);
+int gen9blas_attn_streams_supported(int D, int H, int HKV);
 const char *gen9blas_attn_error(void);
 
 #ifdef __cplusplus

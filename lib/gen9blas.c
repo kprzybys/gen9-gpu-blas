@@ -781,8 +781,24 @@ static int epilog_hfx(cl_mem dCp, int ldp, int Mp, bf_t xC, int ldc, int N, int 
     return 0;
 }
 typedef struct { const float *bias; int gelu; const float *R; int ldr; } epi_ext_t;
+// No-wait mode (gen9blas_nowait, gen9blas.h): products that would wait for their FP16-overflow flag instead take a flag
+// slot from one USM array and return without waiting; gen9blas_nowait_check reads and clears the slots (GPU idle).
+static int nw_mode, *nw_flags, nw_cap, nw_used;
+static int *nw_take(void) {
+    if (!nw_mode) return NULL;
+    if (!nw_flags) { nw_cap = 4096; if (!(nw_flags = gen9blas_alloc((size_t)nw_cap * 4))) { nw_cap = 0; return NULL; } memset(nw_flags, 0, (size_t)nw_cap * 4); }
+    return nw_used < nw_cap ? nw_flags + nw_used++ : NULL;
+}
+void gen9blas_nowait(int on) { nw_mode = on; }
+int gen9blas_nowait_check(void) {
+    int n = 0;
+    for (int i = 0; i < nw_used; i++) n += nw_flags[i] != 0;
+    if (nw_used) memset(nw_flags, 0, (size_t)nw_used * 4);
+    nw_used = 0;
+    return n;
+}
 static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite,
-                            const epi_ext_t *ext, cl_mem preA);
+                            const epi_ext_t *ext, cl_mem preA, int *nw);
 // Packed GEMM input made once and reused (gen9blas_layer_norm_pack -> gen9blas_gemm_pa_f16w_ex).
 struct gen9blas_packed_a { cl_mem buf; size_t cap; int M, K, Kp; };
 gen9blas_packed_a *gen9blas_packed_a_new(void) { return calloc(1, sizeof(gen9blas_packed_a)); }
@@ -795,7 +811,7 @@ int gen9blas_gemm_pa_f16w_ex(const gen9blas_packed_a *pa, const gen9blas_packed 
     const epi_ext_t e = { bias, gelu, R, ldr };
     const int any = bias || gelu || R;
     if (any && !k_epi_8x) FAIL("gemm_pa_f16w_ex: the binary lacks gen9blas_epilog_hf8x");
-    return gemm_pb_f16w_any(0, pa->M, NULL, 0, P, C, ldc, nonfinite, any ? &e : NULL, pa->buf);
+    return gemm_pb_f16w_any(0, pa->M, NULL, 0, P, C, ldc, nonfinite, any ? &e : NULL, pa->buf, NULL);
 }
 
 int gen9blas_epilog_ext_supported(void) { return k_epi_8x != NULL; }
@@ -803,14 +819,14 @@ int gen9blas_gemm_pb_f16w_ex(int M, const float *A, int lda, const gen9blas_pack
                              const float *bias, int gelu, const float *R, int ldr, int *nonfinite) {
     if (!k_epi_8x) FAIL("gemm_pb_f16w_ex: the binary lacks gen9blas_epilog_hf8x");
     const epi_ext_t e = { bias, gelu, R, ldr };
-    return gemm_pb_f16w_any(0, M, A, lda, P, C, ldc, nonfinite, &e, NULL);
+    return gemm_pb_f16w_any(0, M, A, lda, P, C, ldc, nonfinite, &e, NULL, NULL);
 }
 int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
-    return gemm_pb_f16w_any(0, M, A, lda, P, C, ldc, nonfinite, NULL, NULL);
+    return gemm_pb_f16w_any(0, M, A, lda, P, C, ldc, nonfinite, NULL, NULL, NULL);
 }
 // The same with FP16 activations (ggml conv_1d: im2col result as src0, F16 kernel as src1): packed by the HS pa kernel.
 int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite) {
-    return gemm_pb_f16w_any(1, M, A, lda, P, C, ldc, nonfinite, NULL, NULL);
+    return gemm_pb_f16w_any(1, M, A, lda, P, C, ldc, nonfinite, NULL, NULL, NULL);
 }
 
 // Small batches (M <= 16) on HS-packed weights without packing A: gen9blas_skinny_pb16_<MT> (bench/hgemm.cl), F32 products
@@ -838,7 +854,7 @@ int gen9blas_gemm_pb_skinny(int M, const float *A, int lda, const gen9blas_packe
     return 0;
 }
 static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9blas_packed *P, float *C, int ldc, int *nonfinite,
-                            const epi_ext_t *ext, cl_mem preA) {
+                            const epi_ext_t *ext, cl_mem preA, int *nw) {
     static int *nf;   // USM flag word (coherent with the GPU through the LLC)
     NEW_OPERATION();
     if (!P || P->type != GEN9BLAS_HS || !types[GEN9BLAS_HS].ready || !k_pa3_f32) FAIL("gemm_pb_f16w: needs B packed as GEN9BLAS_HS");
@@ -850,8 +866,9 @@ static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9
     size_t bA = preA ? 0 : ((size_t)(M - 1) * lda + K) * (ahalf ? 2 : 4), bC = ((size_t)(M - 1) * ldc + N) * 4;
     bf_t xA = BM(NULL), xC; int zA = 1, zC;
     if ((!preA && get_obj(A, bA, &uA, 1, 0, &xA, &zA)) || get_obj(C, bC, &uC, 0, 1, &xC, &zC)) return -1;
+    if (!nw && zC) nw = nw_take();   // no-wait mode: only when the result lands in place (no copy-out after a wait)
     if (ensure_buf(&dAp, &sAp, (size_t)Mp * Kp * 2 + 4096) || ensure_buf(&dCp, &sCp, (size_t)Mp * Np * 2)) return -1;
-    *nf = 0;
+    if (!nw) *nf = 0;
     cl_mem Ap = preA ? preA : dAp;   // preA: already packed (gen9blas_layer_norm_pack)
     if (preA) {
     } else if (ahalf) {   // FP16 rows -> A3 tiles: the HS type's own packing kernel (as gemm_pb)
@@ -866,7 +883,7 @@ static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9
         size_t gm = (size_t)(Np / r->tn) * (Mp / 16) * 16, lm = 16;
         CHECK(clEnqueueNDRangeKernel(q, r->main, 1, NULL, &gm, &lm, 0, NULL, NULL));
     } else if (launch(r, Ap, 0, P->buf, 0, dCp, 0, Mp, Np, Np, Kp, Kp, 0)) return -1;
-    bf_t xnf = { NULL, nf };
+    bf_t xnf = { NULL, nw ? nw : nf };
     if (ext) {   // bias (row vector, N floats) / GELU / residual R (M x N, row stride ldr; may be C itself)
         static work_t uBias, uR;
         static float dummy[4];
@@ -880,10 +897,13 @@ static int gemm_pb_f16w_any(int ahalf, int M, const void *A, int lda, const gen9
         else if (get_obj(ext->R ? ext->R : dummy, ext->R ? ((size_t)(M - 1) * ext->ldr + N) * 4 : sizeof dummy, &uR, 1, 0, &xR, &zR)) return -1;
         if (epilog_hfx(dCp, Np, Mp, xC, ldc, N, M, xnf, xb, xR, ext->R ? ext->ldr : 0, flags)) return -1;
     } else if (epilog_hf(dCp, Np, Mp, xC, ldc, N, M, xnf)) return -1;
+    if (nw) return 0;   // queued: the caller waits later (gen9blas_flush) and reads its flag slot
     if (to_host(xC, zC, bC, C)) return -1;
     *nonfinite = *nf != 0;
     return 0;
 }
+
+
 
 // GEMM of a packed A (device) with a packed B into a device buffer C (row stride Np), banded when long.
 static int gemm_dev(type_t *r, cl_mem Ap, cl_mem Bp, cl_mem C, int Mp, int Np, int Kp) {
@@ -920,15 +940,19 @@ int gen9blas_gemm_multi_f16w(int M, const float *A, int lda, int n, const gen9bl
         if (!zC[i]) return 1;
     }
     if (ensure_buf(&dAp, &sAp, (size_t)Mp * Kp * 2 + 4096) || ensure_buf(&dCp, &sCp, (size_t)Mp * Npmax * 2)) return -1;
-    for (int i = 0; i < n; i++) nf[i] = 0;
+    int *nws[8] = { 0 };
+    for (int i = 0; i < n; i++) { nws[i] = nw_take(); if (!nws[i]) nf[i] = 0; }   // no-wait mode: own flag slots (outputs are zero-copy here)
     if (pack_a3_f32(xA, dAp, M, K, lda, Kp, Mp)) return -1;
     for (int i = 0; i < n; i++) {
         if (gemm_dev(r, dAp, P[i]->buf, dCp, Mp, P[i]->Np, Kp)) return -1;
-        bf_t xnf = { NULL, nf + i };
+        bf_t xnf = { NULL, nws[i] ? nws[i] : nf + i };
         if (epilog_hf(dCp, P[i]->Np, Mp, xC[i], ldc[i], P[i]->N, M, xnf)) return -1;
     }
+    int all = 1;
+    for (int i = 0; i < n; i++) all &= nws[i] != NULL;
+    if (all) return 0;          // no-wait mode
     if (wait_gpu()) return -1;
-    for (int i = 0; i < n; i++) nonfinite[i] = nf[i] != 0;
+    for (int i = 0; i < n; i++) nonfinite[i] = !nws[i] && nf[i] != 0;   // calls with a slot report through gen9blas_nowait_check
     return 0;
 }
 
@@ -954,11 +978,12 @@ int gen9blas_ffn_f16w(int M, const float *X, int ldx, const gen9blas_packed *Pg,
     size_t bX = ((size_t)(M - 1) * ldx + K) * 4, bY = ((size_t)(M - 1) * ldy + Nd) * 4;
     bf_t xX, xY; int zX, zY;
     if (get_obj(X, bX, &uA, 1, 0, &xX, &zX) || get_obj(Y, bY, &uC, 0, 1, &xY, &zY)) return -1;
+    int *nw = zY ? nw_take() : NULL;   // no-wait mode
     if (ensure_buf(&dAp, &sAp, (size_t)Mp * Kp * 2 + 4096) || ensure_buf(&dG, &sG, (size_t)Mp * Np * 2) ||
         ensure_buf(&dU, &sU, (size_t)Mp * Np * 2) || ensure_buf(&dH, &sH, (size_t)Mp * Pd->Kp * 2 + 4096) ||
         ensure_buf(&dCp, &sCp, (size_t)Mp * Npd * 2)) return -1;
-    *nf = 0;
-    bf_t xnf = { NULL, nf };
+    if (!nw) *nf = 0;
+    bf_t xnf = { NULL, nw ? nw : nf };
     if (pack_a3_f32(xX, dAp, M, K, ldx, Kp, Mp)) return -1;
     if (gemm_dev(r, dAp, Pg->buf, dG, Mp, Np, Kp) || gemm_dev(r, dAp, Pu->buf, dU, Mp, Np, Kp)) return -1;
     int Kpd = Pd->Kp;
@@ -968,6 +993,7 @@ int gen9blas_ffn_f16w(int M, const float *X, int ldx, const gen9blas_packed *Pg,
     CHECK(clEnqueueNDRangeKernel(q, k_swiglu, 2, NULL, gs, NULL, 0, NULL, NULL));
     if (gemm_dev(r, dH, Pd->buf, dCp, Mp, Npd, Kpd)) return -1;
     if (epilog_hf(dCp, Npd, Mp, xY, ldy, Nd, M, xnf)) return -1;
+    if (nw) return 0;
     if (to_host(xY, zY, bY, Y)) return -1;
     *nonfinite = *nf != 0;
     return 0;

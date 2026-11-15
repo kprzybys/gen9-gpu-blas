@@ -41,7 +41,15 @@ typedef float2 SV;
 #define ROWS(X) X(0) X(1) X(2) X(3)
 #endif
 
+// STREAMS (llama-server with several slots: one KV stream per sequence, ggml ne[3]): grid dimension 1 = stream s; K, Kt
+// (and in k_attn Q, O, V) are offset by s times their stream strides (elements); k_attn takes stream s's visible-key
+// start from vis[s] instead of the vis0 argument. The loop is unchanged (attn_gen.py works on it as for one stream).
+#ifdef STREAMS
+__kernel void k_kt(__global const ushort *K, __global ushort *Kt, int nk, long sk, long skt) {
+    K += get_global_id(1) * sk; Kt += get_global_id(1) * skt;
+#else
 __kernel void k_kt(__global const ushort *K, __global ushort *Kt, int nk) {
+#endif
     int i = get_global_id(0);
     int d = i % D, th = i / D, hkv = th % HKV, t = th / HKV;
     Kt[((hkv * (nk / 8) + t / 8) * D + d) * 8 + (t & 7)] = K[i];
@@ -107,7 +115,13 @@ __kernel void k_attn(__global const float *Q, __global const ushort *Kt, __globa
 #ifdef CAUSAL
                      , int vis0, int dvis
 #endif
+#ifdef STREAMS
+                     , long sq, long skt, long sv, __global const int *visv
+#endif
                      ) {
+#ifdef STREAMS
+    { const int st = get_group_id(1); Q += st * sq; O += st * sq; Kt += st * skt; V += st * sv; vis0 = visv[st]; }
+#endif
     int sg = get_group_id(0) * get_num_sub_groups() + get_sub_group_id(), lane = get_sub_group_local_id();
 #ifdef ROWVIS
     int per_head = (nq * G + RQ - 1) / RQ;
