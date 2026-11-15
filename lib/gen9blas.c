@@ -318,6 +318,19 @@ static int get_obj(const void *ptr, size_t bytes, work_t *u, int copy_in, int wr
     *result = (bf_t){ NULL, u->p }; *zc = 0; return 0;
 }
 
+// Zero-copy only (USM or userptr), no wait and no copy: 0 = *result set, 1 = would need a copy.
+static int get_obj_zc(const void *ptr, size_t bytes, int writes, bf_t *result) {
+    if (usm_contains(ptr, bytes)) { *result = (bf_t){ NULL, (void *)ptr }; return 0; }
+#ifndef GEN9BLAS_NEO
+    if (no_userptr < 0) no_userptr = getenv("GEN9BLAS_NO_USERPTR") != NULL;
+    cl_mem m;
+    if (!no_userptr && !force_copy && (m = kcl_userptr(ptr, bytes, writes))) { *result = BM(m); return 0; }
+#else
+    (void)writes;
+#endif
+    return 1;
+}
+
 #define ARG(k, i, v) CHECK(clSetKernelArg(k, i, sizeof(v), &(v)))
 // Scalar (alpha, beta) for level 3 kernels: double for FP64, float otherwise.
 static cl_int arg_scalar(const type_t *r, cl_kernel k, int i, double v) {
@@ -1346,10 +1359,10 @@ int gen9blas_attn_dec(int D, int H, int HKV, int ns, int nq, int nk, const float
     memcpy(visb, vis, (size_t)ns * 4);
     const size_t bQ = ((size_t)(ns - 1) * qs + (size_t)(nq - 1) * qt + (size_t)(H - 1) * qh + 128) * 4;
     const size_t bO = (size_t)ns * nq * H * 128 * 4;
-    bf_t xQ, xK, xV, xO, xP = { NULL, part }, xS = { NULL, visb }; int zQ, zK, zV, zO;
-    if (get_obj(Q, bQ, &uA, 1, 0, &xQ, &zQ) || get_obj(K, k_bytes, &uB, 1, 0, &xK, &zK) || get_obj(V, v_bytes, &uD, 1, 0, &xV, &zV) ||
-        get_obj(O, bO, &uC, 0, 1, &xO, &zO)) return -1;
-    if (!zK || !zV) FAIL("attn_dec: K/V not zero-copy");   // a copy of the whole cache per call would cost more than the op
+    bf_t xQ, xK, xV, xO, xP = { NULL, part }, xS = { NULL, visb }; int zQ, zO;
+    // K/V zero-copy or nothing, checked before any wait or copy: a copy of the whole cache per call would cost more than the op
+    if (get_obj_zc(K, k_bytes, 0, &xK) || get_obj_zc(V, v_bytes, 0, &xV)) { vslot--; FAIL("attn_dec: K/V not zero-copy"); }
+    if (get_obj(Q, bQ, &uA, 1, 0, &xQ, &zQ) || get_obj(O, bO, &uC, 0, 1, &xO, &zO)) return -1;
     const float qscale = scale * 1.4426950408889634f;
     cl_long a1 = qt, a2 = qh, a3 = qs, b1 = kk, b2 = kh, b3 = ks, c1 = vk, c2 = vh, c3 = vs;
     cl_kernel k = k_dec_part;
