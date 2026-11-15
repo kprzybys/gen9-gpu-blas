@@ -18,14 +18,18 @@
 
 // rowvis: binary built with -DROWVIS=1 (asm/attn.cl): per-row visible key counts (the RQ rows of a subgroup may span two
 // consecutive tokens, so dvis 1 is right for any G when RQ <= 2) and clamped row indices (n_q*G need not divide by RQ)
-typedef struct { int D, G, HKV, RQ, NK, rowvis; const char *bin; cl_kernel kt, attn; int state; } attn_bin_t;   // state: 0 untried, 1 ok, -1 failed
+// plain: IGC-compiled loop (attn_gen.py plain), no masking of a partial last key block: only n_v = min(n_k, vis0) a
+// multiple of 8*NK keys and dvis 0 (the same count for every token)
+typedef struct { int D, G, HKV, RQ, NK, rowvis, plain; const char *bin; cl_kernel kt, attn; int state; } attn_bin_t;   // state: 0 untried, 1 ok, -1 failed
 static attn_bin_t bins[] = {
-    { 128, 6, 2, 2, 2, 0, "attn_qwen_tokc.bin", NULL, NULL, 0 },    // Qwen2.5-1.5B (sched4)
-    { 64, 4, 8, 4, 2, 0, "attn_llama_tokc.bin", NULL, NULL, 0 },    // Llama-3.2-1B (sched2)
-    { 64, 1, 20, 4, 2, 0, "attn_whisper_tokc.bin", NULL, NULL, 0 }, // whisper large-v3(-turbo) encoder (sched2); G < RQ: dvis 0 only
-    { 64, 1, 8, 4, 2, 0, "attn_nemo_tokc.bin", NULL, NULL, 0 },     // NeMo Nemotron 3 Diarization encoder (whisper's kernel, 8 heads)
-    { 128, 7, 4, 2, 2, 1, "attn_qwen7b_tokc.bin", NULL, NULL, 0 },  // Qwen2.5-7B (sched4, ROWVIS; docs/attention-gpu.md section 13)
-    { 128, 2, 8, 2, 2, 0, "attn_qwen3_tokc.bin", NULL, NULL, 0 },   // Qwen3 0.6B/1.7B, Qwen3-Embedding-0.6B (sched4; section 14)
+    { 128, 6, 2, 2, 2, 0, 0, "attn_qwen_tokc.bin", NULL, NULL, 0 },    // Qwen2.5-1.5B (sched4)
+    { 64, 4, 8, 4, 2, 0, 0, "attn_llama_tokc.bin", NULL, NULL, 0 },    // Llama-3.2-1B (sched2)
+    { 64, 1, 20, 4, 2, 0, 0, "attn_whisper_tokc.bin", NULL, NULL, 0 }, // whisper large-v3(-turbo) encoder (sched2); G < RQ: dvis 0 only
+    { 64, 1, 8, 4, 2, 0, 0, "attn_nemo_tokc.bin", NULL, NULL, 0 },     // NeMo Nemotron 3 Diarization encoder (whisper's kernel, 8 heads)
+    { 128, 7, 4, 2, 2, 1, 0, "attn_qwen7b_tokc.bin", NULL, NULL, 0 },  // Qwen2.5-7B (sched4, ROWVIS; docs/attention-gpu.md section 13)
+    { 128, 2, 8, 2, 2, 0, 0, "attn_qwen3_tokc.bin", NULL, NULL, 0 },   // Qwen3 0.6B/1.7B, Qwen3-Embedding-0.6B (sched4; section 14)
+    { 72, 1, 16, 2, 2, 0, 0, "attn_paddle_tokc.bin", NULL, NULL, 0 },  // PaddleOCR-VL vision encoder (SigLIP 16 x 72, sched5; G < RQ: dvis 0 only)
+    { 128, 8, 2, 2, 2, 0, 0, "attn_ernie_tokc.bin", NULL, NULL, 0 },   // PaddleOCR-VL text model (ERNIE 4.5 0.3B, sched4)
 };
 static cl_mem dKt; static size_t sKt;
 static char aerr[512];
@@ -34,10 +38,15 @@ static char aerr[512];
 
 const char *gen9blas_attn_error(void) { return aerr; }
 
-static attn_bin_t *find_bin(int D, int H, int HKV) {
+// KV-stream binaries (asm/attn.cl -DSTREAMS): grid dimension 1 = stream, per-stream visible counts (gen9blas_attn_f16kv_streams)
+static attn_bin_t sbins[] = {
+    { 128, 8, 2, 2, 2, 0, 0, "attn_ernie_stokc.bin", NULL, NULL, 0 },   // PaddleOCR-VL text model, llama-server -np N
+};
+
+static attn_bin_t *find_in(attn_bin_t *tab, size_t n, int D, int H, int HKV) {
     if (HKV <= 0 || H % HKV) return NULL;
-    for (size_t i = 0; i < sizeof bins / sizeof bins[0]; i++) {
-        attn_bin_t *b = &bins[i];
+    for (size_t i = 0; i < n; i++) {
+        attn_bin_t *b = &tab[i];
         if (b->D != D || b->HKV != HKV || b->G != H / HKV) continue;
         if (b->state == 0) {
             cl_program pr; cl_int e1 = CL_SUCCESS, e2 = CL_SUCCESS;
@@ -53,6 +62,9 @@ static attn_bin_t *find_bin(int D, int H, int HKV) {
     }
     return NULL;
 }
+static attn_bin_t *find_bin(int D, int H, int HKV) { return find_in(bins, sizeof bins / sizeof bins[0], D, H, HKV); }
+static attn_bin_t *find_sbin(int D, int H, int HKV) { return find_in(sbins, sizeof sbins / sizeof sbins[0], D, H, HKV); }
+int gen9blas_attn_streams_supported(int D, int H, int HKV) { return find_sbin(D, H, HKV) != NULL; }
 
 int gen9blas_attn_supported(int D, int H, int HKV) { return find_bin(D, H, HKV) != NULL; }
 
@@ -82,6 +94,7 @@ int gen9blas_attn_f16kv(int D, int H, int HKV, int nq, int nk, const float *Q, c
     // causal: unsupported. ROWVIS binaries take each row's own count (rows differ by at most dvis * (RQ - 1) keys,
     // all in the last block: RQ <= 2 asserted by attn_gen.py).
     if (G % b->RQ && dvis != 0 && !b->rowvis) return 1;
+    if (b->plain && (dvis != 0 || (vis0 < nk ? vis0 : nk) % (8 * NK))) return 1;
     const size_t row = (size_t)HKV * D * 2;
     if (k_bytes < (size_t)nk * row || v_bytes < (size_t)nk * row) return 1;
     if (((uintptr_t)Q | (uintptr_t)K | (uintptr_t)V | (uintptr_t)O) & 15) return 1;   // OWord block reads / writes
@@ -132,6 +145,68 @@ int gen9blas_attn_f16kv(int D, int H, int HKV, int nq, int nk, const float *Q, c
         t0 = t1;
     }
     if (launches) *launches = n_launch;
+    if (kcl_wait() != CL_SUCCESS) AFAIL("GPU execution error (kcl; a reset after the preemption timeout?)");
+    return 0;
+}
+
+// Several KV streams in one operation (gen9blas.h): one k_kt over all streams into one Kt buffer, one k_attn launch with
+// grid dimension 1 = stream, one wait. Strides in elements (Q/O floats, K/V halves); vis0[s] per stream, dvis common.
+int gen9blas_attn_f16kv_streams(int D, int H, int HKV, int ns, int nq, int nk, const float *Q, long sq, const uint16_t *K,
+                                long sk, size_t k_bytes, const uint16_t *V, long sv, size_t v_bytes, float *O, float scale,
+                                const int *vis0, int dvis, int *launches) {
+    static int visb[1024] __attribute__((aligned(4096)));
+    attn_bin_t *b = find_sbin(D, H, HKV);
+    if (!b) return 1;
+    const int G = H / HKV, NK = b->NK;
+    if (ns < 1 || nq <= 0 || nk <= 0 || nk % (8 * NK) || (dvis != 0 && dvis != 1) || ((long)nq * G) % b->RQ ||
+        (G % b->RQ && dvis != 0)) return 1;
+    for (int st = 0; st < ns; st++) if (vis0[st] < 1) return 1;
+    const size_t row = (size_t)HKV * D * 2;
+    const long qrow = (long)H * D;
+    if (sq < (long)nq * qrow || sk < (long)nk * HKV * D || sv < (long)nk * HKV * D) return 1;
+    if (k_bytes < ((size_t)(ns - 1) * sk + (size_t)nk * HKV * D) * 2 || v_bytes < ((size_t)(ns - 1) * sv + (size_t)nk * HKV * D) * 2) return 1;
+    if (((uintptr_t)Q | (uintptr_t)K | (uintptr_t)V | (uintptr_t)O | (uintptr_t)(sq * 4) | (uintptr_t)(sk * 2) | (uintptr_t)(sv * 2)) & 15) return 1;
+    double fl = 0;   // one launch: decline what would be long (the single-stream path splits, this one does not)
+    for (int st = 0; st < ns; st++) for (int t = 0; t < nq; t++) { long v = vis0[st] + (long)dvis * t; fl += 4.0 * H * D * (v < nk ? v : nk); }
+    if (fl > 2 * max_flop()) return 1;
+    const long skt = (long)nk * HKV * D;
+    const size_t ktb = (size_t)ns * skt * 2 + (size_t)NK * D * 16;
+    cl_int err;
+    if (sKt < ktb) {
+        if (dKt) clReleaseMemObject(dKt);
+        dKt = clCreateBuffer(NULL, CL_MEM_READ_WRITE, ktb, NULL, &err);
+        if (err != CL_SUCCESS) { dKt = NULL; sKt = 0; AFAIL("Kt buffer of %zu B: %d", ktb, err); }
+        sKt = ktb;
+    }
+    if (ns > 1024) return 1;
+    memcpy(visb, vis0, (size_t)ns * 4);   // read by k_attn through userptr (the previous user waited before returning)
+    cl_command_queue q = NULL;
+    kcl_new_operation();
+    const size_t qb = ((size_t)(ns - 1) * sq + (size_t)nq * qrow) * 4;
+    cl_mem mK = kcl_userptr(K, k_bytes, 0), mV = kcl_userptr(V, v_bytes, 0);
+    cl_mem mQ = kcl_userptr(Q, qb, 0), mO = kcl_userptr(O, qb, 1);
+    cl_mem mVis = kcl_userptr(visb, (size_t)ns * 4, 0);
+    if (!mK || !mV || !mQ || !mO || !mVis) { snprintf(aerr, sizeof aerr, "kcl_userptr failed (K/V %zu B)", k_bytes); return 1; }
+    size_t gkt[2] = { (size_t)nk * HKV * D, (size_t)ns }, lkt[2] = { 256, 1 };
+    cl_long a_sk = sk, a_skt = skt, a_sq = sq, a_sv = sv;
+    ACHECK(clSetKernelArg(b->kt, 0, sizeof mK, &mK)); ACHECK(clSetKernelArg(b->kt, 1, sizeof dKt, &dKt));
+    ACHECK(clSetKernelArg(b->kt, 2, sizeof nk, &nk)); ACHECK(clSetKernelArg(b->kt, 3, sizeof a_sk, &a_sk));
+    ACHECK(clSetKernelArg(b->kt, 4, sizeof a_skt, &a_skt));
+    ACHECK(clEnqueueNDRangeKernel(q, b->kt, 2, NULL, gkt, lkt, 0, NULL, NULL));
+    const float qscale = scale * 1.4426950408889634f;
+    const int v0 = 0;   // unused with STREAMS (vis[] per stream)
+    size_t g0 = (size_t)HKV * ((nq * G + b->RQ - 1) / b->RQ) * 8, l0 = local_size(g0);
+    if (!l0) AFAIL("grid %zu", g0);
+    size_t ga[2] = { g0, (size_t)ns }, la[2] = { l0, 1 };
+    ACHECK(clSetKernelArg(b->attn, 0, sizeof mQ, &mQ)); ACHECK(clSetKernelArg(b->attn, 1, sizeof dKt, &dKt));
+    ACHECK(clSetKernelArg(b->attn, 2, sizeof mV, &mV)); ACHECK(clSetKernelArg(b->attn, 3, sizeof mO, &mO));
+    ACHECK(clSetKernelArg(b->attn, 4, sizeof nq, &nq)); ACHECK(clSetKernelArg(b->attn, 5, sizeof nk, &nk));
+    ACHECK(clSetKernelArg(b->attn, 6, sizeof qscale, &qscale)); ACHECK(clSetKernelArg(b->attn, 7, sizeof v0, &v0));
+    ACHECK(clSetKernelArg(b->attn, 8, sizeof dvis, &dvis)); ACHECK(clSetKernelArg(b->attn, 9, sizeof a_sq, &a_sq));
+    ACHECK(clSetKernelArg(b->attn, 10, sizeof a_skt, &a_skt)); ACHECK(clSetKernelArg(b->attn, 11, sizeof a_sv, &a_sv));
+    ACHECK(clSetKernelArg(b->attn, 12, sizeof mVis, &mVis));
+    ACHECK(clEnqueueNDRangeKernel(q, b->attn, 2, NULL, ga, la, 0, NULL, NULL));
+    if (launches) *launches = 1;
     if (kcl_wait() != CL_SUCCESS) AFAIL("GPU execution error (kcl; a reset after the preemption timeout?)");
     return 0;
 }

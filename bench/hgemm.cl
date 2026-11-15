@@ -1059,6 +1059,216 @@ __kernel void gen9blas_rope(__global const float *x, long xs1, long xs2, __globa
         yp[i1] = x0 * s + x1 * c;
     }
 }
+// ggml ROPE, mode GGML_ROPE_TYPE_MROPE (ggml_rope_multi; PaddleOCR-VL / ERNIE text model): as gen9blas_rope in NEOX pair
+// order (i, i + n_dims/2), but pair j takes its position from sector j % (s0+s1+s2+s3): t (pos[t]) for sector < s0, h
+// (pos[t + n_tok]) below s0+s1, w (pos[t + 2 n_tok]) below s0+s1+s2, e (pos[t + 3 n_tok]) after; theta = p * theta_scale^j
+// by repeated multiplication as ggml_mrope_cache_init (no reset per section: indep_sects is false for MROPE).
+// Mode VISION (ggml_rope_multi with GGML_ROPE_TYPE_VISION; mtmd's Qwen2-VL-style encoders, PaddleOCR-VL): indep = 1, the
+// running thetas are reset at section starts exactly as ggml's else-if chain does (empty sections included), pairs (j, j + pairoff)
+// with pairoff = n_dims = ne0 / 2, so all ne0 elements are rotated. The grid's first dimension is the number of pairs.
+__kernel void gen9blas_rope_multi(__global const float *x, long xs1, long xs2, __global float *y, long ys1, long ys2,
+                                  __global const int *pos, __global const float *ff, int has_ff, int nh, int n_dims, int n_tok,
+                                  int s0, int s1, int s2, int s3, float theta_scale, float freq_scale, float ext_factor,
+                                  float attn_factor, float corr0, float corr1, int pairoff, int indep) {
+    const int j = get_global_id(0), t = get_global_id(1);
+    const int sd = s0 + s1 + s2 + s3, sector = j % sd;
+    const int sec = sector < s0 ? 0 : sector < s0 + s1 ? 1 : sector < s0 + s1 + s2 ? 2 : 3;
+    // the four running thetas of ggml_mrope_cache_init, replayed up to pair j (with its else-if reset chain when indep)
+    const float p0 = (float)pos[t], p1 = (float)pos[t + n_tok], p2 = (float)pos[t + 2 * n_tok], p3 = (float)pos[t + 3 * n_tok];
+    float th0 = p0, th1 = p1, th2 = p2, th3 = p3;
+    for (int k = 0; k < j; k++) {
+        if (indep) {
+            const int sk = k % sd;
+            if (sk == 0) th0 = p0; else if (sk == s0) th1 = p1; else if (sk == s0 + s1) th2 = p2; else if (sk == s0 + s1 + s2) th3 = p3;
+        }
+        th0 *= theta_scale; th1 *= theta_scale; th2 *= theta_scale; th3 *= theta_scale;
+    }
+    if (indep) {
+        if (sector == 0) th0 = p0; else if (sector == s0) th1 = p1; else if (sector == s0 + s1) th2 = p2; else if (sector == s0 + s1 + s2) th3 = p3;
+    }
+    const float theta = sec == 0 ? th0 : sec == 1 ? th1 : sec == 2 ? th2 : th3;
+    const float theta_extrap = has_ff ? theta / ff[j] : theta;
+    const float theta_interp = freq_scale * theta_extrap;
+    float th = theta_interp, mscale = attn_factor;
+    if (ext_factor != 0.0f) {
+        const float yv = ((float)j - corr0) / fmax(0.001f, corr1 - corr0);
+        const float ramp_mix = (1.0f - fmin(1.0f, fmax(0.0f, yv))) * ext_factor;
+        th = theta_interp * (1.0f - ramp_mix) + theta_extrap * ramp_mix;
+        mscale *= 1.0f + 0.1f * log(1.0f / freq_scale);
+    }
+    const float c = cos(th) * mscale, s = sin(th) * mscale;
+    const int i0 = j, i1 = j + pairoff;
+    for (int h = 0; h < nh; h++) {
+        __global const float *xp = x + t * xs2 + h * xs1;
+        __global float *yp = y + t * ys2 + h * ys1;
+        const float x0 = xp[i0], x1 = xp[i1];
+        yp[i0] = x0 * c - x1 * s;
+        yp[i1] = x0 * s + x1 * c;
+    }
+}
+// ggml CPY / CONT / DUP between F32 and F16 (tin, tout: 0 = F32, 1 = F16) with any byte strides (views, permutes) and
+// different shapes of the same element count (ggml_cont_Nd): dst element (i0, i1, i2, i3) takes the source element with
+// the same row-major linear index. F32 -> F16 rounds to nearest even (vstore_half_rte, = ggml_cpu_fp32_to_fp16);
+// same type: bit copy. same: the shapes are equal (no index division). Grid (dne0, dne1, dne2 * dne3).
+__kernel void gen9blas_cpy_any(__global const uchar *src, long sb0, long sb1, long sb2, long sb3, int sne0, int sne1, int sne2,
+                               __global uchar *dst, long db0, long db1, long db2, long db3, int dne0, int dne1, int dne2,
+                               int tin, int tout, int same) {
+    const int i0 = get_global_id(0), i1 = get_global_id(1), p = get_global_id(2);
+    const int i2 = p % dne2, i3 = p / dne2;
+    int j0 = i0, j1 = i1, j2 = i2, j3 = i3;
+    if (!same) {
+        long l = (((long)i3 * dne2 + i2) * dne1 + i1) * dne0 + i0;
+        j0 = (int)(l % sne0); l /= sne0; j1 = (int)(l % sne1); l /= sne1; j2 = (int)(l % sne2); j3 = (int)(l / sne2);
+    }
+    __global const uchar *sp = src + j0 * sb0 + j1 * sb1 + j2 * sb2 + j3 * sb3;
+    __global uchar *dp = dst + i0 * db0 + i1 * db1 + i2 * db2 + i3 * db3;
+    if (tin == tout) {
+        if (tin) *(__global ushort *)dp = *(__global const ushort *)sp;
+        else *(__global uint *)dp = *(__global const uint *)sp;
+    } else if (tout) vstore_half_rte(*(__global const float *)sp, 0, (__global half *)dp);
+    else *(__global float *)dp = vload_half(0, (__global const half *)sp);
+}
+// ggml UPSCALE / ggml_interpolate, F32, modes as ggml-cpu: 0 nearest, 1 bilinear, 1 + antialias (aa) (triangle filter,
+// PyTorch antialias=True), align corners (ac). Byte strides for source and destination. Grid (ne0, ne1, ne2 * ne3).
+__kernel void gen9blas_upscale_f32(__global const uchar *src, long sb0, long sb1, long sb2, long sb3, int sne0, int sne1,
+                                   __global uchar *dst, long db0, long db1, long db2, long db3, int ne2,
+                                   float sf0, float sf1, float sf2, float sf3, int mode, int aa, float pixel_offset) {
+    const int i0 = get_global_id(0), i1 = get_global_id(1), p = get_global_id(2);
+    const int i2 = p % ne2, i3 = p / ne2;
+    const long i02 = (long)(i2 / sf2), i03 = (long)(i3 / sf3);
+    __global const uchar *s23 = src + i02 * sb2 + i03 * sb3;
+    float val;
+    if (mode == 0) {
+        val = *(__global const float *)(s23 + (long)(i0 / sf0) * sb0 + (long)(i1 / sf1) * sb1);
+    } else if (aa) {
+        const float support1 = fmax(1.0f, 1.0f / sf1), invscale1 = 1.0f / support1;
+        const float support0 = fmax(1.0f, 1.0f / sf0), invscale0 = 1.0f / support0;
+        const float yy = ((float)i1 + pixel_offset) / sf1, xx = ((float)i0 + pixel_offset) / sf0;
+        const long x_min = max((long)(xx - support0 + pixel_offset), 0L), x_max = min((long)(xx + support0 + pixel_offset), (long)sne0);
+        const long y_min = max((long)(yy - support1 + pixel_offset), 0L), y_max = min((long)(yy + support1 + pixel_offset), (long)sne1);
+        float acc = 0.0f, tw = 0.0f;
+        for (long sy = y_min; sy < y_max; sy++) {
+            const float wy = fmax(1.0f - fabs(((float)sy - yy + pixel_offset) * invscale1), 0.0f);
+            for (long sx = x_min; sx < x_max; sx++) {
+                const float wx = fmax(1.0f - fabs(((float)sx - xx + pixel_offset) * invscale0), 0.0f);
+                const float w = wx * wy;
+                if (w <= 0.0f) continue;
+                acc += *(__global const float *)(s23 + sx * sb0 + sy * sb1) * w;
+                tw += w;
+            }
+        }
+        val = tw > 0.0f ? acc / tw : acc;
+    } else {
+        const float yy = ((float)i1 + pixel_offset) / sf1 - pixel_offset, xx = ((float)i0 + pixel_offset) / sf0 - pixel_offset;
+        long y0 = (long)floor(yy), x0 = (long)floor(xx), y1 = y0 + 1, x1 = x0 + 1;
+        y0 = max(0L, min(y0, (long)sne1 - 1)); y1 = max(0L, min(y1, (long)sne1 - 1));
+        x0 = max(0L, min(x0, (long)sne0 - 1)); x1 = max(0L, min(x1, (long)sne0 - 1));
+        const float dy = fmax(0.0f, fmin(yy - (float)y0, 1.0f)), dx = fmax(0.0f, fmin(xx - (float)x0, 1.0f));
+        const float a = *(__global const float *)(s23 + x0 * sb0 + y0 * sb1), b = *(__global const float *)(s23 + x1 * sb0 + y0 * sb1);
+        const float c = *(__global const float *)(s23 + x0 * sb0 + y1 * sb1), d = *(__global const float *)(s23 + x1 * sb0 + y1 * sb1);
+        val = a * (1 - dx) * (1 - dy) + b * dx * (1 - dy) + c * (1 - dx) * dy + d * dx * dy;
+    }
+    *(__global float *)(dst + i0 * db0 + i1 * db1 + i2 * db2 + i3 * db3) = val;
+}
+// Attention for decoding several KV streams (llama-server -np N: one or a few new tokens per stream), D = 128, G <= 8
+// query heads per KV head. K / V are read in place from llama.cpp's cache layout (row = key, [HKV][D] halves per row, any
+// row / head / stream strides): no transposed copy (the streams kernel of attn.cl transposes all of K in every step).
+// Split over keys (flash-decoding): work-group = one SIMD16 subgroup for (stream s, token t, KV head g, head group hg of
+// DEC_HG query heads, chunk c of `chunk` keys); writes per query head (m, l, acc[D]) in the exp2 domain to part[];
+// gen9blas_attn_dec_comb merges the chunks. 2 heads per work-group keep the accumulators in registers (8 and 4 spilled
+// 8 / 2 KB to scratch); the head groups of one chunk run side by side and share its K/V rows through L3.
+// Q K^T: lane = 8 dims, each K row read whole (16 lanes x 16 B, one 256 B line run; lane = key with per-lane rows was
+// 3.5 ms for 12 streams at 2000 keys: 16 lines per message), dot products reduced over the subgroup; Q in registers,
+// scaled by qscale = scale * log2 e. P V: lane = 8 output dims, p broadcast from the key lanes. FP32 accumulation.
+// Token t of stream s sees keys [0, vis[s] + dvis * t) (clamped to nk); the keys past it are never read.
+#define DEC_D 128
+#define DEC_HG 2
+__kernel __attribute__((reqd_work_group_size(16, 1, 1))) __attribute__((intel_reqd_sub_group_size(16)))
+void gen9blas_attn_dec_part(__global const float *Q, long qt, long qh, long qs, __global const half *K, long kk, long kh, long ks,
+                            __global const half *V, long vk, long vh, long vs, __global const int *vis, int dvis, int nq,
+                            int HKV, int G, int nk, int chunk, int nchunk, float qscale, __global float *part) {
+    const int ngr = (G + DEC_HG - 1) / DEC_HG;   // head groups of one chunk are neighbours in the grid (shared K/V in L3)
+    const int lane = get_local_id(0), hg = get_group_id(1) % ngr, c = get_group_id(1) / ngr, idx = get_group_id(2);
+    const int g = idx % HKV, t = (idx / HKV) % nq, s = idx / (HKV * nq);
+    const int h0 = g * G + hg * DEC_HG, nh = min(DEC_HG, G - hg * DEC_HG);
+    int vt = vis[s] + dvis * t; vt = vt < nk ? vt : nk;
+    const int k0 = c * chunk, k1 = min(k0 + chunk, vt);
+    // part: [s][t][h (all H heads of the stream's token)][chunk][2 + D]
+    __global float *pp = part + (((long)(s * nq + t) * (HKV * G) + h0) * nchunk + c) * (2 + DEC_D);
+    const long hstride = (long)nchunk * (2 + DEC_D);
+    if (k0 >= k1) {   // chunk past the visible keys: l = 0 marks it empty for the merge
+        if (lane < nh) { pp[lane * hstride] = -INFINITY; pp[lane * hstride + 1] = 0.0f; }
+        return;
+    }
+    float8 qv[DEC_HG];   // lane = 8 dims of each head's query, scaled
+    for (int hh = 0; hh < DEC_HG; hh++)
+        qv[hh] = hh < nh ? vload8(0, Q + (long)s * qs + (long)t * qt + (long)(h0 + hh) * qh + lane * 8) * qscale : (float8)(0.0f);
+    float m[DEC_HG], l[DEC_HG];
+    float8 acc[DEC_HG];
+    for (int hh = 0; hh < DEC_HG; hh++) { m[hh] = -INFINITY; l[hh] = 0.0f; acc[hh] = (float8)(0.0f); }
+    __global const half *Kb = K + (long)s * ks + (long)g * kh + lane * 8, *Vb = V + (long)s * vs + (long)g * vh + lane * 8;
+    for (int kb = k0; kb < k1; kb += 16) {
+        const int nv = min(16, k1 - kb);
+        float sc[DEC_HG];   // lane j: score of key kb + j
+        for (int hh = 0; hh < DEC_HG; hh++) sc[hh] = 0.0f;
+        for (int j = 0; j < 16; j++) {   // K row j read whole (16 lanes x 16 B), dot per head reduced over the lanes
+            if (j >= nv) break;
+            const float8 kr = vload_half8(0, Kb + (long)(kb + j) * kk);
+            for (int hh = 0; hh < DEC_HG; hh++) {
+                const float r = sub_group_reduce_add(dot(kr.lo, qv[hh].lo) + dot(kr.hi, qv[hh].hi));
+                if (lane == j) sc[hh] = r;
+            }
+        }
+        float p[DEC_HG];
+        for (int hh = 0; hh < DEC_HG; hh++) {
+            const float x = lane < nv ? sc[hh] : -INFINITY;
+            const float mn = fmax(m[hh], sub_group_reduce_max(x));
+            const float a = exp2(m[hh] - mn);
+            p[hh] = lane < nv ? exp2(x - mn) : 0.0f;
+            l[hh] = l[hh] * a + sub_group_reduce_add(p[hh]);
+            acc[hh] *= a;
+            m[hh] = mn;
+        }
+        for (int j = 0; j < 16; j++) {
+            if (j >= nv) break;
+            const float8 vv = vload_half8(0, Vb + (long)(kb + j) * vk);
+            for (int hh = 0; hh < DEC_HG; hh++) acc[hh] += sub_group_broadcast(p[hh], j) * vv;
+        }
+    }
+    for (int hh = 0; hh < nh; hh++) {
+        __global float *ph = pp + hh * hstride;
+        if (lane == 0) { ph[0] = m[hh]; ph[1] = l[hh]; }
+        vstore8(acc[hh], 0, ph + 2 + lane * 8);
+    }
+}
+// Merge of gen9blas_attn_dec_part's chunks: O[s][t][h][d] (llama.cpp's FLASH_ATTN_EXT output [D, H, nq, ns], contiguous)
+// = sum_c acc_c 2^(m_c - M) / sum_c l_c 2^(m_c - M) over the non-empty chunks. Grid (D, H, ns * nq).
+__kernel void gen9blas_attn_dec_comb(__global const float *part, __global float *O, int H, int nchunk) {
+    const int d = get_global_id(0), h = get_global_id(1), st = get_global_id(2);
+    __global const float *pb = part + ((long)st * H + h) * nchunk * (2 + DEC_D);
+    float M = -INFINITY;
+    for (int c = 0; c < nchunk; c++) { __global const float *pc = pb + (long)c * (2 + DEC_D); if (pc[1] > 0.0f) M = fmax(M, pc[0]); }
+    float L = 0.0f, a = 0.0f;
+    for (int c = 0; c < nchunk; c++) {
+        __global const float *pc = pb + (long)c * (2 + DEC_D);
+        if (pc[1] > 0.0f) { const float w = exp2(pc[0] - M); L += pc[1] * w; a += pc[2 + d] * w; }
+    }
+    O[((long)st * H + h) * DEC_D + d] = a / L;
+}
+// ggml SET_ROWS, F32 rows -> F16 rows (the KV-cache writes of llama.cpp): dst row idx[i] of plane (i02, i03) = src row i,
+// rounded to nearest even (vstore_half_rte, = ggml_cpu_fp32_to_fp16). Strides in elements (src floats, dst halves), index
+// strides in bytes; idx64: indices are int64 (else int32); indices broadcast over planes as ggml-cpu (i11 = i02 % ne11,
+// i12 = i03 % ne12). An index outside [0, ne1) sets *bad and writes nothing. Grid (nc, nr, ne02 * ne03).
+__kernel void gen9blas_set_rows_f16(__global const float *src, long s1, long s2, long s3, __global const uchar *idx,
+                                    long b10, long b11, long b12, int idx64, int ne11, int ne12, int ne02,
+                                    __global half *dst, long d1, long d2, long d3, long ne1, __global int *bad) {
+    const int c = get_global_id(0), i = get_global_id(1), p = get_global_id(2);
+    const int i02 = p % ne02, i03 = p / ne02;
+    __global const uchar *ip = idx + i * b10 + (i02 % ne11) * b11 + (i03 % ne12) * b12;
+    const long i1 = idx64 ? *(__global const long *)ip : (long)*(__global const int *)ip;
+    if (i1 < 0 || i1 >= ne1) { if (c == 0) atomic_or(bad, 1); return; }
+    vstore_half_rte(src[i * s1 + i02 * s2 + i03 * s3 + c], 0, dst + i1 * d1 + i02 * d2 + i03 * d3 + c);
+}
 // ggml NORM (LayerNorm without affine) [* w] [+ b], one work-group of 128 per row (grid (128, M)), as ggml-cpu:
 // mean = sum / K, variance = sum((x - mean)^2) / K, y = (x - mean) * (1 / sqrt(variance + eps)), then * w, then + b.
 __kernel __attribute__((reqd_work_group_size(128, 1, 1)))
@@ -1176,3 +1386,47 @@ __kernel void gen9blas_gelu_erf(__global const float *x, __global float *y) {
     y[i] = 0.5f * v * (1.0f + erf(v * 0.70710678118654752440f));
 }
 #pragma OPENCL FP_CONTRACT ON
+
+// ggml backend, small batches (several sequences decoded together, kp-docsearch PaddleOCR-VL): C[m][n] = sum_k A[m][k] *
+// B[k][n] for M <= MT rows of F32 activations against GEN9BLAS_HS packed weights (PK_IDX_B16: panels of 16 columns, for
+// every k the 16 halves of the panel contiguous), FP32 products and sums, F32 result written straight into C (no packing
+// of A, no FP16 intermediate, no epilogue kernel). Work-group = SKP_S SIMD16 subgroups on one panel, lane = column; subgroup
+// s takes the 16-k steps s, s + S, ... (two 256 B block reads per step, S x 512 B contiguous per group step: the
+// contiguity lesson of docs/skinny-gemm.md (e)); partial sums reduced in local memory by subgroup m for row m.
+// Rows of A past K read as 0 (the packed B is zero there anyway). *nonfinite |= 1 for an inf / NaN result.
+// Grid: (Np / 16) x (16 * SKP_S), local 16 * SKP_S.
+#define SKP_S 16
+#define SKP_ROW(m) if ((m) < M) { const float a = k + l < K ? A[(size_t)(m) * lda + k + l] : 0.0f; \
+    _Pragma("unroll") for (int j = 0; j < 8; j++) acc##m = fma(sub_group_broadcast(a, j), w0[j], acc##m); \
+    _Pragma("unroll") for (int j = 0; j < 8; j++) acc##m = fma(sub_group_broadcast(a, 8 + j), w1[j], acc##m); }
+#define SKP_DECL(m) float acc##m = 0.0f;
+#define SKP_PART(m) part[s][m][l] = acc##m;
+#define SKP_R4(X) X(0) X(1) X(2) X(3)
+#define SKP_R8(X) SKP_R4(X) X(4) X(5) X(6) X(7)
+#define SKP_R16(X) SKP_R8(X) X(8) X(9) X(10) X(11) X(12) X(13) X(14) X(15)
+#define SKINNY_PB16(MT) \
+__attribute__((intel_reqd_sub_group_size(16))) __attribute__((reqd_work_group_size(16 * SKP_S, 1, 1))) \
+__kernel void gen9blas_skinny_pb16_##MT(__global const float *A, int lda, int M, int K, __global const ushort *Bp, int Kp, \
+                                         __global float *C, int ldc, int N, __global int *nonfinite) { \
+    __local float part[SKP_S][MT][16]; \
+    const int p = get_group_id(0), s = get_sub_group_id(), l = get_sub_group_local_id(); \
+    const __global ushort *bp = Bp + (size_t)p * Kp * 16; \
+    SKP_R##MT(SKP_DECL) \
+    for (int k = s * 16; k < Kp; k += SKP_S * 16) { \
+        const float8 w0 = convert_float8(as_half8(intel_sub_group_block_read_us8(bp + (size_t)k * 16))); \
+        const float8 w1 = convert_float8(as_half8(intel_sub_group_block_read_us8(bp + (size_t)k * 16 + 128))); \
+        SKP_R##MT(SKP_ROW) \
+    } \
+    SKP_R##MT(SKP_PART) \
+    barrier(CLK_LOCAL_MEM_FENCE); \
+    const int n = p * 16 + l; \
+    if (s < MT && s < M && n < N) { \
+        float v = 0.0f; \
+        _Pragma("unroll") for (int i = 0; i < SKP_S; i++) v += part[i][s][l]; \
+        if (!isfinite(v)) atomic_or(nonfinite, 1); \
+        C[(size_t)s * ldc + n] = v; \
+    } \
+}
+SKINNY_PB16(4)
+SKINNY_PB16(8)
+SKINNY_PB16(16)

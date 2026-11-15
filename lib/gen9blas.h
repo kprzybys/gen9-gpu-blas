@@ -48,6 +48,17 @@ void gen9blas_packed_free(gen9blas_packed *Bp);
 int gen9blas_gemm_pb_f16w(int M, const float *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
 // the same with FP16 activations (lda in elements)
 int gen9blas_gemm_pb_f16w_h(int M, const uint16_t *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
+// Small batches, 1 <= M <= 16 (several sequences decoded together): C = A . Bp with F32 activations read directly (no packing),
+// FP32 products and sums, F32 result. Returns 1 (nothing done) if the kernels are missing or M is out of range.
+// No-wait mode for chains of small products (decoding several sequences): while on, gen9blas_gemm_pb_f16w(_ex),
+// gen9blas_ffn_f16w and gen9blas_gemm_multi_f16w queue their work and return without waiting whenever their output is
+// zero-copy (USM, userptr or a registered span), with *nonfinite left 0; the GPU sets one flag slot per call on FP16
+// overflow. After gen9blas_flush() (GPU idle), gen9blas_nowait_check() returns how many calls overflowed and clears the
+// slots; the caller must then recompute (or fail) everything that used those results.
+void gen9blas_nowait(int on);
+int gen9blas_nowait_check(void);
+int gen9blas_gemm_pb_skinny(int M, const float *A, int lda, const gen9blas_packed *Bp, float *C, int ldc, int *nonfinite);
+int gen9blas_skinny_pb_supported(void);
 // gen9blas_gemm_pb_f16w with the following ops fused into the epilogue (whisper encoder): C = [gelu](A.Bp + bias) [+ R].
 // bias: N floats or NULL; gelu: 0/1 (ggml GELU, tanh form with FP16 rounding as ggml-cpu); R: M x N (row stride ldr) or
 // NULL, may be C itself with ldr == ldc. Bit-identical to gemm_pb_f16w followed by the separate ADD / GELU kernels.
@@ -100,6 +111,36 @@ int gen9blas_binop_rows(int op, int M, int K, const float *A, int lda, const flo
 int gen9blas_rope(int n_dims, int nh, int n_tok, const float *X, long xs1, long xs2, float *Y, long ys1, long ys2,
                   const int *pos, const float *ff, int neox, float freq_base, float freq_scale, float ext_factor,
                   float attn_factor, const float corr[2], int sync);
+// ggml_rope_multi with mode GGML_ROPE_TYPE_MROPE (sections[4], pos = 4 * n_tok positions): NEOX pair order, pair j takes
+// the position of its sector j % sum(sections). Returns -1 if the kernel is missing (gen9blas_rope_multi_supported()).
+int gen9blas_rope_multi(int n_dims, int nh, int n_tok, const float *X, long xs1, long xs2, float *Y, long ys1, long ys2,
+                        const int *pos, const float *ff, const int sections[4], float freq_base, float freq_scale,
+                        float ext_factor, float attn_factor, const float corr[2], int vision, int sync);
+int gen9blas_rope_multi_supported(void);
+// (vision = 1: mode GGML_ROPE_TYPE_VISION, n_dims = ne0 / 2, pairs (i, i + n_dims), power of theta reset per section.)
+// ggml CPY / CONT / DUP: src (type tin) -> dst (type tout), 0 = F32, 1 = F16 (F32 -> F16 RTE, as ggml-cpu); ne / nb as ggml
+// (nb in bytes, any non-negative strides); dst shape may differ from src with the same element count (row-major order).
+int gen9blas_cpy_any(const void *src, int tin, const long sne[4], const long snb[4], void *dst, int tout, const long dne[4],
+                     const long dnb[4], int sync);
+// ggml UPSCALE (ggml_interpolate) F32, mode_flags as ggml: 0 nearest, 1 bilinear, | 1<<8 align corners, | 1<<9 antialias.
+int gen9blas_upscale_f32(const float *src, const long sne[4], const long snb[4], float *dst, const long dne[4], const long dnb[4],
+                         int mode_flags, int sync);
+int gen9blas_cpy_supported(void);   // both kernels above are in the binary
+// Attention for decoding over KV streams (llama-server -np N), D 128, G = H / HKV <= 8: Q F32 element (d, token t, head h,
+// stream s) at Q[s*qs + t*qt + h*qh + d]; K / V F16 in place, element (d, key k, KV head g, stream s) at [s*ks + k*kk + g*kh + d]
+// (k_bytes / v_bytes: readable extent); O F32 [s][t][h][d] contiguous. Token t of stream s sees keys [0, min(vis[s] +
+// dvis*t, nk)). chunk: keys per work-group (multiple of 16). Queued; sync = 1 waits. Split-K + merge (two kernels).
+int gen9blas_attn_dec(int D, int H, int HKV, int ns, int nq, int nk, const float *Q, long qt, long qh, long qs,
+                      const uint16_t *K, long kk, long kh, long ks, size_t k_bytes, const uint16_t *V, long vk, long vh, long vs,
+                      size_t v_bytes, float *O, float scale, const int *vis, int dvis, int chunk, int sync);
+int gen9blas_attn_dec_supported(int D, int G);
+// ggml SET_ROWS with F32 source rows and an F16 destination (llama.cpp's KV-cache writes): dst row idx[i] of plane (i02, i03)
+// = src row i, RTE rounding (bit-identical to ggml-cpu). idx int64 (idx64 = 1) or int32, byte strides b10/b11/b12,
+// broadcast over planes as ggml-cpu. dst must be zero-copy (USM or userptr). sync: wait and report *bad (index out of range).
+int gen9blas_set_rows_f16(int nc, int nr, int ne02, int ne03, const float *src, long s1, long s2, long s3,
+                          const void *idx, size_t idx_bytes, long b10, long b11, long b12, int idx64, int ne11, int ne12,
+                          uint16_t *dst, size_t dst_bytes, long d1, long d2, long d3, long ne1, int sync, int *bad);
+int gen9blas_set_rows_supported(void);
 // ggml backend: n (1..8) products of one F32 input with HS-packed weights (Q/K/V), A packed once, one wait;
 // nonfinite[i] per output. Returns 1 if not applicable (an output not zero-copy): compute them one by one.
 int gen9blas_gemm_multi_f16w(int M, const float *A, int lda, int n, const gen9blas_packed *const *P, float *const *C,
@@ -193,6 +234,14 @@ const char *gen9blas_error(void);
 int gen9blas_attn_supported(int D, int H, int HKV);
 int gen9blas_attn_f16kv(int D, int H, int HKV, int nq, int nk, const float *Q, const uint16_t *K, size_t k_bytes,
                         const uint16_t *V, size_t v_bytes, float *O, float scale, int vis0, int dvis, int *launches);
+// Several KV streams (llama-server -np N: ggml ne[3]) in one operation: stream s has Q/O at Q + s*sq (floats, rows
+// [t][h][d]), K/V at K + s*sk / V + s*sv (halves, rows of HKV*D), visible keys min(nk, vis0[s] + dvis*t). One k_kt, one
+// k_attn launch over all streams, one wait. Returns 1 (not handled) if no stream binary exists for (D, H/HKV, HKV), the
+// layout does not fit or the work would need more than one launch; -1 on a GPU error.
+int gen9blas_attn_f16kv_streams(int D, int H, int HKV, int ns, int nq, int nk, const float *Q, long sq, const uint16_t *K,
+                                long sk, size_t k_bytes, const uint16_t *V, long sv, size_t v_bytes, float *O, float scale,
+                                const int *vis0, int dvis, int *launches);
+int gen9blas_attn_streams_supported(int D, int H, int HKV);
 const char *gen9blas_attn_error(void);
 
 #ifdef __cplusplus

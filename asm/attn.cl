@@ -15,6 +15,10 @@ typedef float16 OV;
 typedef float8 OV;
 #define BR(p) as_float8(intel_sub_group_block_read8(p))
 #define BW(p, v) intel_sub_group_block_write8((p), as_uint8(v));
+#elif D == 72   // PaddleOCR-VL vision encoder (SigLIP, 16 heads): 9 dims per lane, .s0-.s7 from one 8-row block, .s8 one row
+typedef float16 OV;   // .s9-.sf unused (never stored; IGC drops them)
+#define BR(p) ((OV)(as_float8(intel_sub_group_block_read8(p)), as_float(intel_sub_group_block_read((p) + 64)), 0.f, 0.f, 0.f, 0.f, 0.f, 0.f, 0.f))
+#define BW(p, v) { intel_sub_group_block_write8((p), as_uint8((v).lo)); intel_sub_group_block_write((p) + 64, as_uint((v).s8)); }
 #endif
 
 #if NK == 1
@@ -37,7 +41,15 @@ typedef float2 SV;
 #define ROWS(X) X(0) X(1) X(2) X(3)
 #endif
 
+// STREAMS (llama-server with several slots: one KV stream per sequence, ggml ne[3]): grid dimension 1 = stream s; K, Kt
+// (and in k_attn Q, O, V) are offset by s times their stream strides (elements); k_attn takes stream s's visible-key
+// start from vis[s] instead of the vis0 argument. The loop is unchanged (attn_gen.py works on it as for one stream).
+#ifdef STREAMS
+__kernel void k_kt(__global const ushort *K, __global ushort *Kt, int nk, long sk, long skt) {
+    K += get_global_id(1) * sk; Kt += get_global_id(1) * skt;
+#else
 __kernel void k_kt(__global const ushort *K, __global ushort *Kt, int nk) {
+#endif
     int i = get_global_id(0);
     int d = i % D, th = i / D, hkv = th % HKV, t = th / HKV;
     Kt[((hkv * (nk / 8) + t / 8) * D + d) * 8 + (t & 7)] = K[i];
@@ -65,15 +77,23 @@ __kernel void k_kt(__global const ushort *K, __global ushort *Kt, int nk) {
 #define SOFT(r) { float mn = sub_group_reduce_max(SMAX(s##r)); \
     if (mn > m##r) { float a = native_exp2(m##r - mn); o##r *= a; l##r *= a; m##r = mn; } \
     s##r = native_exp2(s##r - m##r); l##r += SSUM(s##r); }
+#if D == 72
+#define PV72(r) o##r[8] = fma(p, (float)as_half(v8), o##r[8]);
+#else
+#define PV72(r)
+#endif
 #define PVK(r, k) { float p = sub_group_broadcast(SK(s##r, k), j); \
     _Pragma("unroll") for (int c = 0; c < 8; c++) o##r[c] = fma(p, (float)as_half(v0[c]), o##r[c]); \
-    if (D == 128) { _Pragma("unroll") for (int c = 0; c < 8; c++) o##r[8 + c] = fma(p, (float)as_half(v1[c]), o##r[8 + c]); } }
+    if (D == 128) { _Pragma("unroll") for (int c = 0; c < 8; c++) o##r[8 + c] = fma(p, (float)as_half(v1[c]), o##r[8 + c]); } \
+    PV72(r) }
 #define PV0(r) PVK(r, 0)
 #define PV1(r) PVK(r, 1)
 #define STORE(r) { float il = 1.f / sub_group_reduce_add(l##r); int row = ROWOF(r), t = row / G, hh = row - t * G; \
     __global uint *op = (__global uint *)(O + (t * (HKV * G) + hkv * G + hh) * D); BW(op, o##r * il) }
 #if D == 128
 #define READV ushort8 v0 = intel_sub_group_block_read_us8(vp), v1 = intel_sub_group_block_read_us8(vp + 64);
+#elif D == 72
+#define READV ushort8 v0 = intel_sub_group_block_read_us8(vp), v1; ushort v8 = intel_sub_group_block_read_us(vp + 64);
 #else
 #define READV ushort8 v0 = intel_sub_group_block_read_us8(vp), v1;
 #endif
@@ -95,7 +115,13 @@ __kernel void k_attn(__global const float *Q, __global const ushort *Kt, __globa
 #ifdef CAUSAL
                      , int vis0, int dvis
 #endif
+#ifdef STREAMS
+                     , long sq, long skt, long sv, __global const int *visv
+#endif
                      ) {
+#ifdef STREAMS
+    { const int st = get_group_id(1); Q += st * sq; O += st * sq; Kt += st * skt; V += st * sv; vis0 = visv[st]; }
+#endif
     int sg = get_group_id(0) * get_num_sub_groups() + get_sub_group_id(), lane = get_sub_group_local_id();
 #ifdef ROWVIS
     int per_head = (nq * G + RQ - 1) / RQ;
