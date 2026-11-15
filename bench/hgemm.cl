@@ -1170,6 +1170,91 @@ __kernel void gen9blas_upscale_f32(__global const uchar *src, long sb0, long sb1
     }
     *(__global float *)(dst + i0 * db0 + i1 * db1 + i2 * db2 + i3 * db3) = val;
 }
+// Attention for decoding several KV streams (llama-server -np N: one or a few new tokens per stream), D = 128, G <= 8
+// query heads per KV head. K / V are read in place from llama.cpp's cache layout (row = key, [HKV][D] halves per row, any
+// row / head / stream strides): no transposed copy (the streams kernel of attn.cl transposes all of K in every step).
+// Split over keys (flash-decoding): work-group = one SIMD16 subgroup for (stream s, token t, KV head g, head group hg of
+// DEC_HG query heads, chunk c of `chunk` keys); writes per query head (m, l, acc[D]) in the exp2 domain to part[];
+// gen9blas_attn_dec_comb merges the chunks. 2 heads per work-group keep the accumulators in registers (8 and 4 spilled
+// 8 / 2 KB to scratch); the head groups of one chunk run side by side and share its K/V rows through L3.
+// Q K^T: lane = 8 dims, each K row read whole (16 lanes x 16 B, one 256 B line run; lane = key with per-lane rows was
+// 3.5 ms for 12 streams at 2000 keys: 16 lines per message), dot products reduced over the subgroup; Q in registers,
+// scaled by qscale = scale * log2 e. P V: lane = 8 output dims, p broadcast from the key lanes. FP32 accumulation.
+// Token t of stream s sees keys [0, vis[s] + dvis * t) (clamped to nk); the keys past it are never read.
+#define DEC_D 128
+#define DEC_HG 2
+__kernel __attribute__((reqd_work_group_size(16, 1, 1))) __attribute__((intel_reqd_sub_group_size(16)))
+void gen9blas_attn_dec_part(__global const float *Q, long qt, long qh, long qs, __global const half *K, long kk, long kh, long ks,
+                            __global const half *V, long vk, long vh, long vs, __global const int *vis, int dvis, int nq,
+                            int HKV, int G, int nk, int chunk, int nchunk, float qscale, __global float *part) {
+    const int ngr = (G + DEC_HG - 1) / DEC_HG;   // head groups of one chunk are neighbours in the grid (shared K/V in L3)
+    const int lane = get_local_id(0), hg = get_group_id(1) % ngr, c = get_group_id(1) / ngr, idx = get_group_id(2);
+    const int g = idx % HKV, t = (idx / HKV) % nq, s = idx / (HKV * nq);
+    const int h0 = g * G + hg * DEC_HG, nh = min(DEC_HG, G - hg * DEC_HG);
+    int vt = vis[s] + dvis * t; vt = vt < nk ? vt : nk;
+    const int k0 = c * chunk, k1 = min(k0 + chunk, vt);
+    // part: [s][t][h (all H heads of the stream's token)][chunk][2 + D]
+    __global float *pp = part + (((long)(s * nq + t) * (HKV * G) + h0) * nchunk + c) * (2 + DEC_D);
+    const long hstride = (long)nchunk * (2 + DEC_D);
+    if (k0 >= k1) {   // chunk past the visible keys: l = 0 marks it empty for the merge
+        if (lane < nh) { pp[lane * hstride] = -INFINITY; pp[lane * hstride + 1] = 0.0f; }
+        return;
+    }
+    float8 qv[DEC_HG];   // lane = 8 dims of each head's query, scaled
+    for (int hh = 0; hh < DEC_HG; hh++)
+        qv[hh] = hh < nh ? vload8(0, Q + (long)s * qs + (long)t * qt + (long)(h0 + hh) * qh + lane * 8) * qscale : (float8)(0.0f);
+    float m[DEC_HG], l[DEC_HG];
+    float8 acc[DEC_HG];
+    for (int hh = 0; hh < DEC_HG; hh++) { m[hh] = -INFINITY; l[hh] = 0.0f; acc[hh] = (float8)(0.0f); }
+    __global const half *Kb = K + (long)s * ks + (long)g * kh + lane * 8, *Vb = V + (long)s * vs + (long)g * vh + lane * 8;
+    for (int kb = k0; kb < k1; kb += 16) {
+        const int nv = min(16, k1 - kb);
+        float sc[DEC_HG];   // lane j: score of key kb + j
+        for (int hh = 0; hh < DEC_HG; hh++) sc[hh] = 0.0f;
+        for (int j = 0; j < 16; j++) {   // K row j read whole (16 lanes x 16 B), dot per head reduced over the lanes
+            if (j >= nv) break;
+            const float8 kr = vload_half8(0, Kb + (long)(kb + j) * kk);
+            for (int hh = 0; hh < DEC_HG; hh++) {
+                const float r = sub_group_reduce_add(dot(kr.lo, qv[hh].lo) + dot(kr.hi, qv[hh].hi));
+                if (lane == j) sc[hh] = r;
+            }
+        }
+        float p[DEC_HG];
+        for (int hh = 0; hh < DEC_HG; hh++) {
+            const float x = lane < nv ? sc[hh] : -INFINITY;
+            const float mn = fmax(m[hh], sub_group_reduce_max(x));
+            const float a = exp2(m[hh] - mn);
+            p[hh] = lane < nv ? exp2(x - mn) : 0.0f;
+            l[hh] = l[hh] * a + sub_group_reduce_add(p[hh]);
+            acc[hh] *= a;
+            m[hh] = mn;
+        }
+        for (int j = 0; j < 16; j++) {
+            if (j >= nv) break;
+            const float8 vv = vload_half8(0, Vb + (long)(kb + j) * vk);
+            for (int hh = 0; hh < DEC_HG; hh++) acc[hh] += sub_group_broadcast(p[hh], j) * vv;
+        }
+    }
+    for (int hh = 0; hh < nh; hh++) {
+        __global float *ph = pp + hh * hstride;
+        if (lane == 0) { ph[0] = m[hh]; ph[1] = l[hh]; }
+        vstore8(acc[hh], 0, ph + 2 + lane * 8);
+    }
+}
+// Merge of gen9blas_attn_dec_part's chunks: O[s][t][h][d] (llama.cpp's FLASH_ATTN_EXT output [D, H, nq, ns], contiguous)
+// = sum_c acc_c 2^(m_c - M) / sum_c l_c 2^(m_c - M) over the non-empty chunks. Grid (D, H, ns * nq).
+__kernel void gen9blas_attn_dec_comb(__global const float *part, __global float *O, int H, int nchunk) {
+    const int d = get_global_id(0), h = get_global_id(1), st = get_global_id(2);
+    __global const float *pb = part + ((long)st * H + h) * nchunk * (2 + DEC_D);
+    float M = -INFINITY;
+    for (int c = 0; c < nchunk; c++) { __global const float *pc = pb + (long)c * (2 + DEC_D); if (pc[1] > 0.0f) M = fmax(M, pc[0]); }
+    float L = 0.0f, a = 0.0f;
+    for (int c = 0; c < nchunk; c++) {
+        __global const float *pc = pb + (long)c * (2 + DEC_D);
+        if (pc[1] > 0.0f) { const float w = exp2(pc[0] - M); L += pc[1] * w; a += pc[2 + d] * w; }
+    }
+    O[((long)st * H + h) * DEC_D + d] = a / L;
+}
 // ggml SET_ROWS, F32 rows -> F16 rows (the KV-cache writes of llama.cpp): dst row idx[i] of plane (i02, i03) = src row i,
 // rounded to nearest even (vstore_half_rte, = ggml_cpu_fp32_to_fp16). Strides in elements (src floats, dst halves), index
 // strides in bytes; idx64: indices are int64 (else int32); indices broadcast over planes as ggml-cpu (i11 = i02 % ne11,

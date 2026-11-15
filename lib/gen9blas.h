@@ -126,6 +126,14 @@ int gen9blas_cpy_any(const void *src, int tin, const long sne[4], const long snb
 int gen9blas_upscale_f32(const float *src, const long sne[4], const long snb[4], float *dst, const long dne[4], const long dnb[4],
                          int mode_flags, int sync);
 int gen9blas_cpy_supported(void);   // both kernels above are in the binary
+// Attention for decoding over KV streams (llama-server -np N), D 128, G = H / HKV <= 8: Q F32 element (d, token t, head h,
+// stream s) at Q[s*qs + t*qt + h*qh + d]; K / V F16 in place, element (d, key k, KV head g, stream s) at [s*ks + k*kk + g*kh + d]
+// (k_bytes / v_bytes: readable extent); O F32 [s][t][h][d] contiguous. Token t of stream s sees keys [0, min(vis[s] +
+// dvis*t, nk)). chunk: keys per work-group (multiple of 16). Queued; sync = 1 waits. Split-K + merge (two kernels).
+int gen9blas_attn_dec(int D, int H, int HKV, int ns, int nq, int nk, const float *Q, long qt, long qh, long qs,
+                      const uint16_t *K, long kk, long kh, long ks, size_t k_bytes, const uint16_t *V, long vk, long vh, long vs,
+                      size_t v_bytes, float *O, float scale, const int *vis, int dvis, int chunk, int sync);
+int gen9blas_attn_dec_supported(int D, int G);
 // ggml SET_ROWS with F32 source rows and an F16 destination (llama.cpp's KV-cache writes): dst row idx[i] of plane (i02, i03)
 // = src row i, RTE rounding (bit-identical to ggml-cpu). idx int64 (idx64 = 1) or int32, byte strides b10/b11/b12,
 // broadcast over planes as ggml-cpu. dst must be zero-copy (USM or userptr). sync: wait and report *bad (index out of range).

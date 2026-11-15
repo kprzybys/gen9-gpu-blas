@@ -120,7 +120,7 @@ static int init_l12(const char *dir) {
 
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
-static cl_kernel k_rope_m, k_setrows, k_cpy_any, k_upscale;   // gen9blas_rope_multi, _set_rows_f16, _cpy_any, _upscale_f32 (NULL if the binary lacks them)
+static cl_kernel k_rope_m, k_setrows, k_cpy_any, k_upscale, k_dec_part, k_dec_comb;   // gen9blas_rope_multi, _set_rows_f16, _cpy_any, _upscale_f32 (NULL if the binary lacks them)
 static cl_kernel k_skp[3];   // gen9blas_skinny_pb16_4 / _8 / _16
 static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8, k_epi_8x;
 static cl_kernel k_rms, k_binop, k_rope, k_lnorm, k_gelu, k_lnorm_pack, k_gelu_erf, k_cvt_heads, k_im2col, k_relu;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
@@ -153,6 +153,8 @@ int gen9blas_init(const char *dir) {
     { cl_int e11; k_setrows = clCreateKernel(ph, "gen9blas_set_rows_f16", &e11); if (e11) k_setrows = NULL; }
     { cl_int e12; k_cpy_any = clCreateKernel(ph, "gen9blas_cpy_any", &e12); if (e12) k_cpy_any = NULL; }
     { cl_int e13; k_upscale = clCreateKernel(ph, "gen9blas_upscale_f32", &e13); if (e13) k_upscale = NULL; }
+    { cl_int e14; k_dec_part = clCreateKernel(ph, "gen9blas_attn_dec_part", &e14); if (e14) k_dec_part = NULL; }
+    { cl_int e15; k_dec_comb = clCreateKernel(ph, "gen9blas_attn_dec_comb", &e15); if (e15) k_dec_comb = NULL; }
     for (int i = 0; i < 3; i++) {   // skinny products on HS-packed weights (gen9blas_gemm_pb_skinny); NULL if the binary lacks them
         char n[40]; cl_int e9; snprintf(n, sizeof n, "gen9blas_skinny_pb16_%d", 4 << i);
         k_skp[i] = clCreateKernel(ph, n, &e9); if (e9) k_skp[i] = NULL;
@@ -1315,6 +1317,52 @@ int gen9blas_upscale_f32(const float *src, const long sne[4], const long snb[4],
     size_t g[3] = { (size_t)dne[0], (size_t)dne[1], (size_t)(dne[2] * dne[3]) };
     CHECK(clEnqueueNDRangeKernel(q, k, 3, NULL, g, NULL, 0, NULL, NULL));
     return ew_done(sync, xD, zD, bD, dst);
+}
+
+// Decoding attention over KV streams (gen9blas.h): split-K partial kernel + merge, queued (sync: wait at the end).
+int gen9blas_attn_dec_supported(int D, int G) { return k_dec_part && k_dec_comb && D == 128 && G >= 1 && G <= 8; }
+int gen9blas_attn_dec(int D, int H, int HKV, int ns, int nq, int nk, const float *Q, long qt, long qh, long qs,
+                      const uint16_t *K, long kk, long kh, long ks, size_t k_bytes, const uint16_t *V, long vk, long vh, long vs,
+                      size_t v_bytes, float *O, float scale, const int *vis, int dvis, int chunk, int sync) {
+    static float *part; static size_t part_n;
+    static int *visring; static int vslot;   // 256 slots of 64 ints: launches stay queued; wait only when the ring wraps
+    NEW_OPERATION();
+    if (!k_dec_part || !k_dec_comb) FAIL("attn_dec: kernels not in this build");
+    const int G = HKV > 0 ? H / HKV : 0;
+    if (D != 128 || G < 1 || G > 8 || H != G * HKV || ns < 1 || nq < 1 || nk < 1 || chunk < 16 || chunk % 16) FAIL("attn_dec: unsupported shape");
+    if (((uintptr_t)K | (uintptr_t)V | (uintptr_t)(kk * 2) | (uintptr_t)(kh * 2) | (uintptr_t)(vk * 2) | (uintptr_t)(vh * 2)) & 15)
+        FAIL("attn_dec: K/V rows not 16-byte aligned");
+    const int nchunk = (nk + chunk - 1) / chunk;
+    const size_t pn = (size_t)ns * nq * H * nchunk * (2 + 128);
+    if (pn > part_n) {
+        if (part) { if (wait_gpu()) return -1; usm_free(ctx, part); }
+        part = gen9blas_alloc(pn * 4); part_n = part ? pn : 0;
+        if (!part) FAIL("attn_dec: scratch of %zu B", pn * 4);
+    }
+    if (ns > 64) FAIL("attn_dec: more than 64 streams");
+    if (!visring && !(visring = gen9blas_alloc((size_t)256 * 64 * 4))) FAIL("attn_dec: vis buffer");
+    if (vslot == 256) { if (wait_gpu()) return -1; vslot = 0; }
+    int *visb = visring + (size_t)64 * vslot++;
+    memcpy(visb, vis, (size_t)ns * 4);
+    const size_t bQ = ((size_t)(ns - 1) * qs + (size_t)(nq - 1) * qt + (size_t)(H - 1) * qh + 128) * 4;
+    const size_t bO = (size_t)ns * nq * H * 128 * 4;
+    bf_t xQ, xK, xV, xO, xP = { NULL, part }, xS = { NULL, visb }; int zQ, zK, zV, zO;
+    if (get_obj(Q, bQ, &uA, 1, 0, &xQ, &zQ) || get_obj(K, k_bytes, &uB, 1, 0, &xK, &zK) || get_obj(V, v_bytes, &uD, 1, 0, &xV, &zV) ||
+        get_obj(O, bO, &uC, 0, 1, &xO, &zO)) return -1;
+    if (!zK || !zV) FAIL("attn_dec: K/V not zero-copy");   // a copy of the whole cache per call would cost more than the op
+    const float qscale = scale * 1.4426950408889634f;
+    cl_long a1 = qt, a2 = qh, a3 = qs, b1 = kk, b2 = kh, b3 = ks, c1 = vk, c2 = vh, c3 = vs;
+    cl_kernel k = k_dec_part;
+    ARGB(k, 0, xQ); ARG(k, 1, a1); ARG(k, 2, a2); ARG(k, 3, a3); ARGB(k, 4, xK); ARG(k, 5, b1); ARG(k, 6, b2); ARG(k, 7, b3);
+    ARGB(k, 8, xV); ARG(k, 9, c1); ARG(k, 10, c2); ARG(k, 11, c3); ARGB(k, 12, xS); ARG(k, 13, dvis); ARG(k, 14, nq);
+    ARG(k, 15, HKV); ARG(k, 16, G); ARG(k, 17, nk); ARG(k, 18, chunk); ARG(k, 19, nchunk); ARG(k, 20, qscale); ARGB(k, 21, xP);
+    size_t g[3] = { 16, (size_t)nchunk * ((G + 1) / 2), (size_t)ns * nq * HKV }, l[3] = { 16, 1, 1 };   // 2 heads per work-group (DEC_HG)
+    CHECK(clEnqueueNDRangeKernel(q, k, 3, NULL, g, l, 0, NULL, NULL));
+    k = k_dec_comb;
+    ARGB(k, 0, xP); ARGB(k, 1, xO); ARG(k, 2, H); ARG(k, 3, nchunk);
+    size_t g2[3] = { 128, (size_t)H, (size_t)ns * nq };
+    CHECK(clEnqueueNDRangeKernel(q, k, 3, NULL, g2, NULL, 0, NULL, NULL));
+    return ew_done(sync, xO, zO, bO, O);
 }
 
 int gen9blas_gemm(int type, int tA, int tB, int M, int N, int K, double alpha, const void *A, int lda,
