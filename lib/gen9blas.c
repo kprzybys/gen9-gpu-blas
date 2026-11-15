@@ -13,6 +13,7 @@
 #else            // default: kcl -- an OpenCL subset directly on i915 (kcl.c, docs/no-neo.md)
 #include "kcl.h"
 #endif
+#include <limits.h>
 #include <math.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -119,7 +120,7 @@ static int init_l12(const char *dir) {
 
 // One-shot: subsequent calls (e.g. the BLAS layer and the Python module in one process) do nothing -- a second OpenCL
 // context would invalidate the work buffers and USM memory of the first (error -50 when setting arguments).
-static cl_kernel k_rope_m, k_setrows;   // gen9blas_rope_multi (NULL if the binary lacks it)
+static cl_kernel k_rope_m, k_setrows, k_cpy_any, k_upscale;   // gen9blas_rope_multi, _set_rows_f16, _cpy_any, _upscale_f32 (NULL if the binary lacks them)
 static cl_kernel k_skp[3];   // gen9blas_skinny_pb16_4 / _8 / _16
 static cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8, k_epi_8x;
 static cl_kernel k_rms, k_binop, k_rope, k_lnorm, k_gelu, k_lnorm_pack, k_gelu_erf, k_cvt_heads, k_im2col, k_relu;   // ggml per-layer elementwise ops (NULL if the binary lacks them)   // k_dequant: NULL if the binary lacks it   // ggml backend: F16 weights x F32 activations (gemm_pb_f16w, ffn_f16w)
@@ -150,6 +151,8 @@ int gen9blas_init(const char *dir) {
     { cl_int e5; k_dequant2 = clCreateKernel(ph, "gen9blas_dequant_b16s", &e5); if (e5) k_dequant2 = NULL; }
     { cl_int e10; k_rope_m = clCreateKernel(ph, "gen9blas_rope_multi", &e10); if (e10) k_rope_m = NULL; }
     { cl_int e11; k_setrows = clCreateKernel(ph, "gen9blas_set_rows_f16", &e11); if (e11) k_setrows = NULL; }
+    { cl_int e12; k_cpy_any = clCreateKernel(ph, "gen9blas_cpy_any", &e12); if (e12) k_cpy_any = NULL; }
+    { cl_int e13; k_upscale = clCreateKernel(ph, "gen9blas_upscale_f32", &e13); if (e13) k_upscale = NULL; }
     for (int i = 0; i < 3; i++) {   // skinny products on HS-packed weights (gen9blas_gemm_pb_skinny); NULL if the binary lacks them
         char n[40]; cl_int e9; snprintf(n, sizeof n, "gen9blas_skinny_pb16_%d", 4 << i);
         k_skp[i] = clCreateKernel(ph, n, &e9); if (e9) k_skp[i] = NULL;
@@ -1220,18 +1223,19 @@ int gen9blas_set_rows_f16(int nc, int nr, int ne02, int ne03, const float *src, 
 int gen9blas_rope_multi_supported(void) { return k_rope_m != NULL; }
 int gen9blas_rope_multi(int n_dims, int nh, int n_tok, const float *X, long xs1, long xs2, float *Y, long ys1, long ys2,
                         const int *pos, const float *ff, const int sections[4], float freq_base, float freq_scale,
-                        float ext_factor, float attn_factor, const float corr[2], int sync) {
+                        float ext_factor, float attn_factor, const float corr[2], int vision, int sync) {
     NEW_OPERATION();
     if (!k_rope_m) FAIL("rope_multi: kernel not in this build");
     if (n_dims <= 0 || nh <= 0 || n_tok <= 0) return 0;
-    if (n_dims % 2 || xs1 < n_dims || ys1 < n_dims || xs2 < (long)nh * xs1 - (xs1 - n_dims) || ys2 < (long)nh * ys1 - (ys1 - n_dims))
+    const int ne0 = vision ? 2 * n_dims : n_dims;   // elements per head row that are rotated (vision: all, ne0 = 2 n_dims)
+    if (n_dims % 2 || xs1 < ne0 || ys1 < ne0 || xs2 < (long)nh * xs1 - (xs1 - ne0) || ys2 < (long)nh * ys1 - (ys1 - ne0))
         FAIL("rope_multi: unsupported layout");
     if (sections[0] + sections[1] + sections[2] + sections[3] <= 0) FAIL("rope_multi: empty sections");
-    size_t bX = ((size_t)(n_tok - 1) * xs2 + (size_t)(nh - 1) * xs1 + n_dims) * 4;
-    size_t bY = ((size_t)(n_tok - 1) * ys2 + (size_t)(nh - 1) * ys1 + n_dims) * 4;
+    size_t bX = ((size_t)(n_tok - 1) * xs2 + (size_t)(nh - 1) * xs1 + ne0) * 4;
+    size_t bY = ((size_t)(n_tok - 1) * ys2 + (size_t)(nh - 1) * ys1 + ne0) * 4;
     bf_t xX, xY, xP, xF = BM(NULL); int zX, zY, zP, zF, hf = ff != NULL;
     if (get_obj(X, bX, &uA, 1, 0, &xX, &zX) || get_obj(pos, (size_t)n_tok * 16, &uB, 1, 0, &xP, &zP) ||
-        (hf && get_obj(ff, (size_t)n_dims / 2 * 4, &uD, 1, 0, &xF, &zF)) || get_obj(Y, bY, &uC, 0, 1, &xY, &zY)) return -1;
+        (hf && get_obj(ff, (size_t)(vision ? n_dims : n_dims / 2) * 4, &uD, 1, 0, &xF, &zF)) || get_obj(Y, bY, &uC, 0, 1, &xY, &zY)) return -1;
     if (!hf) xF = xP;
     const float theta_scale = powf(freq_base, -2.0f / n_dims);   // as ggml-cpu
     cl_long l1 = xs1, l2 = xs2, m1 = ys1, m2 = ys2;
@@ -1241,9 +1245,76 @@ int gen9blas_rope_multi(int n_dims, int nh, int n_tok, const float *X, long xs1,
     ARG(k, 12, sections[0]); ARG(k, 13, sections[1]); ARG(k, 14, sections[2]); ARG(k, 15, sections[3]);
     ARG(k, 16, theta_scale); ARG(k, 17, freq_scale); ARG(k, 18, ext_factor); ARG(k, 19, attn_factor);
     ARG(k, 20, corr[0]); ARG(k, 21, corr[1]);
-    size_t g[2] = { (size_t)n_dims / 2, (size_t)n_tok };
+    const int half = vision ? n_dims : n_dims / 2;
+    ARG(k, 22, half); ARG(k, 23, vision);
+    size_t g[2] = { (size_t)half, (size_t)n_tok };
     CHECK(clEnqueueNDRangeKernel(q, k, 2, NULL, g, NULL, 0, NULL, NULL));
     return ew_done(sync, xY, zY, bY, Y);
+}
+
+// ggml CPY / CONT / DUP, F32 / F16 in and out, byte strides, dst shape may differ (same element count): gen9blas.h.
+static size_t extent4(const long ne[4], const long nb[4], size_t es) {
+    size_t e = es;
+    for (int i = 0; i < 4; i++) e += (size_t)(ne[i] - 1) * (size_t)nb[i];
+    return e;
+}
+int gen9blas_cpy_supported(void) { return k_cpy_any != NULL && k_upscale != NULL; }
+int gen9blas_cpy_any(const void *src, int tin, const long sne[4], const long snb[4], void *dst, int tout, const long dne[4],
+                     const long dnb[4], int sync) {
+    NEW_OPERATION();
+    if (!k_cpy_any) FAIL("cpy_any: kernel not in this build");
+    long n = 1, m = 1;
+    for (int i = 0; i < 4; i++) {
+        if (sne[i] <= 0 || dne[i] <= 0) return 0;
+        if (snb[i] < 0 || dnb[i] < 0 || sne[i] > INT_MAX || dne[i] > INT_MAX) FAIL("cpy_any: unsupported layout");
+        n *= sne[i]; m *= dne[i];
+    }
+    if (n != m || (tin | tout) & ~1 || dne[0] * dne[1] > INT_MAX || dne[2] * dne[3] > INT_MAX) FAIL("cpy_any: unsupported shape");
+    const int same = sne[0] == dne[0] && sne[1] == dne[1] && sne[2] == dne[2] && sne[3] == dne[3];
+    const size_t bS = extent4(sne, snb, tin ? 2 : 4), bD = extent4(dne, dnb, tout ? 2 : 4);
+    bf_t xS, xD; int zS, zD;
+    if (get_obj(src, bS, &uA, 1, 0, &xS, &zS) || get_obj(dst, bD, &uC, 1, 1, &xD, &zD)) return -1;   // copy-in: dst may be a strided view
+    cl_long a0 = snb[0], a1 = snb[1], a2 = snb[2], a3 = snb[3], c0 = dnb[0], c1 = dnb[1], c2 = dnb[2], c3 = dnb[3];
+    int s0 = (int)sne[0], s1 = (int)sne[1], s2 = (int)sne[2], d0 = (int)dne[0], d1 = (int)dne[1], d2 = (int)dne[2];
+    cl_kernel k = k_cpy_any;
+    ARGB(k, 0, xS); ARG(k, 1, a0); ARG(k, 2, a1); ARG(k, 3, a2); ARG(k, 4, a3); ARG(k, 5, s0); ARG(k, 6, s1); ARG(k, 7, s2);
+    ARGB(k, 8, xD); ARG(k, 9, c0); ARG(k, 10, c1); ARG(k, 11, c2); ARG(k, 12, c3); ARG(k, 13, d0); ARG(k, 14, d1); ARG(k, 15, d2);
+    ARG(k, 16, tin); ARG(k, 17, tout); ARG(k, 18, same);
+    size_t g[3] = { (size_t)dne[0], (size_t)dne[1], (size_t)(dne[2] * dne[3]) };
+    CHECK(clEnqueueNDRangeKernel(q, k, 3, NULL, g, NULL, 0, NULL, NULL));
+    return ew_done(sync, xD, zD, bD, dst);
+}
+
+// ggml UPSCALE (ggml_interpolate) F32: mode 0 nearest / 1 bilinear, flags as ggml (bit 8 align corners, bit 9 antialias).
+int gen9blas_upscale_f32(const float *src, const long sne[4], const long snb[4], float *dst, const long dne[4], const long dnb[4],
+                         int mode_flags, int sync) {
+    NEW_OPERATION();
+    if (!k_upscale) FAIL("upscale: kernel not in this build");
+    for (int i = 0; i < 4; i++) {
+        if (sne[i] <= 0 || dne[i] <= 0) return 0;
+        if (snb[i] < 0 || dnb[i] < 0 || dne[i] > INT_MAX) FAIL("upscale: unsupported layout");
+    }
+    const int mode = mode_flags & 0xFF, ac = (mode_flags >> 8) & 1, aa = (mode_flags >> 9) & 1;
+    if ((mode != 0 && mode != 1) || (mode_flags & ~0x3FF) || dne[0] * dne[1] > INT_MAX || dne[2] * dne[3] > INT_MAX) FAIL("upscale: unsupported mode");
+    float sf0 = (float)dne[0] / sne[0], sf1 = (float)dne[1] / sne[1], sf2 = (float)dne[2] / sne[2], sf3 = (float)dne[3] / sne[3];
+    float po = 0.5f;
+    if (ac) {   // as ggml-cpu
+        po = 0.0f;
+        sf0 = dne[0] > 1 && sne[0] > 1 ? (float)(dne[0] - 1) / (sne[0] - 1) : sf0;
+        sf1 = dne[1] > 1 && sne[1] > 1 ? (float)(dne[1] - 1) / (sne[1] - 1) : sf1;
+    }
+    const size_t bS = extent4(sne, snb, 4), bD = extent4(dne, dnb, 4);
+    bf_t xS, xD; int zS, zD;
+    if (get_obj(src, bS, &uA, 1, 0, &xS, &zS) || get_obj(dst, bD, &uC, 1, 1, &xD, &zD)) return -1;
+    cl_long a0 = snb[0], a1 = snb[1], a2 = snb[2], a3 = snb[3], c0 = dnb[0], c1 = dnb[1], c2 = dnb[2], c3 = dnb[3];
+    int s0 = (int)sne[0], s1 = (int)sne[1], n2 = (int)dne[2];
+    cl_kernel k = k_upscale;
+    ARGB(k, 0, xS); ARG(k, 1, a0); ARG(k, 2, a1); ARG(k, 3, a2); ARG(k, 4, a3); ARG(k, 5, s0); ARG(k, 6, s1);
+    ARGB(k, 7, xD); ARG(k, 8, c0); ARG(k, 9, c1); ARG(k, 10, c2); ARG(k, 11, c3); ARG(k, 12, n2);
+    ARG(k, 13, sf0); ARG(k, 14, sf1); ARG(k, 15, sf2); ARG(k, 16, sf3); ARG(k, 17, mode); ARG(k, 18, aa); ARG(k, 19, po);
+    size_t g[3] = { (size_t)dne[0], (size_t)dne[1], (size_t)(dne[2] * dne[3]) };
+    CHECK(clEnqueueNDRangeKernel(q, k, 3, NULL, g, NULL, 0, NULL, NULL));
+    return ew_done(sync, xD, zD, bD, dst);
 }
 
 int gen9blas_gemm(int type, int tA, int tB, int M, int N, int K, double alpha, const void *A, int lda,

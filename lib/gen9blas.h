@@ -115,8 +115,17 @@ int gen9blas_rope(int n_dims, int nh, int n_tok, const float *X, long xs1, long 
 // the position of its sector j % sum(sections). Returns -1 if the kernel is missing (gen9blas_rope_multi_supported()).
 int gen9blas_rope_multi(int n_dims, int nh, int n_tok, const float *X, long xs1, long xs2, float *Y, long ys1, long ys2,
                         const int *pos, const float *ff, const int sections[4], float freq_base, float freq_scale,
-                        float ext_factor, float attn_factor, const float corr[2], int sync);
+                        float ext_factor, float attn_factor, const float corr[2], int vision, int sync);
 int gen9blas_rope_multi_supported(void);
+// (vision = 1: mode GGML_ROPE_TYPE_VISION, n_dims = ne0 / 2, pairs (i, i + n_dims), power of theta reset per section.)
+// ggml CPY / CONT / DUP: src (type tin) -> dst (type tout), 0 = F32, 1 = F16 (F32 -> F16 RTE, as ggml-cpu); ne / nb as ggml
+// (nb in bytes, any non-negative strides); dst shape may differ from src with the same element count (row-major order).
+int gen9blas_cpy_any(const void *src, int tin, const long sne[4], const long snb[4], void *dst, int tout, const long dne[4],
+                     const long dnb[4], int sync);
+// ggml UPSCALE (ggml_interpolate) F32, mode_flags as ggml: 0 nearest, 1 bilinear, | 1<<8 align corners, | 1<<9 antialias.
+int gen9blas_upscale_f32(const float *src, const long sne[4], const long snb[4], float *dst, const long dne[4], const long dnb[4],
+                         int mode_flags, int sync);
+int gen9blas_cpy_supported(void);   // both kernels above are in the binary
 // ggml SET_ROWS with F32 source rows and an F16 destination (llama.cpp's KV-cache writes): dst row idx[i] of plane (i02, i03)
 // = src row i, RTE rounding (bit-identical to ggml-cpu). idx int64 (idx64 = 1) or int32, byte strides b10/b11/b12,
 // broadcast over planes as ggml-cpu. dst must be zero-copy (USM or userptr). sync: wait and report *bad (index out of range).

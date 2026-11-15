@@ -1063,15 +1063,30 @@ __kernel void gen9blas_rope(__global const float *x, long xs1, long xs2, __globa
 // order (i, i + n_dims/2), but pair j takes its position from sector j % (s0+s1+s2+s3): t (pos[t]) for sector < s0, h
 // (pos[t + n_tok]) below s0+s1, w (pos[t + 2 n_tok]) below s0+s1+s2, e (pos[t + 3 n_tok]) after; theta = p * theta_scale^j
 // by repeated multiplication as ggml_mrope_cache_init (no reset per section: indep_sects is false for MROPE).
+// Mode VISION (ggml_rope_multi with GGML_ROPE_TYPE_VISION; mtmd's Qwen2-VL-style encoders, PaddleOCR-VL): indep = 1, the
+// running thetas are reset at section starts exactly as ggml's else-if chain does (empty sections included), pairs (j, j + pairoff)
+// with pairoff = n_dims = ne0 / 2, so all ne0 elements are rotated. The grid's first dimension is the number of pairs.
 __kernel void gen9blas_rope_multi(__global const float *x, long xs1, long xs2, __global float *y, long ys1, long ys2,
                                   __global const int *pos, __global const float *ff, int has_ff, int nh, int n_dims, int n_tok,
                                   int s0, int s1, int s2, int s3, float theta_scale, float freq_scale, float ext_factor,
-                                  float attn_factor, float corr0, float corr1) {
+                                  float attn_factor, float corr0, float corr1, int pairoff, int indep) {
     const int j = get_global_id(0), t = get_global_id(1);
-    const int sector = j % (s0 + s1 + s2 + s3);
+    const int sd = s0 + s1 + s2 + s3, sector = j % sd;
     const int sec = sector < s0 ? 0 : sector < s0 + s1 ? 1 : sector < s0 + s1 + s2 ? 2 : 3;
-    float theta = (float)pos[t + sec * n_tok];
-    for (int k = 0; k < j; k++) theta *= theta_scale;
+    // the four running thetas of ggml_mrope_cache_init, replayed up to pair j (with its else-if reset chain when indep)
+    const float p0 = (float)pos[t], p1 = (float)pos[t + n_tok], p2 = (float)pos[t + 2 * n_tok], p3 = (float)pos[t + 3 * n_tok];
+    float th0 = p0, th1 = p1, th2 = p2, th3 = p3;
+    for (int k = 0; k < j; k++) {
+        if (indep) {
+            const int sk = k % sd;
+            if (sk == 0) th0 = p0; else if (sk == s0) th1 = p1; else if (sk == s0 + s1) th2 = p2; else if (sk == s0 + s1 + s2) th3 = p3;
+        }
+        th0 *= theta_scale; th1 *= theta_scale; th2 *= theta_scale; th3 *= theta_scale;
+    }
+    if (indep) {
+        if (sector == 0) th0 = p0; else if (sector == s0) th1 = p1; else if (sector == s0 + s1) th2 = p2; else if (sector == s0 + s1 + s2) th3 = p3;
+    }
+    const float theta = sec == 0 ? th0 : sec == 1 ? th1 : sec == 2 ? th2 : th3;
     const float theta_extrap = has_ff ? theta / ff[j] : theta;
     const float theta_interp = freq_scale * theta_extrap;
     float th = theta_interp, mscale = attn_factor;
@@ -1082,7 +1097,7 @@ __kernel void gen9blas_rope_multi(__global const float *x, long xs1, long xs2, _
         mscale *= 1.0f + 0.1f * log(1.0f / freq_scale);
     }
     const float c = cos(th) * mscale, s = sin(th) * mscale;
-    const int i0 = j, i1 = j + n_dims / 2;
+    const int i0 = j, i1 = j + pairoff;
     for (int h = 0; h < nh; h++) {
         __global const float *xp = x + t * xs2 + h * xs1;
         __global float *yp = y + t * ys2 + h * ys1;
@@ -1090,6 +1105,70 @@ __kernel void gen9blas_rope_multi(__global const float *x, long xs1, long xs2, _
         yp[i0] = x0 * c - x1 * s;
         yp[i1] = x0 * s + x1 * c;
     }
+}
+// ggml CPY / CONT / DUP between F32 and F16 (tin, tout: 0 = F32, 1 = F16) with any byte strides (views, permutes) and
+// different shapes of the same element count (ggml_cont_Nd): dst element (i0, i1, i2, i3) takes the source element with
+// the same row-major linear index. F32 -> F16 rounds to nearest even (vstore_half_rte, = ggml_cpu_fp32_to_fp16);
+// same type: bit copy. same: the shapes are equal (no index division). Grid (dne0, dne1, dne2 * dne3).
+__kernel void gen9blas_cpy_any(__global const uchar *src, long sb0, long sb1, long sb2, long sb3, int sne0, int sne1, int sne2,
+                               __global uchar *dst, long db0, long db1, long db2, long db3, int dne0, int dne1, int dne2,
+                               int tin, int tout, int same) {
+    const int i0 = get_global_id(0), i1 = get_global_id(1), p = get_global_id(2);
+    const int i2 = p % dne2, i3 = p / dne2;
+    int j0 = i0, j1 = i1, j2 = i2, j3 = i3;
+    if (!same) {
+        long l = (((long)i3 * dne2 + i2) * dne1 + i1) * dne0 + i0;
+        j0 = (int)(l % sne0); l /= sne0; j1 = (int)(l % sne1); l /= sne1; j2 = (int)(l % sne2); j3 = (int)(l / sne2);
+    }
+    __global const uchar *sp = src + j0 * sb0 + j1 * sb1 + j2 * sb2 + j3 * sb3;
+    __global uchar *dp = dst + i0 * db0 + i1 * db1 + i2 * db2 + i3 * db3;
+    if (tin == tout) {
+        if (tin) *(__global ushort *)dp = *(__global const ushort *)sp;
+        else *(__global uint *)dp = *(__global const uint *)sp;
+    } else if (tout) vstore_half_rte(*(__global const float *)sp, 0, (__global half *)dp);
+    else *(__global float *)dp = vload_half(0, (__global const half *)sp);
+}
+// ggml UPSCALE / ggml_interpolate, F32, modes as ggml-cpu: 0 nearest, 1 bilinear, 1 + antialias (aa) (triangle filter,
+// PyTorch antialias=True), align corners (ac). Byte strides for source and destination. Grid (ne0, ne1, ne2 * ne3).
+__kernel void gen9blas_upscale_f32(__global const uchar *src, long sb0, long sb1, long sb2, long sb3, int sne0, int sne1,
+                                   __global uchar *dst, long db0, long db1, long db2, long db3, int ne2,
+                                   float sf0, float sf1, float sf2, float sf3, int mode, int aa, float pixel_offset) {
+    const int i0 = get_global_id(0), i1 = get_global_id(1), p = get_global_id(2);
+    const int i2 = p % ne2, i3 = p / ne2;
+    const long i02 = (long)(i2 / sf2), i03 = (long)(i3 / sf3);
+    __global const uchar *s23 = src + i02 * sb2 + i03 * sb3;
+    float val;
+    if (mode == 0) {
+        val = *(__global const float *)(s23 + (long)(i0 / sf0) * sb0 + (long)(i1 / sf1) * sb1);
+    } else if (aa) {
+        const float support1 = fmax(1.0f, 1.0f / sf1), invscale1 = 1.0f / support1;
+        const float support0 = fmax(1.0f, 1.0f / sf0), invscale0 = 1.0f / support0;
+        const float yy = ((float)i1 + pixel_offset) / sf1, xx = ((float)i0 + pixel_offset) / sf0;
+        const long x_min = max((long)(xx - support0 + pixel_offset), 0L), x_max = min((long)(xx + support0 + pixel_offset), (long)sne0);
+        const long y_min = max((long)(yy - support1 + pixel_offset), 0L), y_max = min((long)(yy + support1 + pixel_offset), (long)sne1);
+        float acc = 0.0f, tw = 0.0f;
+        for (long sy = y_min; sy < y_max; sy++) {
+            const float wy = fmax(1.0f - fabs(((float)sy - yy + pixel_offset) * invscale1), 0.0f);
+            for (long sx = x_min; sx < x_max; sx++) {
+                const float wx = fmax(1.0f - fabs(((float)sx - xx + pixel_offset) * invscale0), 0.0f);
+                const float w = wx * wy;
+                if (w <= 0.0f) continue;
+                acc += *(__global const float *)(s23 + sx * sb0 + sy * sb1) * w;
+                tw += w;
+            }
+        }
+        val = tw > 0.0f ? acc / tw : acc;
+    } else {
+        const float yy = ((float)i1 + pixel_offset) / sf1 - pixel_offset, xx = ((float)i0 + pixel_offset) / sf0 - pixel_offset;
+        long y0 = (long)floor(yy), x0 = (long)floor(xx), y1 = y0 + 1, x1 = x0 + 1;
+        y0 = max(0L, min(y0, (long)sne1 - 1)); y1 = max(0L, min(y1, (long)sne1 - 1));
+        x0 = max(0L, min(x0, (long)sne0 - 1)); x1 = max(0L, min(x1, (long)sne0 - 1));
+        const float dy = fmax(0.0f, fmin(yy - (float)y0, 1.0f)), dx = fmax(0.0f, fmin(xx - (float)x0, 1.0f));
+        const float a = *(__global const float *)(s23 + x0 * sb0 + y0 * sb1), b = *(__global const float *)(s23 + x1 * sb0 + y0 * sb1);
+        const float c = *(__global const float *)(s23 + x0 * sb0 + y1 * sb1), d = *(__global const float *)(s23 + x1 * sb0 + y1 * sb1);
+        val = a * (1 - dx) * (1 - dy) + b * dx * (1 - dy) + c * (1 - dx) * dy + d * dx * dy;
+    }
+    *(__global float *)(dst + i0 * db0 + i1 * db1 + i2 * db2 + i3 * db3) = val;
 }
 // ggml SET_ROWS, F32 rows -> F16 rows (the KV-cache writes of llama.cpp): dst row idx[i] of plane (i02, i03) = src row i,
 // rounded to nearest even (vstore_half_rte, = ggml_cpu_fp32_to_fp16). Strides in elements (src floats, dst halves), index
