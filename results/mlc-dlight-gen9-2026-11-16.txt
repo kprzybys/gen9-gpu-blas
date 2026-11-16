@@ -1,0 +1,58 @@
+MLC-LLM with TVM DLight rules: generic OpenCL vs Gen9 branches (experiments/tvm-dlight-gen9), 2026-11-16
+
+Host: gp-laptop (UHD 620, NEO 24.35 legacy, single-channel DDR4-2400), gpu-lock held, nothing else on the GPU.
+Software: mlc-llm 3b7663a + relax 45221f267 built on evox2 (LLVM 21 static, OpenCL only), Python 3.14 venv on gp,
+apache-tvm-ffi 0.1.15.post6 from the submodule. OpenCL __local hoist hook (opencl_local_hoist.py) applied to both
+libraries (without it NEO rejects TVM's nested __local declarations: CL_BUILD_PROGRAM_FAILURE).
+Model: mlc-ai/Qwen2.5-1.5B-Instruct-q4f16_1-MLC (prebuilt weights), compiled twice:
+  --device opencl      -> generic DLight constants
+  --device intel:gen9  -> Gen9 branches (relax-dlight-gen9.patch, first constants from the README table)
+Benchmark: bench_mlc.py, interactive mode (batch 1), prompt 512 tokens with a distinct first sentence per run (MLC's
+prefix cache otherwise skips the prefill; the first attempt measured 2400-3500 "t/s" that way and is discarded),
+greedy, 128 generated tokens, EOS ignored, 1 warm-up + 3 reps, two alternating rounds.
+
+                     prefill t/s (512 tok)      decode t/s (128 tok)
+  round 1 generic    10.9 10.9 10.9             8.10 8.18 8.15
+  round 1 Gen9       34.8 34.8 34.8             6.65 6.62 6.62
+  round 2 generic    10.9 10.9 10.9             8.17 8.18 8.13
+  round 2 Gen9       34.8 34.8 34.8             6.63 6.63 6.64
+  Generated text identical in all runs of both libraries.
+
+Result: Gen9 matmul constants raise prefill 3.2x (10.9 -> 34.8 t/s) but it stays far below the GEN9 ggml backend
+(~220 t/s pp512 on Qwen2.5-1.5B Q4_K_M, ggml-intel-igpu results); decode got 19 % slower (8.16 -> 6.63 t/s): the
+low-batch GEMV constants (TS x TR 2x128 / 4x64, VEC_C 4, UNROLL 16) lose to the generic ones (1x64, VEC_C 1,
+UNROLL 64). Decode for batch 1 goes through LowBatchGEMV (symbolic batch, bucket 2), not GEMV.
+
+Where the decode loss came from (prompt 64, gen 96, 2 reps; each Gen9 branch disabled in turn by a temporary
+environment switch, Gen9 target otherwise):
+  generic library                       prefill (64 tok) -     decode 9.85
+  Gen9, all branches                    prefill  35.8          decode 7.72
+  Gen9 without GEMV outer-reduction     35.8                   7.73
+  Gen9 without GEMV inner-reduction     35.9                   9.97   <- the culprit
+  Gen9 without Matmul                   10.9                   7.74   (prefill gain is all Matmul)
+  Gen9 without LowBatchGEMV             35.8                   7.72
+LowBatchGEMV constants (8 variants of TS x TR, VEC_C, UNROLL) gave 7.73-7.76 for all: not on the decode path at
+batch 1 here. Decode goes through GEMV (static shapes).
+
+GEMV inner-reduction sweep (TS,TR,VEC_C,UNROLL,VEC_LOAD -> decode t/s, median of 2):
+  1,256,1,64,1  5.73     1,128,1,64,1  8.24     1,64,1,64,1  9.82     1,32,1,64,1  10.39    1,16,1,64,1  7.49
+  1,8,1,64,1    4.86     1,64,1,64,8   9.90     1,64,4,64,1  9.74     1,64,4,16,8  9.88     1,64,2,64,4  9.78
+  2,64,1,64,1   9.75     4,64,1,64,1   9.45     2,32,1,64,1  10.11    4,32,1,64,1  10.03    8,16,1,64,1  10.16
+  16,16,1,64,1  10.16    1,32,4,16,8  10.19     1,16,4,16,8  7.53
+TR decides: without sub-group shuffles (thread_warp_size 1) TVM reduces across TR threads in local memory with
+log2(TR) barriers; 32 is the optimum, vector width and rows per group change < 3 %. The first constants
+(TR 128, from the 1 KB contiguous-read rule of our skinny kernels) were wrong for this code shape: our kernels
+reduce mostly inside a thread and use sub-group shuffles, TVM's do not. New Gen9 GEMV constants: TS 1, TR 32,
+VEC_C 1, UNROLL 64 (relax-dlight-gen9.patch updated).
+
+Final, tuned Gen9 rules (patch as committed) vs generic, same protocol as the first table (prompt 512, gen 128,
+3 reps, two alternating rounds):
+                     prefill t/s (512 tok)      decode t/s (128 tok)
+  round 1 generic    10.9 10.8 10.9             8.15 8.18 8.08
+  round 1 Gen9 v2    34.8 34.8 34.8             8.38 8.44 8.35
+  round 2 generic    10.8 10.9 10.9             8.15 8.14 8.17
+  round 2 Gen9 v2    34.8 34.8 34.8             8.36 8.43 8.48
+  Generated text identical in all runs.
+Result: prefill 3.2x (10.9 -> 34.8 t/s), decode +3 % (8.15 -> 8.40 t/s). Both remain far below the hand-written
+path on this model class (GEN9 ggml backend ~220 t/s pp512); the matmul (prefill) is where a compiler-generated
+kernel loses most: no block reads, no packed panels, no sub-group shuffles.

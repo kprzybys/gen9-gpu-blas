@@ -300,8 +300,12 @@ Lessons for this project: the GEMV/GEMM crossover at 8 rows is confirmed by an i
 rule-plus-constants model is what our generators already do, but with Gen9 constants found by our sweeps (section 4)
 instead of generic defaults. Possible use: one measurement of MLC on Vulkan as "compiler vs hand-written kernels",
 only on request, because building TVM + MLC is a large job (see also section 5). Gen9 branches for the DLight
-rules and an `intel:gen9` preset, with every constant traced to our measurements, are drafted (not built, not run)
-in [experiments/tvm-dlight-gen9](../experiments/tvm-dlight-gen9/README.md).
+rules and an `intel:gen9` preset are in [experiments/tvm-dlight-gen9](../experiments/tvm-dlight-gen9/README.md);
+measured on the UHD 620 (Qwen2.5-1.5B q4f16_1): prefill 10.9 -> 34.8 t/s (3.2x, all from the matmul tile), decode
++3 % [MEAS, `results/mlc-dlight-gen9-2026-11-16.txt`]. The first GEMV constants, copied from our skinny kernels
+(1 KB contiguous per row, TR = 128), made decode 19 % slower: TVM reduces across threads in local memory with
+log2(TR) barriers (no sub-group shuffles), so TR = 32 wins. A rule transfers only with the code shape it was
+measured on. TVM's OpenCL also needs the `__local` hoist hook on NEO (nested `__local` declarations are rejected).
 
 ## 7. Open items
 

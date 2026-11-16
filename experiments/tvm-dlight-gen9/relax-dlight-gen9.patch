@@ -1,38 +1,26 @@
 diff --git a/python/tvm/s_tir/dlight/gpu/gemv.py b/python/tvm/s_tir/dlight/gpu/gemv.py
-index b47960fc1..415519e46 100644
+index b47960fc1..e5a7f0ffa 100644
 --- a/python/tvm/s_tir/dlight/gpu/gemv.py
 +++ b/python/tvm/s_tir/dlight/gpu/gemv.py
-@@ -402,6 +402,29 @@ class GEMV(GPUScheduleRule):
+@@ -402,6 +402,17 @@ class GEMV(GPUScheduleRule):
              LOAD_V_VEC = -1
              UNROLL = 64
              TS, TR = 1, 64
 +        elif target.kind.name in ("opencl", "vulkan") and "intel_gen9" in str(target.attrs):
-+            # Intel Gen9/Gen9.5 iGPU (UHD 620, HD 530). Constants derived from gen9-gpu-blas
-+            # measurements (docs/skinny-gemm.md, docs/performance-model.md), not yet tuned in TVM:
-+            # - lanes along K (threadIdx.x) so a sub-group reads one contiguous stretch of a row;
-+            # - VEC_C = 4: 8 B per lane in FP16 (skinny_r), 16 B in FP32 (one 64 B line per message);
-+            # - TR = 128 x 8 B = 1 KB contiguous per row per step (256 B: 14-18 GB/s, 1 KB: 21-24 GB/s);
-+            # - few rows per group (TS = 2-4): many rows touched at once cost 2x on 4 KB pages;
-+            # - 256 threads = CL_DEVICE_MAX_WORK_GROUP_SIZE on Gen9;
-+            # - no shared copy of the vector (L3 ~155 GB/s vs SLM ~177 GB/s, barrier not worth it);
-+            # - VEC_LOAD = 8 B per lane for quantized words (2 x uint32 = 16 int4 values);
-+            # - UNROLL 16: at least two reads in flight per thread without register spills.
-+            VEC_C = 4
++            # Intel Gen9/Gen9.5 iGPU (UHD 620, HD 530). Measured with MLC-LLM, Qwen2.5-1.5B q4f16_1, decode
++            # (results/mlc-dlight-gen9-2026-11-16.txt in gen9-gpu-blas): without sub-group shuffles the
++            # cross-thread reduction goes through local memory with log2(TR) barriers, so TR decides:
++            # TR 256: 5.7 t/s, 128: 8.2, 64: 9.8, 32: 10.4, 16: 7.5, 8: 4.9. Vector width (VEC_C 1-4,
++            # VEC_LOAD 1-8) and more rows per group (TS 2-16) changed < 3 %. Generic constants: 9.85.
++            VEC_C = 1
 +            LOAD_V_SHARED = False
 +            LOAD_V_VEC = -1
-+            VEC_LOAD = 8
-+            UNROLL = 16
-+            if isinstance(len_S, int):
-+                if len_S > len_R:
-+                    TS, TR = 2, 128
-+                else:
-+                    TS, TR = 4, 64
-+            else:
-+                TS, TR = 1, 256
++            UNROLL = 64
++            TS, TR = 1, 32
          else:
              VEC_C = 1
              LOAD_V_SHARED = False
-@@ -603,6 +626,16 @@ class GEMV(GPUScheduleRule):
+@@ -603,6 +614,16 @@ class GEMV(GPUScheduleRule):
              LOAD_V_SHARED = False
              LOAD_V_VEC = 4
              LOAD_V_TILE = 4

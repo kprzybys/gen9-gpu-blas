@@ -2,7 +2,8 @@
 
 Usage: python3 bench_mlc.py <model_dir> <model_lib.so> [--prompt-tokens 512] [--gen 128] [--reps 3]
 
-Prompt: a fixed text cut to exactly --prompt-tokens tokens. Greedy decoding, EOS ignored, so every run
+Prompt: a fixed text with a different first sentence per run (MLC's prefix cache would otherwise skip
+the prefill of a repeated prompt), cut to exactly --prompt-tokens tokens. Greedy decoding, EOS ignored, so every run
 generates --gen tokens. Prefill = time to first streamed token (includes tokenization, small);
 decode = (gen - 1) tokens over the time between the first and the last token. One warm-up run first.
 Also prints the engine's own metrics (usage.extra) of the last run when available, and the first
@@ -25,9 +26,9 @@ TEXT = (
 )
 
 
-def make_prompt(model_dir: str, n_tokens: int) -> str:
-    tok = Tokenizer(model_dir)
-    text = TEXT
+def make_prompt(tok, n_tokens: int, salt: str) -> str:
+    # a distinct first sentence per run defeats MLC's prefix cache (it matches from the start)
+    text = f"Document {salt}. " + TEXT
     while len(tok.encode(text)) < n_tokens + 8:
         text += TEXT
     ids = list(tok.encode(text))[:n_tokens]
@@ -70,7 +71,7 @@ def main():
     ap.add_argument("--reps", type=int, default=3)
     a = ap.parse_args()
 
-    prompt = make_prompt(a.model_dir, a.prompt_tokens)
+    tok = Tokenizer(a.model_dir)
     engine = MLCEngine(
         a.model_dir,
         model_lib=a.model_lib,
@@ -79,10 +80,11 @@ def main():
         engine_config=None,
     )
     try:
-        one_run(engine, a.model_dir, prompt, a.gen)  # warm-up
+        one_run(engine, a.model_dir, make_prompt(tok, a.prompt_tokens, "warm-up"), a.gen)
         pre, dec, texts = [], [], []
         extra = None
-        for _ in range(a.reps):
+        for r in range(a.reps):
+            prompt = make_prompt(tok, a.prompt_tokens, f"number {r + 1}")
             tp, td, n, text, extra = one_run(engine, a.model_dir, prompt, a.gen)
             pre.append(a.prompt_tokens / tp)
             dec.append((n - 1) / td if td > 0 else float("nan"))
@@ -91,7 +93,6 @@ def main():
         print(f"prompt {a.prompt_tokens} tokens, gen {a.gen}, reps {a.reps}")
         print("prefill t/s: " + " ".join(f"{x:.1f}" for x in pre) + f"  median {statistics.median(pre):.1f}")
         print("decode  t/s: " + " ".join(f"{x:.2f}" for x in dec) + f"  median {statistics.median(dec):.2f}")
-        print("same text in all reps:", len(set(texts)) == 1)
         print("text[:200]:", json.dumps(texts[-1][:200]))
         if extra:
             print("engine metrics:", json.dumps(extra)[:600])
