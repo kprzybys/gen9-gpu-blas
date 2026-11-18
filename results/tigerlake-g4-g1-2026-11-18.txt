@@ -1,0 +1,22 @@
+# Gen12LP (Tiger Lake UHD Graphics G4, 48 EU, i3-1115G4, 2x DDR4-2667) step G1, docs/gen12lp.md section 6
+# OpenCL through NEO 26.27.39122 (no kcl); bench/clbench built on another machine (glibc 2.39), bench/gen12_g1.sh
+# Predictions were written into docs/gen12lp.md before these runs.
+# 2026-11-18T01:19:25+01:00 1250 MHz max
+fp32 fmav                    k_fmav         global=43008    local=256  sg=32 n=4000   time=   46.581 ms    945.46 Gop/s  GPU~1250 MHz
+fp16 fmav                    k_fmav         global=43008    local=256  sg=32 n=4000   time=   24.312 ms   1811.43 Gop/s  GPU~1250 MHz
+owb2 read 1 MB (GB/s)        k_owb2         global=21504    local=64   sg=8  n=20000  time=   63.539 ms    216.60 Gop/s  GPU~1250 MHz
+owb2 read 8 MB (GB/s)        k_owb2         global=21504    local=64   sg=8  n=20000  time=  109.332 ms    125.88 Gop/s  GPU~1250 MHz
+owb2 read 64 MB (GB/s)       k_owb2         global=21504    local=64   sg=8  n=20000  time=  432.794 ms     31.80 Gop/s  GPU~1250 MHz
+owb2 read 256 MB (GB/s)      k_owb2         global=21504    local=64   sg=8  n=20000  time=  467.699 ms     29.43 Gop/s  GPU~1249 MHz
+#
+# DP4a, bench/peak_dp4a.cl (accumulator is also the first operand; CH chains per work-item, SIMD32; asm: 512 dp4a for CH=16)
+# An earlier version with loop-invariant operands was folded by the compiler for SAT=0 (20 TOPS) and is discarded.
+CH=8  SAT=1 k_dp4a         global=43008    local=256  sg=32 n=4000   time=   60.188 ms   2926.86 Gop/s  GPU~1250 MHz
+CH=8  SAT=0 k_dp4a         global=43008    local=256  sg=32 n=4000   time=   60.189 ms   2926.78 Gop/s  GPU~1250 MHz
+CH=16 SAT=1 k_dp4a         global=43008    local=256  sg=32 n=4000   time=   98.149 ms   3589.67 Gop/s  GPU~1250 MHz
+CH=16 SAT=0 k_dp4a         global=43008    local=256  sg=32 n=4000   time=   98.148 ms   3589.71 Gop/s  GPU~1250 MHz
+# latency, one chain, 32 work-items (one SIMD32 thread), 16 x 20000 dependent operations
+lat SAT=1 k_dp4a_lat     global=32       local=32   sg=32 n=20000  time=    3.739 ms      2.74 Gop/s  GPU~1250 MHz
+lat SAT=0 k_dp4a_lat     global=32       local=32   sg=32 n=20000  time=    3.764 ms      2.72 Gop/s  GPU~1240 MHz
+fma lat ref k_fma_lat      global=32       local=32   sg=32 n=20000  time=    2.809 ms      3.65 Gop/s  GPU~1250 MHz
+# derived: dependent dp4a (SIMD32) 3.739 ms / 320000 = 11.7 ns = 14.6 clocks at 1250 MHz; FP32 fma 8.8 ns = 11.0 clocks
