@@ -53,10 +53,16 @@ GEN8_PROBES = [("gen8_probe.cl", "-cl-intel-greater-than-4GB-buffer-required")] 
 GEN8_DEFINES = {"sgemm.cl": "-DGEN8_PLAIN_PACK -DGEN8_CHV", "dgemm.cl": "-DGEN8_CHV", "level12.cl": "-DGEN8_CHV"}
 # Gen12LP: the main GEMM kernels are the OpenCL C ones (hgemm_v, sgemm_v), which read plain packed A (and B for FP32)
 GEN12_DEFINES = {"hgemm.cl": "-DPLAIN_PACK_A2", "sgemm.cl": "-DGEN8_PLAIN_PACK"}
+# Gen12LP attention: asm/attn.cl compiled by IGC as it is (no attn_gen.py: its scheduling is Gen9 assembly), partial key
+# blocks masked in OpenCL C (-DCLMASK), recorded under the name of the Gen9 binary so lib/src/attn.c finds it
+# (program name -> (source, build options)); the source is expected in <bench dir> next to the kernels
+GEN12_ATTN = {"attn_qwen3_tokc.bin": ("attn.cl", "-cl-fast-relaxed-math -cl-mad-enable -DD=128 -DG=2 -DHKV=8 -DRQ=2 "
+                                                 "-DNK=2 -DQTOK -DCAUSAL=1 -DCLMASK")}
 # attention for the ggml backend (gen9blas_attn.c): whl binaries from `make -C asm attn`, embedded only when built
 # (without them the library declines attention; gen9blas_attn_supported() returns 0)
 if GEN12:
     PROGRAMS = [p for p in PROGRAMS if p[1] is not None and p[0] != "dgemm.cl" and "-DDBL" not in p[1]]
+    PROGRAMS += [(name, None) for name in GEN12_ATTN]
 if not GEN8 and not GEN12:
     for _f in ("attn_qwen_tokc.bin", "attn_llama_tokc.bin", "attn_whisper_tokc.bin", "attn_qwen7b_tokc.bin", "attn_qwen3_tokc.bin", "attn_nemo_tokc.bin", "attn_paddle_tokc.bin", "attn_ernie_tokc.bin", "attn_ernie_stokc.bin"):
         if os.path.exists(os.path.join(BENCH, _f)):
@@ -385,17 +391,18 @@ progs = []
 env = dict(os.environ, IGC_VISAOptions="-noFP64bRegion") if GEN8 else None
 for pi, (file, options) in enumerate(PROGRAMS + (GEN8_PROBES if TARGET == "bdw-probe" else [])):
     base = f"p{pi}"
-    if options is None:
+    if options is None and not (GEN12 and file in GEN12_ATTN):
         if GEN8:
             continue   # assembler binaries are Gen9 code
         binary = os.path.join(BENCH, file)
     else:
         binary = os.path.join(WORK, base + ".bin")
-        cmd = [OCLOC, "compile", "-file", os.path.join(BENCH, file), "-device", DEVICE, "-output_no_suffix",
+        src, opts12 = GEN12_ATTN.get(file, (file, None)) if GEN12 else (file, None)
+        cmd = [OCLOC, "compile", "-file", os.path.join(BENCH, src), "-device", DEVICE, "-output_no_suffix",
                "-output", base, "-out_dir", WORK]
         # Gen8: extra defines for the compile only (the program keeps its recorded options, which gen9blas asks for)
         build_options = (options + " " + GEN8_DEFINES.get(file, "")).strip() if GEN8 else \
-            (options + " " + GEN12_DEFINES.get(file, "")).strip() if GEN12 else options
+            (opts12 if opts12 else (options + " " + GEN12_DEFINES.get(file, "")).strip()) if GEN12 else options
         if build_options:
             cmd += ["-options", build_options]
         if TARGET == "whl-pt":

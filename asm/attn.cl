@@ -86,6 +86,17 @@ __kernel void k_kt(__global const ushort *K, __global ushort *Kt, int nk) {
     _Pragma("unroll") for (int c = 0; c < 8; c++) o##r[c] = fma(p, (float)as_half(v0[c]), o##r[c]); \
     if (D == 128) { _Pragma("unroll") for (int c = 0; c < 8; c++) o##r[8 + c] = fma(p, (float)as_half(v1[c]), o##r[8 + c]); } \
     PV72(r) }
+#ifdef CLMASK
+#if defined(ROWVIS)
+#error CLMASK masks one limit per subgroup (no ROWVIS)
+#endif
+#define MASKK(r, k) SK(s##r, k) = kb + 8 * (k) + lane < nv ? SK(s##r, k) : -1e30f;
+#if NK >= 2
+#define MASK(r) MASKK(r, 0) MASKK(r, 1)
+#else
+#define MASK(r) MASKK(r, 0)
+#endif
+#endif
 #define PV0(r) PVK(r, 0)
 #define PV1(r) PVK(r, 1)
 #define STORE(r) { float il = 1.f / sub_group_reduce_add(l##r); int row = ROWOF(r), t = row / G, hh = row - t * G; \
@@ -162,6 +173,11 @@ __kernel void k_attn(__global const float *Q, __global const ushort *Kt, __globa
 #endif
             }
         }
+#ifdef CLMASK   // Gen12LP (lib/gen_kernels.py tgllp): IGC's loop as it is, without attn_gen.py, so the keys >= nv of
+                // the partial last block are masked here (scores -1e30: exp2 gives 0; -INFINITY is off-limits with
+                // -cl-fast-relaxed-math). One limit per subgroup: not with ROWVIS.
+        if (kb + 8 * NK > nv) { ROWS(MASK) }
+#endif
         kp += NK * D * 8;
         ROWS(SOFT)
         PVLOOP(0)

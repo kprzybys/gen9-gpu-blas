@@ -55,7 +55,9 @@ set(GENK ${CMAKE_CURRENT_SOURCE_DIR}/gen_kernels.py)
 set(KERNELS_C ${CMAKE_CURRENT_BINARY_DIR}/kernels.c)
 set(KERNELS_GEN8_C ${CMAKE_CURRENT_BINARY_DIR}/kernels_gen8.c)
 set(KERNELS_GEN12_C ${CMAKE_CURRENT_BINARY_DIR}/kernels_gen12.c)
-set(_gen12_srcs hgemm.cl sgemm.cl level12.cl)   # what the tgllp target of gen_kernels.py compiles
+# what the tgllp target of gen_kernels.py compiles (attn.cl: the attention template of asm/, compiled by IGC as it is)
+set(_gen12_srcs ${CMAKE_CURRENT_SOURCE_DIR}/kernels/hgemm.cl ${CMAKE_CURRENT_SOURCE_DIR}/kernels/sgemm.cl
+                ${CMAKE_CURRENT_SOURCE_DIR}/kernels/level12.cl ${CMAKE_CURRENT_SOURCE_DIR}/../asm/attn.cl)
 set(ATTN_TOKC attn_qwen_tokc attn_llama_tokc attn_whisper_tokc attn_qwen7b_tokc attn_qwen3_tokc attn_nemo_tokc
               attn_paddle_tokc attn_ernie_tokc attn_ernie_stokc)
 set(ATTN_OTHER attn_qwen attn_llama attn_qwen_tok attn_llama_tok)   # also built by asm (benches)
@@ -128,10 +130,10 @@ if(GEN9BLAS_OCLOC_GEN12)
     message(FATAL_ERROR "gen9blas: GEN9BLAS_OCLOC_GEN12 is ocloc ${_ov12}, the Gen12 kernels need ${GEN9BLAS_OCLOC_GEN12_VERSION}")
   endif()
   set(_k12)
-  foreach(n ${_gen12_srcs})
+  foreach(f ${_gen12_srcs})
+    get_filename_component(n ${f} NAME)
     set(_d ${CMAKE_CURRENT_BINARY_DIR}/kernels_gen12_src/${n})
-    add_custom_command(OUTPUT ${_d} COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/kernels/${n} ${_d}
-                       DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/kernels/${n} VERBATIM)
+    add_custom_command(OUTPUT ${_d} COMMAND ${CMAKE_COMMAND} -E copy ${f} ${_d} DEPENDS ${f} VERBATIM)
     list(APPEND _k12 ${_d})
   endforeach()
   add_custom_command(OUTPUT ${KERNELS_GEN12_C}
