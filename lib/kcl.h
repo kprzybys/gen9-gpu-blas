@@ -67,3 +67,5 @@ int kcl_span_add(const void *ptr, size_t n, int wr);
 void kcl_span_clear(void);
 // 1 on a Gen8 Cherryview GPU (docs/gen8.md): kernels from kernels_gen8.c, no assembler programs; 0 on Gen9.
 int kcl_gen8(void);
+// 1 on a Gen12LP Tiger Lake GPU (docs/gen12lp.md): kernels from kernels_gen12.c (FP16/FP32 OpenCL C only), Gen12 command stream.
+int kcl_gen12(void);

@@ -478,8 +478,13 @@ __kernel void hgemm_16x16kc_b(__global const ushort *Ap, __global const ushort *
 
 // Batched packing (3rd grid dimension = matrix index b; sX = stride of the input matrices in elements).
 // Output: matrix b occupies Mp*Kp (A) / Np*Kp (B) elements. The _t versions: transposed input.
+#ifdef PLAIN_PACK_A2   // Gen12LP build (lib/gen_kernels.py tgllp): the main kernel is the OpenCL C hgemm_v, which reads
+                       // A as a plain 16 x 16 tile (row m % 16, column k % 16), not the A2 layout of gen_h.bin
+#define PK_IDX_A2(m, k, Kp) (((((size_t)((m) / 16) * ((Kp) / 16) + (k) / 16) * 16 + (m) % 16) * 16) + (k) % 16)
+#else
 #define PK_IDX_A2(m, k, Kp) ((((size_t)((m) / 16) * ((Kp) / 16) + (k) / 16) * 256 + ((k) % 16 / 8) * 128 + \
     (2 * ((m) % 16 / 4) + (((k) % 8) % 2 == 0)) * 16 + ((m) % 4) * 4 + ((k) % 8) / 2))
+#endif
 #define PK_IDX_A3(m, k, Kp) ((((size_t)((m) / 16) * ((Kp) / 16) + (k) / 16) * 256 + ((k) % 16 / 4) * 64 + \
     (2 * ((m) % 16 / 8) + (((k) % 4) % 2 == 0)) * 16 + ((m) % 8) * 2 + ((k) % 4) / 2))
 #define PK_IDX_BQ(n, k, Kp) (((((size_t)((n) / 32) * ((Kp) / 16) + (k) / 16) * 2 + ((n) % 32) / 16) * 16 + (k) % 16) * 16 + (n) % 16)
@@ -539,6 +544,7 @@ __kernel void pk_b16_w2(__global const half *B, __global half *Bp, int K, int N,
 // A2, work-item = 4 rows (quarter of a 16 tile) × 8 columns k: reads 4 × half8, writes 32 elements in a row
 // (group g = 2q: odd k, g = 2q+1: even k; within the group (m%4)*4 + (k%8)/2). Neighbouring work-items: quarters q,
 // then halves h of the tile, then consecutive k tiles -- the subgroup writes 1 KB contiguously. Grid (Kp/8 * 4, Mp/16).
+#ifndef PLAIN_PACK_A2   // writes the A2 layout directly
 __kernel void pk_a2_q(__global const half *A, __global half *Ap, int M, int K, int lda, int Kp, long sA, int Mp) {
     const int i = get_global_id(0), q = i % 4, k0 = (i / 4) * 8, m0 = get_global_id(1) * 16 + q * 4, b = get_global_id(2);
     __global const half *s = A + b * sA;
@@ -554,6 +560,7 @@ __kernel void pk_a2_q(__global const half *A, __global half *Ap, int M, int K, i
     __global half *d = Ap + (size_t)b * Mp * Kp + ((size_t)(m0 / 16) * (Kp / 16) + k0 / 16) * 256 + (k0 % 16 / 8) * 128 + 2 * q * 16;
     vstore16(odd, 0, d); vstore16(even, 0, d + 16);
 }
+#endif
 // Batched epilog: C_b = alpha * Cp_b + beta * C_b
 __kernel void gen9blas_epilog_b(__global const half *Cp, int ldp, int Mp, __global half *C, int ldc, long sC, float alpha, float beta) {
     const int j = get_global_id(0), i = get_global_id(1), b = get_global_id(2);
@@ -962,34 +969,39 @@ __kernel void gen9blas_syr2k_merge_h(__global const half *A, int lda, __global c
 }
 // TRSM: inverses of the diagonal blocks of L (n×n, ld n, lower) in FP64, recursive. "Global" indices g = 0..nbl·nb
 // (padding above n: L = I). X (double): block bi from bi·nb·nb, ld nb; the upper triangle of X is never read.
+#ifdef cl_khr_fp64
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
-#define INV_L(i, k) ((i) < n && (k) < n ? (double)L[(size_t)(i) * n + (k)] : (double)((i) == (k)))
+#define INV_T double
+#else
+#define INV_T float   // no FP64 (Gen12LP, docs/gen12lp.md section 2): the block inverses in FP32
+#endif
+#define INV_L(i, k) ((i) < n && (k) < n ? (INV_T)L[(size_t)(i) * n + (k)] : (INV_T)((i) == (k)))
 #define INV_X(X, i, k) X[(size_t)((i) / nb) * nb * nb + (size_t)((i) % nb) * nb + (k) % nb]
 // Base blocks 32×32: work-item = column j of block g, forward substitution.
-__kernel void trsm_inv0_h(__global const half *L, int n, int nb, __global double *X) {
+__kernel void trsm_inv0_h(__global const half *L, int n, int nb, __global INV_T *X) {
     const int j = get_global_id(0), g0 = get_global_id(1) * 32;
     for (int i = j; i < 32; i++) {
-        double s = i == j ? 1.0 : 0.0;
+        INV_T s = i == j ? 1.0 : 0.0;
         for (int k = j; k < i; k++) s -= INV_L(g0 + i, g0 + k) * INV_X(X, g0 + k, g0 + j);
         INV_X(X, g0 + i, g0 + j) = s / INV_L(g0 + i, g0 + i);
     }
 }
 // Level h (pairs of h×h blocks into a 2h block): step 1: Tm = L21·X11 (Tm in place of X21 in the Tm buffer),
 // step 2: X21 = −X22·Tm. Grid (h, h, number of pairs).
-__kernel void trsm_inv1_h(__global const half *L, int n, int nb, __global double *X, __global double *Tm, int h) {
+__kernel void trsm_inv1_h(__global const half *L, int n, int nb, __global INV_T *X, __global INV_T *Tm, int h) {
     const int j = get_global_id(0), i = get_global_id(1), r0 = get_global_id(2) * 2 * h;
-    double s = 0.0;
+    INV_T s = 0.0;
     for (int k = j; k < h; k++) s += INV_L(r0 + h + i, r0 + k) * INV_X(X, r0 + k, r0 + j);
     INV_X(Tm, r0 + h + i, r0 + j) = s;
 }
-__kernel void trsm_inv2_h(__global const half *L, int n, int nb, __global double *X, __global double *Tm, int h) {
+__kernel void trsm_inv2_h(__global const half *L, int n, int nb, __global INV_T *X, __global INV_T *Tm, int h) {
     const int j = get_global_id(0), i = get_global_id(1), r0 = get_global_id(2) * 2 * h;
-    double s = 0.0;
+    INV_T s = 0.0;
     for (int k = 0; k <= i; k++) s += INV_X(X, r0 + h + i, r0 + h + k) * INV_X(Tm, r0 + h + k, r0 + j);
     INV_X(X, r0 + h + i, r0 + j) = -s;
 }
 // Result: out (block bi from bi·nb·nb, ld b = min(nb, n − bi·nb)), upper triangle = 0. Grid (nb, nb, nbl).
-__kernel void trsm_inv3_h(int n, int nb, __global const double *X, __global half *out) {
+__kernel void trsm_inv3_h(int n, int nb, __global const INV_T *X, __global half *out) {
     const int j = get_global_id(0), i = get_global_id(1), bi = get_global_id(2), b = min(nb, n - bi * nb);
     if (i >= b || j >= b) return;
     out[(size_t)bi * nb * nb + (size_t)i * b + j] = j <= i ? (half)X[(size_t)bi * nb * nb + (size_t)i * nb + j] : (half)0;

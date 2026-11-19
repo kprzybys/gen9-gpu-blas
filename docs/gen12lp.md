@@ -1,6 +1,7 @@
 # Gen12LP (Tiger Lake, Xe-LP) port: facts before code
 
-Status (2026-11-18): **facts and the G1 microbenchmarks through NEO (section 6); nothing of the library runs yet.** This file collects what has to change in kcl, in the kernels and in
+Status (2026-11-19): **G1 microbenchmarks through NEO (section 6); G2-G4 done: the FP16/FP32 library runs through kcl on
+Gen12LP and passes its test suites (section 8, `results/gen12lp-a1-2026-11-19.txt`); Gen9/Gen8 kernel tables unchanged.** This file collects what has to change in kcl, in the kernels and in
 the build for a Gen12LP GPU (Tiger Lake UHD Graphics G4, 48 EU), following the method of
 [performance-model.md](performance-model.md) and the Gen8 port ([gen8.md](gen8.md)): facts with sources first, then
 a model with written predictions, then one change at a time and a test. Work happens on the `gen12` branch; `main`
@@ -151,10 +152,41 @@ rate means dequantization to FP16 (the Gen9 path) is no longer the cheapest way.
 | Step | What | Where | Needs |
 |---|---|---|---|
 | G1 | microbenchmarks through NEO (no kcl): FP32/FP16 FMA, DP4a, memory bandwidth; compare with section 6 | `bench/clbench`, `bench/peak.cl`, a DP4a kernel, `bench/memory.cl` on the target | nothing in the library |
-| G2 | `#ifdef cl_khr_fp64` guards in `hgemm.cl`, `sgemm.cl`, `level12.cl`; Gen9 builds unchanged (golden) | `lib/kernels/` | G1 not needed |
-| G3 | second ocloc in the build (`GEN9BLAS_OCLOC_GEN12`), `gen_kernels.py` target `tgllp` (zebin, SIMD32, no assembler binaries) | `lib/CMakeLists.txt`, `lib/gen_kernels.py` | G2 |
-| G4 | kcl Gen12 command stream and driver changes (sections 4-5) | `lib/kcl.c`, a `kcl_gen12.c` like `kcl_gen8.c` | G3, facts in 4-5 |
+| G2 (done) | `#ifdef cl_khr_fp64` guards in `hgemm.cl`, `sgemm.cl`, `level12.cl`; Gen9 builds unchanged (golden) | `lib/kernels/` | G1 not needed |
+| G3 (done) | second ocloc in the build (`GEN9BLAS_OCLOC_GEN12`), `gen_kernels.py` target `tgllp` (zebin, SIMD32, no assembler binaries) | `lib/CMakeLists.txt`, `lib/gen_kernels.py` | G2 |
+| G4 (done) | kcl Gen12 command stream and driver changes (sections 4-5) | `lib/kcl.c`, a `kcl_gen12.c` like `kcl_gen8.c` | G3, facts in 4-5 |
 | G5 | first DP4a kernel (Q8_0 GEMM for prefill), measured against the section 6 prediction | `lib/kernels/`, ggml backend later | G1, G4 (or through NEO first) |
 
 Open questions: the sustained GPU clock under the package power limit; whether kcl handles SIMD32; Gen12 versions of the
 five spilling kernels; FP64 users in the library API (`gen9blas_dgemm` etc.) must report "unsupported" on Gen12.
+
+## 8. G2-G4 result (2026-11-19) [MEAS]
+
+What was built (branch `gen12`):
+- **G2**: `trsm_inv*` in `hgemm.cl` / `sgemm.cl` accumulate in `INV_T` (double with `cl_khr_fp64`, float without);
+  `level12.cl` `F(red)` without FP64 sums in FP32 with compensation (Neumaier per lane, TwoSum tree in SLM) and stores a
+  float pair per work-group, which `lib/src/level12.c` adds in double. Preprocessor-only on Gen9/Gen8: `kernels.c` and
+  `kernels_gen8.c` are byte-identical to the tables before the change.
+- **G3**: `lib/gen_kernels.py tgllp` (ocloc from `OCLOC`, `.ze_info` read from the ELF section, FP16/FP32 programs
+  only, `require_disable_eufusion` / `has_dpas` marked unsupported), CMake `GEN9BLAS_OCLOC_GEN12` (version-checked,
+  26.27.039122) or a prebuilt `kernels_gen12.c`. 166 kernel bodies, 92 of them SIMD32; 160 supported.
+- **G4**: `lib/kcl.c` detects Tiger Lake by PCI id; batch preamble: PIPE_CONTROL (CS stall, DC, RT, depth, HDC flush)
+  -> PIPELINE_SELECT 3D -> STATE_BASE_ADDRESS (22 DW) -> STATE_COMPUTE_MODE (force non-coherent) -> PIPELINE_SELECT GPGPU
+  -> PIPE_CONTROL (no constant cache invalidate) -> MEDIA_VFE_STATE (URB 1024) -> MIDL; no L3CNTLREG, no 0xE404; HDC
+  flush in the barrier between kernels. The other commands use the Gen9 packs: genxml gen120 keeps every field kcl sets
+  at the same bits (checked field by field). SIMD32 dispatch needed no change.
+- Library: no FP64 type, main GEMM kernels from OpenCL C (`hgemm_v`, `hgemm_kc_v`, `sgemm_v`; tgllp compiles with
+  `-DPLAIN_PACK_A2` / `-DGEN8_PLAIN_PACK`, because those kernels read plain packed tiles, not the assembler layouts).
+
+Found on the way (each by a failing run):
+- i915 has **no read-only PTEs on Gen11/12** (`gen8_ppgtt.c:1025`): `I915_USERPTR_READ_ONLY` fails with ENODEV. kcl makes
+  userptr objects writable on Gen12 and copies ranges that are mapped read-only (checked in `/proc/self/maps`) -- this
+  matters for read-only mmap'd model files in the ggml backend.
+- `skinny_n4_h/_f` spill on Gen12 (768 / 9408 B; less unrolling does not remove it): skinny GEMM with weights contiguous
+  along N falls back to the packed path (FP16 through the accurate kernel).
+- `gen9blas_dequant_b16` does not spill with the real build (the 3424 B in section 2 came from the double -> float
+  statistics build).
+
+Tests on the Gen12 GPU: basic, errors, level3, level12, userptr, packed, long_launch all OK; skinny 430/432 (two FP32
+cases 2.6e-6 against a 2e-6 tolerance, from the fallback above); blas suites not run (no OpenBLAS on the host).
+GEMM through kcl: hgemm 1144 GFLOPS (63 % of the measured FP16 peak), accurate hgemm 951, sgemm 551 (58 % of FP32).

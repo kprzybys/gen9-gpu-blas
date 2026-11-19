@@ -1,4 +1,5 @@
-// kcl: the OpenCL subset used by libgen9blas (lib/src), implemented directly on i915 (Gen9: UHD 620, HD 530; Gen8 Cherryview: docs/gen8.md), without NEO. Facts and measurements: ../docs/no-neo.md.
+// kcl: the OpenCL subset used by libgen9blas (lib/src), implemented directly on i915 (Gen9: UHD 620, HD 530; Gen8 Cherryview: docs/gen8.md;
+// Gen12LP Tiger Lake: docs/gen12lp.md), without NEO. Facts and measurements: ../docs/no-neo.md.
 //
 // Model: an in-order queue = a batch buffer built on the fly; each clEnqueueNDRangeKernel appends
 // IDD + indirect data + (for stateful arguments) binding table and surface states + GPGPU_WALKER; between kernels
@@ -23,9 +24,13 @@
 #include "kcl_desc.h"
 #include "kcl_gen8.h"
 // Programs that link kcl.c without the library (emb/, dec/, ina/, mel/, silero/, bench/attn_kcl, bench/kcl_const) do not
-// link kernels_gen8.c / kcl_gen8.c: weak fallbacks (no Gen8 programs; the Gen8 command helpers are only called on Gen8).
-__attribute__((weak)) const struct kcl_program_desc kcl_programs_gen8[1];
-__attribute__((weak)) const int kcl_nprograms_gen8 = 0;
+// link kernels_gen8.c / kernels_gen12.c / kcl_gen8.c: the tables are weak references (address NULL when absent: no
+// programs), the Gen8 command helpers weak fallbacks (only called on Gen8). Not weak *definitions* `const int n = 0`: GCC
+// folds such a constant into kcl.c, and the table linked in later was never seen (Gen12 bring-up 2026-11-19: 0 programs).
+extern const struct kcl_program_desc kcl_programs_gen8[] __attribute__((weak));
+extern const int kcl_nprograms_gen8 __attribute__((weak));
+extern const struct kcl_program_desc kcl_programs_gen12[] __attribute__((weak));
+extern const int kcl_nprograms_gen12 __attribute__((weak));
 __attribute__((weak)) uint32_t *kcl_gen8_pipeline_select_gpgpu(uint32_t *p) { return p; }
 __attribute__((weak)) uint32_t *kcl_gen8_state_base_address(uint32_t *p, const struct kcl_sba *s) { (void)s; return p; }
 #include <time.h>
@@ -39,9 +44,15 @@ static uint32_t MOCS_WB = 2 << 1;   // [HIP] index 2 of the i915 MOCS table (SKL
 // (SLM is inconsistent after every reconfiguration on CHV; Beignet: the same value, "random hang" when switching).
 #define MOCS_WB_GEN8 0x78u
 #define L3_GEN8 0x60000121u
-// Device parameters, read in init(): Gen9.5 (default) or Gen8 Cherryview.
+// Gen12LP (docs/gen12lp.md sections 4-5): the Gen9 packs are used where genxml gen120 keeps every field kcl sets at the
+// same bits (PIPE_CONTROL, MEDIA_VFE_STATE, INTERFACE_DESCRIPTOR_DATA, RENDER_SURFACE_STATE buffers, GPGPU_WALKER,
+// PIPELINE_SELECT, MEDIA_STATE_FLUSH, MI_*); STATE_BASE_ADDRESS gets 3 more DWords, PIPE_CONTROL the HDC Pipeline Flush
+// bit (DW0 bit 9), STATE_COMPUTE_MODE is new. No L3CNTLREG (0x7034 is reserved) and no 0xE404 (not user-writable).
+#define PC_HDC_FLUSH (1u << 9)
+#define URB_ALLOC_GEN12 1024u   // MEDIA_VFE_STATE URB entry allocation in 32 B units: <= 32 KB on Gen12 (NEO: 1024)
+// Device parameters, read in init(): Gen9.5 (default), Gen8 Cherryview or Gen12LP Tiger Lake.
 // llc = 0 (CHV): CPU caches are not shared with the GPU; gtt_end != 0: small (32-bit) GPU address space, see kbo_addr.
-static struct { int gen8, llc; uint32_t eus, max_group_threads; uint64_t ts_freq, gtt_end;
+static struct { int gen8, gen12, llc; uint32_t eus, max_group_threads; uint64_t ts_freq, gtt_end;
                 const struct kcl_program_desc *progs; int nprogs; } dev;
 enum { KSLOT = 8, DYN = 1 << 20, BB = 128 << 10, IDD_MAX = 64,
        O_IND = 0x1000, O_SS = 0xC0000, SS_LEN = 0x10000,   // dyn: IDD | indirect data | binding tables + surface states
@@ -231,7 +242,10 @@ static up_t *up_object(uintptr_t s, uintptr_t e, int wr) {
         up_remove(j);
     }
     if (nup == UP_MAX) return NULL;
-    struct drm_i915_gem_userptr u = { .user_ptr = s, .user_size = e - s, .flags = wr ? 0 : I915_USERPTR_READ_ONLY };
+    // Gen12 (and Gen11): no read-only PTEs in the PPGTT, i915 refuses I915_USERPTR_READ_ONLY with ENODEV (Linux v7.3
+    // gt/gen8_ppgtt.c:1025 has_read_only = !IS_GRAPHICS_VER(11, 12)). There the object is writable for the GPU (the
+    // pages are pinned for writing, so memory mapped read-only cannot be used; the execbuf still omits EXEC_OBJECT_WRITE).
+    struct drm_i915_gem_userptr u = { .user_ptr = s, .user_size = e - s, .flags = wr || dev.gen12 ? 0 : I915_USERPTR_READ_ONLY };
     kbo *b = calloc(1, sizeof *b);
     if (!b || ioctl(fd, DRM_IOCTL_I915_GEM_USERPTR, &u)) { free(b); return NULL; }
     b->h = u.handle; b->size = e - s; b->ref = 1; b->ro = !wr; b->addr = kbo_addr(e - s);
@@ -286,9 +300,11 @@ void kcl_userptr_release(const void *ptr, size_t n) {
 // resolved to a span that contains it entirely.
 enum { SPAN_MAX = 16 };
 static struct { uintptr_t p, n, s; kbo *bo; int wr; } spans[SPAN_MAX]; static int nspans;
+static int range_writable(uintptr_t s, uintptr_t e);
 int kcl_span_add(const void *ptr, size_t n, int wr) {
     if (init() || !ptr || !n) return -1;
     const uintptr_t p = (uintptr_t)ptr, s = p & ~4095ul, e = (p + n + 4095) & ~4095ul;
+    if (dev.gen12 && !wr && !range_writable(s, e)) return -1;   // see kcl_userptr
     for (int i = 0; i < nspans; i++) if (spans[i].p == p && spans[i].n == n && (spans[i].wr || !wr)) return 0;
     if (nspans == SPAN_MAX || e - s > up_limit) return -1;
     up_t *x = up_object(s, e, wr);
@@ -303,9 +319,32 @@ void kcl_span_clear(void) {
 }
 static cl_mem kcl_userptr_(const void *ptr, size_t n, int wr);
 cl_mem kcl_userptr(const void *ptr, size_t n, int wr) { PHASE_BEGIN; cl_mem m = kcl_userptr_(ptr, n, wr); PHASE_END(F_UP); return m; }
+// Gen12: userptr objects are always writable (no read-only PTEs, see up_object), so i915 pins the pages for writing and
+// execbuffer2 fails with EFAULT on memory mapped read-only (a file opened read-only, a PROT_READ model mmap). Such ranges
+// go through a CPU copy instead: [s, e) must lie in writable mappings of /proc/self/maps. Writable mappings seen are
+// cached (WR_CACHE ranges), so the file is read only for new address ranges.
+enum { WR_CACHE = 64 };
+static struct { uintptr_t s, e; } wr_ok[WR_CACHE]; static int nwr_ok, wr_ok_i;
+static int range_writable(uintptr_t s, uintptr_t e) {
+    for (int i = 0; i < nwr_ok; i++) if (wr_ok[i].s <= s && e <= wr_ok[i].e) return 1;
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    char line[512]; uintptr_t covered = s; int ok = 0;
+    while (fgets(line, sizeof line, f)) {   // ascending addresses: walk the mappings over [s, e) without gaps
+        unsigned long a, b; char perm[8];
+        if (sscanf(line, "%lx-%lx %7s", &a, &b, perm) != 3 || b <= covered) continue;
+        if (a > covered || perm[1] != 'w') break;
+        wr_ok[wr_ok_i] = (typeof(wr_ok[0])){ a, b }; wr_ok_i = (wr_ok_i + 1) % WR_CACHE; if (nwr_ok < WR_CACHE) nwr_ok++;
+        covered = b;
+        if (covered >= e) { ok = 1; break; }
+    }
+    fclose(f);
+    return ok;
+}
 static cl_mem kcl_userptr_(const void *ptr, size_t n, int wr) {
     if (init() || !ptr || !n) return NULL;
     const uintptr_t p = (uintptr_t)ptr, s = p & ~4095ul, e = (p + n + 4095) & ~4095ul;
+    if (dev.gen12 && !wr && !range_writable(s, e)) return NULL;   // read-only mapping: copy through the CPU
     for (int i = 0; i < nspans; i++)
         if (p >= spans[i].p && p + n <= spans[i].p + spans[i].n && (!wr || spans[i].wr)) {
             struct _cl_mem *m = &up_mem[up_mem_i++ % UP_MEM];
@@ -382,6 +421,43 @@ static int open_batch(void) {
     nbo_list = 0; nlaunch = 0; slm_in_batch = 0; o_ind = O_IND; o_ss = O_SS;
     p = S[s].bb->map;
     const uint64_t D = S[s].dyn->addr;
+    if (dev.gen12) {
+        // PRM: CS stall + render target flush + HDC pipeline flush before STATE_BASE_ADDRESS; Wa_1607854226: SBA and
+        // STATE_COMPUTE_MODE in the 3D pipeline, then back to GPGPU (NEO and Mesa iris on TGL)
+        EMIT(PIPE_CONTROL, .CommandStreamerStallEnable = 1, .DCFlushEnable = 1, .RenderTargetCacheFlushEnable = 1,
+             .DepthCacheFlushEnable = 1);
+        p[-6] |= PC_HDC_FLUSH;
+        lri = NULL;
+        EMIT(PIPELINE_SELECT, .MaskBits = 3, .PipelineSelection = _3D);
+        const uint32_t *sba = p;
+        EMIT(STATE_BASE_ADDRESS,
+            .GeneralStateBaseAddressModifyEnable = 1, .GeneralStateBaseAddress = 0, .GeneralStateMOCS = MOCS_WB,
+            .StatelessDataPortAccessMOCS = MOCS_WB,
+            .SurfaceStateBaseAddressModifyEnable = 1, .SurfaceStateBaseAddress = D + O_SS, .SurfaceStateMOCS = MOCS_WB,
+            .DynamicStateBaseAddressModifyEnable = 1, .DynamicStateBaseAddress = D, .DynamicStateMOCS = MOCS_WB,
+            .IndirectObjectBaseAddressModifyEnable = 1, .IndirectObjectBaseAddress = D, .IndirectObjectMOCS = MOCS_WB,
+            .InstructionBaseAddressModifyEnable = 1, .InstructionBaseAddress = isa->addr, .InstructionMOCS = MOCS_WB,
+            .GeneralStateBufferSizeModifyEnable = 1, .GeneralStateBufferSize = 0xfffff,
+            .DynamicStateBufferSizeModifyEnable = 1, .DynamicStateBufferSize = DYN / 4096,
+            .IndirectObjectBufferSizeModifyEnable = 1, .IndirectObjectBufferSize = DYN / 4096,
+            .InstructionBuffersizeModifyEnable = 1, .InstructionBufferSize = (uint32_t)(isa->size / 4096),
+            .BindlessSurfaceStateBaseAddressModifyEnable = 1, .BindlessSurfaceStateMOCS = MOCS_WB,
+            .BindlessSurfaceStateSize = 0xfffff);
+        ((uint32_t *)sba)[0] = (sba[0] & ~0xffu) | (22 - 2);   // DWord Length 20: 22 DW, DW 19-21 (bindless sampler) zero
+        *p++ = 0; *p++ = 0; *p++ = 0;
+        *p++ = 0x61050000u;               // STATE_COMPUTE_MODE (GFXPIPE non-pipelined, sub-opcode 5), 2 DW
+        *p++ = (0x18u << 16) | (2u << 3); // mask bits 4:3, Force Non-Coherent = 2 (GPU non-coherent), as NEO
+        EMIT(PIPELINE_SELECT, .MaskBits = 3, .PipelineSelection = GPGPU);
+        // a stalling PIPE_CONTROL before MEDIA_VFE_STATE; never Constant Cache Invalidate on TGL (PRM vol14 hang note)
+        EMIT(PIPE_CONTROL, .CommandStreamerStallEnable = 1, .StateCacheInvalidationEnable = 1,
+             .InstructionCacheInvalidateEnable = 1, .TextureCacheInvalidationEnable = 1);
+        EMIT(MEDIA_VFE_STATE, .MaximumNumberofThreads = dev.eus * 7 - 1, .NumberofURBEntries = 1,
+             .URBEntryAllocationSize = URB_ALLOC_GEN12, .CURBEAllocationSize = 0);
+        idl = p;
+        EMIT(MEDIA_INTERFACE_DESCRIPTOR_LOAD, .InterfaceDescriptorTotalLength = 32, .InterfaceDescriptorDataStartAddress = 0);
+        add_bo(isa); if (ts_bo) add_bo(ts_bo);
+        return 0;
+    }
     EMIT(PIPE_CONTROL, .CommandStreamerStallEnable = 1, .DCFlushEnable = 1);
     lri = p;   // L3CNTLREG: value filled in at submit time (with SLM if any kernel uses it)
     EMIT(MI_LOAD_REGISTER_IMM, .RegisterOffset = 0x7034, .DataDWord = L3_NO_SLM);
@@ -434,9 +510,10 @@ static int submit(void) {
     if (cur < 0) return 0;
     slot_t *s = &S[cur];
     EMIT(PIPE_CONTROL, .CommandStreamerStallEnable = 1, .DCFlushEnable = 1);
+    if (dev.gen12) p[-6] |= PC_HDC_FLUSH;
     EMIT(MI_BATCH_BUFFER_END);
     if ((p - (uint32_t *)s->bb->map) & 1) *p++ = 0;
-    { struct GFX9_MI_LOAD_REGISTER_IMM l = { GFX9_MI_LOAD_REGISTER_IMM_header, .RegisterOffset = 0x7034,
+    if (lri) { struct GFX9_MI_LOAD_REGISTER_IMM l = { GFX9_MI_LOAD_REGISTER_IMM_header, .RegisterOffset = 0x7034,
           .DataDWord = dev.gen8 ? L3_GEN8 : (slm_in_batch || l3_always_slm) ? L3_SLM : L3_NO_SLM };
       GFX9_MI_LOAD_REGISTER_IMM_pack(NULL, lri, &l); }
     { struct GFX9_MEDIA_INTERFACE_DESCRIPTOR_LOAD l = { GFX9_MEDIA_INTERFACE_DESCRIPTOR_LOAD_header,
@@ -524,6 +601,7 @@ cl_int kcl_wait(void) {
     return CL_SUCCESS;
 }
 int kcl_gen8(void) { return init() ? 0 : dev.gen8; }
+int kcl_gen12(void) { return init() ? 0 : dev.gen12; }
 static uint64_t seq_in_use(void) { return cur >= 0 ? S[cur].seq : seq_sent; }   // the last batch that may use an object
 static int kcl_wait_all(void) { return kcl_wait() != CL_SUCCESS; }
 
@@ -554,6 +632,10 @@ static int init(void) {
         getparam(I915_PARAM_SUBSLICE_TOTAL, &subslices) || getparam(I915_PARAM_CS_TIMESTAMP_FREQUENCY, &freq) ||
         eus <= 0 || subslices <= 0 || freq <= 0) return -1;
     dev.gen8 = (chip & ~3) == 0x22b0;   // Cherryview/Braswell 0x22b0-0x22b3 (Mesa crocus_pci_ids.h)
+    // Tiger Lake GT1/GT2 (Linux include/pciids.h INTEL_TGL_GT1_IDS / GT2_IDS; NEO tgllpDeviceIds). Other Gen12 parts (RKL,
+    // ADL, DG1) are not tested and stay off.
+    static const uint16_t tgl[] = { 0x9a60, 0x9a68, 0x9a70, 0x9a40, 0x9a49, 0x9a59, 0x9a78, 0x9ac0, 0x9ac9, 0x9ad9, 0x9af8 };
+    for (size_t i = 0; i < sizeof tgl / sizeof tgl[0]; i++) dev.gen12 |= chip == tgl[i];
     int llc = 0;
     struct drm_i915_gem_context_param gp = { .ctx_id = ctx_id, .param = I915_CONTEXT_PARAM_GTT_SIZE };
     if (getparam(I915_PARAM_HAS_LLC, &llc) || ioctl(fd, DRM_IOCTL_I915_GEM_CONTEXT_GETPARAM, &gp)) return -1;
@@ -564,8 +646,9 @@ static int init(void) {
     // Threads per work-group: Gen8 at most the threads of one subslice (PRM CHV vol02d p.223: needed for barriers;
     // applied to every kernel to keep it simple); Gen9 unchanged.
     dev.max_group_threads = dev.gen8 ? (uint32_t)(eus / subslices) * 7 : 64;
-    dev.progs = dev.gen8 ? kcl_programs_gen8 : kcl_programs;
-    dev.nprogs = dev.gen8 ? kcl_nprograms_gen8 : kcl_nprograms;
+    dev.progs = dev.gen8 ? kcl_programs_gen8 : dev.gen12 ? kcl_programs_gen12 : kcl_programs;
+    dev.nprogs = dev.gen8 ? (&kcl_nprograms_gen8 ? kcl_nprograms_gen8 : 0)
+               : dev.gen12 ? (&kcl_nprograms_gen12 ? kcl_nprograms_gen12 : 0) : kcl_nprograms;
     if (dev.gen8) MOCS_WB = MOCS_WB_GEN8;
     resets_seen = reset_count();
     kprofile_kernels = getenv("KCL_PROFILE_KERNELS") != NULL;
@@ -575,8 +658,8 @@ static int init(void) {
     up_limit = (uint64_t)(um && *um ? atoi(um) : 1024) << 20;   // pinned process memory
     if (getenv("KCL_MOCS")) MOCS_WB = (uint32_t)atoi(getenv("KCL_MOCS")) << (dev.gen8 ? 0 : 1);   // Gen8: the raw value
     if (getenv("KCL_L3") && !strcmp(getenv("KCL_L3"), "slm")) l3_always_slm = 1;
-    if (kcl_nprograms > KCL_MAX_PROGRAMS) {
-        fprintf(stderr, "kcl: %d programs in the kernel table, at most %d (KCL_MAX_PROGRAMS)\n", kcl_nprograms, KCL_MAX_PROGRAMS);
+    if (dev.nprogs > KCL_MAX_PROGRAMS) {
+        fprintf(stderr, "kcl: %d programs in the kernel table, at most %d (KCL_MAX_PROGRAMS)\n", dev.nprogs, KCL_MAX_PROGRAMS);
         return -1;
     }
     uint64_t sz = 0;
@@ -645,8 +728,8 @@ cl_kernel kcl_CreateKernel(cl_program pr, const char *name, cl_int *e) {
         }
         struct _cl_kernel *k = calloc(1, sizeof *k);
         k->o = o; k->isa_off = isa_off[pr->idx][j]; k->prog = pr->idx;
-        if (o->private_size) {   // private memory: private_size x SIMD x (EUs x 7 threads), like NEO
-            uint64_t needed = (uint64_t)o->private_size * o->simd * dev.eus * 7;
+        if (o->private_size) {   // private memory: private_size x SIMD x (EUs x 7 threads), like NEO (Gen12: 8 per EU, NEO)
+            uint64_t needed = (uint64_t)o->private_size * o->simd * dev.eus * (dev.gen12 ? 8 : 7);
             if (!priv_bo || priv_bo->size < needed) {
                 if (priv_bo) { kcl_wait(); kbo_release(priv_bo); priv_bo = NULL; }
                 if (kbo_new(needed, KMAP_NONE, &priv_bo)) { *e = CL_OUT_OF_RESOURCES; free(k); return NULL; }
@@ -830,7 +913,10 @@ static cl_int enqueue_(cl_command_queue q, cl_kernel k, cl_uint dim, const size_
                      (uint8_t *)p - (uint8_t *)S[cur].bb->map > BB - 2048 || nbo_list + o->nargs + 4 > MAXBO))
         if (submit()) return CL_OUT_OF_RESOURCES;
     if (open_batch()) return CL_OUT_OF_RESOURCES;
-    if (nlaunch > 0) EMIT(PIPE_CONTROL, .CommandStreamerStallEnable = 1, .DCFlushEnable = 1);   // in-order queue
+    if (nlaunch > 0) {   // in-order queue; Gen12: also the HDC pipeline flush (NEO's barrier on Gen12LP)
+        EMIT(PIPE_CONTROL, .CommandStreamerStallEnable = 1, .DCFlushEnable = 1);
+        if (dev.gen12) p[-6] |= PC_HDC_FLUSH;
+    }
     uint8_t *D = S[cur].dyn->map, *ind = D + o_ind;
     memset(ind, 0, dlen);
     for (int i = 0; i < 3; i++) {

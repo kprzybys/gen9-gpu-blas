@@ -27,3 +27,5 @@ extern const struct kcl_program_desc kcl_programs[];        // Gen9.5 (kernels.c
 extern const int kcl_nprograms;
 extern const struct kcl_program_desc kcl_programs_gen8[];   // Gen8 (kernels_gen8.c, docs/gen8.md)
 extern const int kcl_nprograms_gen8;
+extern const struct kcl_program_desc kcl_programs_gen12[];  // Gen12LP (kernels_gen12.c, docs/gen12lp.md)
+extern const int kcl_nprograms_gen12;

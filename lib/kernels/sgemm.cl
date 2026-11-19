@@ -128,7 +128,7 @@ __kernel void sgemm_16x16p_b(__global const uint *Ap, __global const uint *Bp, _
     for (int r = 0; r < 16; r++)
         intel_sub_group_block_write((__global uint *)(C + (size_t)(pm * 16 + r) * ldc + pn * 16), as_uint(acc[r]));
 }
-#ifdef GEN8_PLAIN_PACK   // Gen8 build (lib/gen_kernels.py bdw, docs/gen8.md): the main kernel is sgemm_v below, which reads
+#ifdef GEN8_PLAIN_PACK   // Gen8 and Gen12LP builds (lib/gen_kernels.py bdw, tgllp): the main kernel is sgemm_v below, which reads
                          // the plain layout of pack_af / pack_bf, not the layout of the Gen9 assembler kernel (gen_s.bin)
 #define PKF_IDX_A(m, k, Kp) (((((size_t)((m) / 16) * ((Kp) / 16) + (k) / 16) * 16 + (m) % 16) * 16) + (k) % 16)
 #define PKF_IDX_B(n, k, Kp) (((size_t)((n) / 16) * (Kp) + (k)) * 16 + (n) % 16)
@@ -293,36 +293,41 @@ __kernel void gen9blas_syr2k_merge_f(__global const float *A, int lda, __global 
 }
 // TRSM: inverses of the diagonal blocks of L (n×n, ld n, lower) in FP64, recursively. "Global" indices g = 0..nbl·nb
 // (padding above n: L = I). X (double): block bi starts at bi·nb·nb, ld nb; the upper triangle of X is never read.
+#ifdef cl_khr_fp64
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
-#define INV_L(i, k) ((i) < n && (k) < n ? (double)RD(L, (size_t)(i) * n + (k)) : (double)((i) == (k)))
+#define INV_T double
+#else
+#define INV_T float   // no FP64 (Gen12LP, docs/gen12lp.md section 2): the block inverses in FP32
+#endif
+#define INV_L(i, k) ((i) < n && (k) < n ? (INV_T)RD(L, (size_t)(i) * n + (k)) : (INV_T)((i) == (k)))
 #define INV_XI(i, k) ((size_t)((i) / nb) * nb * nb + (size_t)((i) % nb) * nb + (k) % nb)
 #define INV_X(X, i, k) RDD(X, INV_XI(i, k))
 #define INV_XW(X, i, k, v) WRD(X, INV_XI(i, k), v)
 // Base blocks 32×32: work-item = column j of block g, forward substitution.
-__kernel void trsm_inv0_f(__global const float *L, int n, int nb, __global double *X) {
+__kernel void trsm_inv0_f(__global const float *L, int n, int nb, __global INV_T *X) {
     const int j = get_global_id(0), g0 = get_global_id(1) * 32;
     for (int i = j; i < 32; i++) {
-        double s = i == j ? 1.0 : 0.0;
+        INV_T s = i == j ? 1.0 : 0.0;
         for (int k = j; k < i; k++) s -= INV_L(g0 + i, g0 + k) * INV_X(X, g0 + k, g0 + j);
         INV_XW(X, g0 + i, g0 + j, DIVD(s, INV_L(g0 + i, g0 + i)));
     }
 }
 // Level h (pairs of h×h blocks into a 2h block): step 1: Tm = L21·X11 (Tm in place of X21 in the Tm buffer),
 // step 2: X21 = −X22·Tm. Grid (h, h, number of pairs).
-__kernel void trsm_inv1_f(__global const float *L, int n, int nb, __global double *X, __global double *Tm, int h) {
+__kernel void trsm_inv1_f(__global const float *L, int n, int nb, __global INV_T *X, __global INV_T *Tm, int h) {
     const int j = get_global_id(0), i = get_global_id(1), r0 = get_global_id(2) * 2 * h;
-    double s = 0.0;
+    INV_T s = 0.0;
     for (int k = j; k < h; k++) s += INV_L(r0 + h + i, r0 + k) * INV_X(X, r0 + k, r0 + j);
     INV_XW(Tm, r0 + h + i, r0 + j, s);
 }
-__kernel void trsm_inv2_f(__global const float *L, int n, int nb, __global double *X, __global double *Tm, int h) {
+__kernel void trsm_inv2_f(__global const float *L, int n, int nb, __global INV_T *X, __global INV_T *Tm, int h) {
     const int j = get_global_id(0), i = get_global_id(1), r0 = get_global_id(2) * 2 * h;
-    double s = 0.0;
+    INV_T s = 0.0;
     for (int k = 0; k <= i; k++) s += INV_X(X, r0 + h + i, r0 + h + k) * INV_X(Tm, r0 + h + k, r0 + j);
     INV_XW(X, r0 + h + i, r0 + j, -s);
 }
 // Result: out (block bi starts at bi·nb·nb, ld b = min(nb, n − bi·nb)), upper triangle = 0. Grid (nb, nb, nbl).
-__kernel void trsm_inv3_f(int n, int nb, __global const double *X, __global float *out) {
+__kernel void trsm_inv3_f(int n, int nb, __global const INV_T *X, __global float *out) {
     const int j = get_global_id(0), i = get_global_id(1), bi = get_global_id(2), b = min(nb, n - bi * nb);
     if (i >= b || j >= b) return;
     WR(out, (size_t)bi * nb * nb + (size_t)i * b + j, j <= i ? (float)RDD(X, (size_t)bi * nb * nb + (size_t)i * nb + j) : 0.0f);

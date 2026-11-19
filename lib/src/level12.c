@@ -181,7 +181,10 @@ static int reduction(int type, int mode, int n, const void *x, int incx, const v
     size_t G = (size_t)g * 256, Lw = 256;
     CHECK(clEnqueueNDRangeKernel(q, K, 1, NULL, &G, &Lw, 0, NULL, NULL));
     if (wait_gpu()) return ERR_RET;
-    double s = 0; for (int i = 0; i < g; i++) s += red_out[i];
+    double s = 0;
+    if (gen12 && es != 8)   // no FP64 on Gen12LP: each part is a float pair (sum, compensation), level12.cl F(red)
+        for (int i = 0; i < g; i++) s += (double)((const float *)red_out)[2 * i] + (double)((const float *)red_out)[2 * i + 1];
+    else for (int i = 0; i < g; i++) s += red_out[i];
     *result = mode == 2 ? sqrt(s) : s;
     return 0;
 }

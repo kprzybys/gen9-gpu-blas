@@ -1,0 +1,44 @@
+# Gen12LP (Tiger Lake UHD Graphics G4, 48 EU) step A1 = docs/gen12lp.md G2-G4: libgen9blas through kcl on Gen12
+# Tiger Lake UHD G4 test host: i3-1115G4, Linux 7.3.4, i915, kernels from ocloc 26.27.039122 (tgllp target of
+# lib/gen_kernels.py); Gen9 golden on the UHD 620 machine (Gen9.5, ocloc 24.35.30872.36). Branch gen12, 2026-11-19.
+
+## 1. Gen9/Gen8 golden without a GPU (kernel tables)
+lib/gen_kernels.py whl and bdw, sources before (HEAD 1820f57) and after the FP64 guards and the tgllp target:
+  kernels.c (whl, without attention binaries)  byte-identical
+  kernels_gen8.c (bdw)                         byte-identical
+  full CMake build on the UHD 620 machine: kernels.c sha256 e2b725fced57fdef... = the cached table built 2026-11-15
+  (before any Gen12 change), kernels_gen8.c likewise.
+
+## 2. Gen9.5 golden on the GPU (UHD 620, ctest suites run directly, SKIP_BIG=1, final code)
+basic rc=0 RESULT: all OK          errors rc=0 19/19 OK          level3 rc=0 all OK
+level12 rc=0 all OK                userptr rc=0 all OK           skinny rc=0 all OK
+packed rc=0 errors: 0              long_launch rc=0 all OK       blas / blas_d / blas_banded rc=0 all OK
+Second Gen9 machine (UHD 620, gp): NOT run -- its GPU was busy with the kp-docsearch embedding job.
+
+## 3. Gen12LP on the GPU (Tiger Lake UHD G4)
+Kernel table: 4 programs (hgemm.cl, sgemm.cl, level12.cl -DHALF, level12.cl FP32), 166 kernel bodies:
+  SIMD8 4, SIMD16 63, SIMD32 92 (IGC picks SIMD32 where the kernel does not ask for a size); 160 supported.
+  Unsupported: hgemm_16x32 / hgemm_16x32g (images, as on Gen9), hgemm_16x32kc / hgemm_16x32mx (spill, as on Gen9),
+  skinny_n4_h (spill 768 B), skinny_n4_f (spill 9408 B) -- new on Gen12; unroll 2/4/8 still spills (640-3136 B).
+basic rc=0 RESULT: all OK          errors rc=0 19/19 OK          level3 rc=0 all OK (fp16, fp16 acc., fp32, trsm f32/f16)
+level12 rc=0 all OK (SciPy missing: ROTG/ROTMG/ROTM skipped)    userptr rc=0 all OK (read-only memmap through a copy)
+packed rc=0 errors: 0 (FP64 case skipped)                        long_launch rc=0 all OK (sgemm 8192, hgemm acc. 8192)
+skinny rc=1 2 errors of 432: FP32 M=8 N=333 K=4096 weights along N: 2.61e-06 vs tolerance 2e-06
+  (skinny_n4 unavailable -> packed sgemm_v, FP32 sums over K=4096; FP16 cases go to the accurate HS kernel and pass)
+blas / blas_d / blas_banded: not run, no CPU BLAS on the host (libopenblas.so.0; the shim and the tests need it)
+FP64: not available (no cl_khr_fp64): gen9blas_has(FP64) = 0, dgemm / -DDBL programs not built.
+
+GEMM speed (test_basic, GFLOPS of the kernel; OpenCL C main kernels, no assembler on Gen12):
+  hgemm (FP16 sums, hgemm_v)      N=1024  918   N=2048 1088   N=4096 1144   (measured FP16 FMA peak 1811: 63 %)
+  hgemm acc. (hgemm_kc_v)         N=1024  728   N=2048  897   N=4096  951
+  sgemm (sgemm_v)                 N=1024  455   N=2048  526   N=4096  551   (measured FP32 FMA peak 945: 58 %)
+
+## 4. What had to change (each found by a failing run)
+- weak *definitions* `const int kcl_nprograms_gen12 = 0` in kcl.c were folded to 0 by GCC: the linked table was never
+  seen ("no built-in program hgemm.cl"); now weak references (extern, address NULL when absent). Same for Gen8.
+- userptr with I915_USERPTR_READ_ONLY -> ENODEV on Gen12 (Linux gt/gen8_ppgtt.c:1025, no read-only PTEs on Gen11/12):
+  userptr objects are writable there; read-only mappings are detected through /proc/self/maps and copied instead.
+- packed layouts: the OpenCL C hgemm_v reads A as a plain 16x16 tile (pk_a2 wrote the A2 layout of gen_h.bin; result
+  was garbage), sgemm_v the plain layout of GEN8_PLAIN_PACK: tgllp compiles with -DPLAIN_PACK_A2 / -DGEN8_PLAIN_PACK.
+- lib/CMakeLists.txt: an empty GEN9BLAS_KERNEL_CACHE made cached_tables.py take "--key" as its cache directory and serve
+  a stale table (pre-existing; now "-" means off).

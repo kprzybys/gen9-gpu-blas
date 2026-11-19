@@ -1,6 +1,6 @@
 """Generates kernels.c: the ISA code and descriptors of all libgen9blas kernels for the kcl layer (no NEO, directly via i915).
 
-Run (the Makefile does it): python3 gen_kernels.py <bench dir> <work dir> [whl|bdw|bdw-probe|whl-pt] > kernels.c
+Run (the Makefile does it): python3 gen_kernels.py <bench dir> <work dir> [whl|bdw|bdw-probe|whl-pt|tgllp] > kernels.c
 Other tables (e.g. bench/attn_kcl, emb/, dec/, ina/, which link kcl.c without the library): python3 gen_kernels.py <dir>
 <work dir> <binary.bin> ... > table.c -- only the listed binaries from <dir> (whl binaries; kcl does no device check).
 Programs as in src/core.c: OpenCL C sources compiled with `ocloc` with the same options as NEO used to get
@@ -17,6 +17,10 @@ Targets:
           (they hang the Cherryview) are marked unsupported.
   bdw-probe  as bdw plus lib/kernels/gen8_probe.cl (unmarked: it contains the hanging message on purpose), for
           lib/test_gen8_probe only.
+  tgllp   Gen12LP (Tiger Lake, docs/gen12lp.md): zebin from a newer ocloc (environment OCLOC, e.g. 26.27; 24.35 has
+          no Gen12), .ze_info read from the ELF section itself (ocloc 26.27 disasm writes only sections.txt); FP16/FP32
+          OpenCL C programs only (no FP64 on Gen12LP, no assembler or attention binaries: Gen9 encoding);
+          tables kcl_programs_gen12 / kcl_nprograms_gen12.
   whl-pt  check of the patch-token reader: Gen9.5 compiled in the patch-token format, compared with whl by
           lib/check_patchtokens.py (assembler binaries are still read from zebin).
 """
@@ -28,11 +32,13 @@ import sys
 import yaml
 
 BENCH, WORK = sys.argv[1], sys.argv[2]
-TARGETS = ("whl", "bdw", "bdw-probe", "whl-pt")
+TARGETS = ("whl", "bdw", "bdw-probe", "whl-pt", "tgllp")
 TARGET = sys.argv[3] if len(sys.argv) > 3 and sys.argv[3] in TARGETS else "whl"
 EXPLICIT = sys.argv[3:] if len(sys.argv) > 3 and sys.argv[3] not in TARGETS else []   # list of binaries (whl)
 GEN8 = TARGET in ("bdw", "bdw-probe")
-DEVICE = "bdw" if GEN8 else "whl"
+GEN12 = TARGET == "tgllp"
+DEVICE = "bdw" if GEN8 else "tgllp" if GEN12 else "whl"
+OCLOC = os.environ.get("OCLOC", "ocloc")   # tgllp: the Gen12-capable ocloc
 os.makedirs(WORK, exist_ok=True)
 
 # (file, options) -- exactly like the program_zr / program_bin calls in src/core.c
@@ -45,9 +51,13 @@ GEN8_PROBES = [("gen8_probe.cl", "-cl-intel-greater-than-4GB-buffer-required")] 
 # GEN8_PLAIN_PACK: pkf_a/pkf_b in the layout sgemm_v reads; GEN8_CHV: no A64 QWord messages, no indirect DF moves, no
 # math.invm/madm (docs/gen8.md 6a)
 GEN8_DEFINES = {"sgemm.cl": "-DGEN8_PLAIN_PACK -DGEN8_CHV", "dgemm.cl": "-DGEN8_CHV", "level12.cl": "-DGEN8_CHV"}
+# Gen12LP: the main GEMM kernels are the OpenCL C ones (hgemm_v, sgemm_v), which read plain packed A (and B for FP32)
+GEN12_DEFINES = {"hgemm.cl": "-DPLAIN_PACK_A2", "sgemm.cl": "-DGEN8_PLAIN_PACK"}
 # attention for the ggml backend (gen9blas_attn.c): whl binaries from `make -C asm attn`, embedded only when built
 # (without them the library declines attention; gen9blas_attn_supported() returns 0)
-if not GEN8:
+if GEN12:
+    PROGRAMS = [p for p in PROGRAMS if p[1] is not None and p[0] != "dgemm.cl" and "-DDBL" not in p[1]]
+if not GEN8 and not GEN12:
     for _f in ("attn_qwen_tokc.bin", "attn_llama_tokc.bin", "attn_whisper_tokc.bin", "attn_qwen7b_tokc.bin", "attn_qwen3_tokc.bin", "attn_nemo_tokc.bin", "attn_paddle_tokc.bin", "attn_ernie_tokc.bin", "attn_ernie_stokc.bin"):
         if os.path.exists(os.path.join(BENCH, _f)):
             PROGRAMS.append((_f, None))
@@ -93,8 +103,8 @@ def new_kernel(name, isa):
 
 
 def zebin_program(binary, dump):
-    info = yaml.safe_load(open(os.path.join(dump, ".ze_info")))
     secs = sections(binary)
+    info = yaml.safe_load(secs[".ze_info"][1].decode() if dump is None else open(os.path.join(dump, ".ze_info")))
     constants = b""
     for name in (".data.const", ".bss.const"):
         if name in secs:
@@ -110,7 +120,10 @@ def zebin_program(binary, dump):
         unsup = K["unsup"]
         # spill_size: the compiler spills registers to scratch memory, which kcl does not configure (MEDIA_VFE_STATE) --
         # such a kernel silently computed wrong results (skinny GEMM MT = 8, 2026-11-12); now an error in kcl_CreateKernel.
-        for key in ("per_thread_scratch_size", "spill_size", "has_stack_calls", "inline_data_payload_size"):
+        # require_disable_eufusion (Gen12): needs MEDIA_VFE_STATE Fused EU Dispatch = legacy, which kcl does not set;
+        # has_dpas: no DPAS before XeHPG (docs/gen12lp-sources-notes.md section 4)
+        for key in ("per_thread_scratch_size", "spill_size", "has_stack_calls", "inline_data_payload_size",
+                    "require_disable_eufusion", "has_dpas"):
             if env.get(key):
                 unsup.append(key)
         # Private arrays that IGC places in scratch (addressed through the r0.5 scratch offset) are declared only here, not
@@ -378,10 +391,11 @@ for pi, (file, options) in enumerate(PROGRAMS + (GEN8_PROBES if TARGET == "bdw-p
         binary = os.path.join(BENCH, file)
     else:
         binary = os.path.join(WORK, base + ".bin")
-        cmd = ["ocloc", "compile", "-file", os.path.join(BENCH, file), "-device", DEVICE, "-output_no_suffix",
+        cmd = [OCLOC, "compile", "-file", os.path.join(BENCH, file), "-device", DEVICE, "-output_no_suffix",
                "-output", base, "-out_dir", WORK]
         # Gen8: extra defines for the compile only (the program keeps its recorded options, which gen9blas asks for)
-        build_options = (options + " " + GEN8_DEFINES.get(file, "")).strip() if GEN8 else options
+        build_options = (options + " " + GEN8_DEFINES.get(file, "")).strip() if GEN8 else \
+            (options + " " + GEN12_DEFINES.get(file, "")).strip() if GEN12 else options
         if build_options:
             cmd += ["-options", build_options]
         if TARGET == "whl-pt":
@@ -389,7 +403,9 @@ for pi, (file, options) in enumerate(PROGRAMS + (GEN8_PROBES if TARGET == "bdw-p
         r = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if r.returncode:
             sys.exit(f"gen_kernels: ocloc {file} {options}: {r.stdout}{r.stderr}")
-    if TARGET != "whl" and options is not None:
+    if GEN12:
+        constants, kernels = zebin_program(binary, None)
+    elif TARGET != "whl" and options is not None:
         constants, kernels = patchtoken_program(binary)
         if GEN8 and (file, options) not in GEN8_PROBES:
             mark_qword(binary, os.path.join(WORK, base + ".d"), kernels)
@@ -401,6 +417,6 @@ for pi, (file, options) in enumerate(PROGRAMS + (GEN8_PROBES if TARGET == "bdw-p
     n = emit_program(base, constants, kernels)
     progs.append(f'{{"{file}", {"NULL" if options is None else chr(34) + options + chr(34)}, {base}_kernels, '
                  f'{n}, {base}_const, {len(constants)}}}')
-suffix = "_gen8" if GEN8 else ""
+suffix = "_gen8" if GEN8 else "_gen12" if GEN12 else ""
 print(f"const struct kcl_program_desc kcl_programs{suffix}[] = {{\n    " + ",\n    ".join(progs) + "\n};")
 print(f"const int kcl_nprograms{suffix} = {len(progs)};")

@@ -76,10 +76,12 @@ static int program_src(const char *dir, const char *file, const char *options, c
 l12_t L12[3];   // 0 FP16, 1 FP32, 2 FP64
 // Gen8 Cherryview (kcl, docs/gen8.md): no FP16 for now (its kernels need scratch there), GEMM main kernels from OpenCL C
 // instead of the Gen9 assembler binaries, gemv_n_f unavailable (scratch) -> the grouped GEMV for every N.
-int gen8;
+// Gen12LP Tiger Lake (kcl, docs/gen12lp.md): no FP64 (no dgemm.cl, no level12 -DDBL), no assembler binaries (Gen9
+// encoding): hgemm_v / hgemm_kc_v / sgemm_v from OpenCL C; skinny_n4 spills there and is optional.
+int gen8, gen12;
 static int init_l12(const char *dir) {
     for (int i = 0; i < 3; i++) {
-        if (gen8 && i == 0) continue;
+        if ((gen8 && i == 0) || (gen12 && i == 2)) continue;
         cl_program pr; const char *suf = "hfd" + i, *opc[3] = { "-cl-std=CL3.0 -DHALF", "-cl-std=CL3.0", "-cl-std=CL3.0 -DDBL" };
         char n[32], sf[2] = { *suf, 0 };
         if (program_src(dir, "level12.cl", opc[i], &pr)) return ERR_RET;
@@ -99,7 +101,11 @@ static int init_l12(const char *dir) {
             struct { const char *n; cl_kernel *k; } c[] = { { "skinny_k1", &k->skinny_k1 }, { "skinny_k4", &k->skinny_k4 }, { "skinny_k8", &k->skinny_k8 },
                 { "skinny_r4", &k->skinny_r4 }, { "skinny_r8", &k->skinny_r8 },
                 { "skinny_n4", &k->skinny_n4 }, { "skinny_n2", &k->skinny_n2 } };
-            for (size_t j = 0; j < sizeof c / sizeof c[0]; j++) { snprintf(n, sizeof n, "%s_%s", c[j].n, suf); KER(pr, n, *c[j].k); }
+            for (size_t j = 0; j < sizeof c / sizeof c[0]; j++) {
+                snprintf(n, sizeof n, "%s_%s", c[j].n, suf);
+                if (gen12 && c[j].k == &k->skinny_n4) { cl_int e; k->skinny_n4 = clCreateKernel(pr, n, &e); if (e) k->skinny_n4 = NULL; continue; }
+                KER(pr, n, *c[j].k);
+            }
         }
     }
     return 0;
@@ -123,11 +129,11 @@ static int init_impl(const char *dir) {
     cl_queue_properties qp[] = { CL_QUEUE_PROPERTIES, profile ? CL_QUEUE_PROFILING_ENABLE : 0, 0 };
     q = clCreateCommandQueueWithProperties(ctx, dev, qp, &err); CHECK(err);
 #ifndef GEN9BLAS_NEO
-    gen8 = kcl_gen8();
+    gen8 = kcl_gen8(); gen12 = kcl_gen12();
 #endif
-    cl_program ph, ps, pd;
+    cl_program ph, ps, pd = NULL;
     if (program_src(dir, "hgemm.cl", "", &ph) || program_src(dir, "sgemm.cl", "", &ps) ||
-        program_src(dir, "dgemm.cl", "", &pd)) return ERR_RET;
+        (!gen12 && program_src(dir, "dgemm.cl", "", &pd))) return ERR_RET;
     usm_alloc = (clHostMemAllocINTEL_fn)clGetExtensionFunctionAddressForPlatform(plat, "clHostMemAllocINTEL");
     usm_free = (clMemBlockingFreeINTEL_fn)clGetExtensionFunctionAddressForPlatform(plat, "clMemBlockingFreeINTEL");
     usm_info = (clGetMemAllocInfoINTEL_fn)clGetExtensionFunctionAddressForPlatform(plat, "clGetMemAllocInfoINTEL");
@@ -176,8 +182,10 @@ static int init_impl(const char *dir) {
     if (gen8 && !(d8 && !strcmp(d8, "v"))) { t[3].k = "dgemm8_v832"; t[3].pb = "pkd_b32"; t[3].tn = 32; }
     for (int i = 0; i < 4; i++) {
         if (gen8 && t[i].es == 2) continue;   // FP16: not on Gen8 yet
+        if (gen12 && t[i].es == 8) continue;  // no FP64 on Gen12LP
         type_t *r = &types[t[i].r]; char n[64];
-        const char *bin = gen8 ? NULL : t[i].bin;   // Gen8: sgemm_v from sgemm.cl (same arguments as gen_s.bin)
+        // Gen8, Gen12: main kernels from OpenCL C (hgemm.cl / sgemm.cl, same arguments as the assembler binaries)
+        const char *bin = gen8 || gen12 ? NULL : t[i].bin;
         if (bin ? program_bin(dir, bin, t[i].k, &r->main) : 0) return ERR_RET;
         if (!bin) KER(t[i].pr, t[i].k, r->main);
         KER(t[i].pr, t[i].pa, r->pa); KER(t[i].pr, t[i].pb, r->pb); KER(t[i].pr, t[i].epi, r->epi);
@@ -218,7 +226,7 @@ int gen9blas_init(void) {
     return 0;
 }
 int gen9blas_version(void) { return GEN9BLAS_VERSION; }
-int gen9blas_device_gen(void) { return gen9blas_init() ? 0 : gen8 ? 8 : 9; }
+int gen9blas_device_gen(void) { return gen9blas_init() ? 0 : gen8 ? 8 : gen12 ? 12 : 9; }
 int gen9blas_has(int f) {
     if (gen9blas_init()) return 0;
     switch (f) {

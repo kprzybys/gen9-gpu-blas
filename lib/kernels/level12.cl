@@ -2,7 +2,9 @@
 // R -- computation type (float for FP16/FP32, double for FP64), also for scalars (alpha, beta, c, s, ...) and work buffers.
 // Vector: buffer + offset o + stride inc (in elements, inc may be negative); matrix: buffer + offset + ld
 // (row-major). Operands may be the same buffer (shared host memory pages), hence no restrict.
+#ifdef cl_khr_fp64   // not on Gen12LP (docs/gen12lp.md section 2): there the FP64 sums below have an FP32 fallback
 #pragma OPENCL EXTENSION cl_khr_fp64 : enable
+#endif
 #ifdef HALF
 #pragma OPENCL EXTENSION cl_khr_fp16 : enable
 typedef half T;
@@ -189,6 +191,7 @@ __kernel void F(rotm)(int n, __global T *x, L ox, L ix, __global T *y, L oy, L i
 // ---- reductions: FP64 sum, one part per work-group (256), parts accumulated on the CPU (<= 96 numbers) ----
 // Loop over chunks of 4 elements (grid step 4·grid size); with stride 1 vector read.
 // mode 0: x·y, 1: Σ|x|, 2: Σx² (nrm2 = sqrt on the CPU)
+#ifdef cl_khr_fp64
 #define D4(p) convert_double4(V4(p))
 __kernel __attribute__((reqd_work_group_size(256, 1, 1)))
 void F(red)(int n, int mode, __global const T *x, L ox, L ix, __global const T *y, L oy, L iy, __global double *part) {
@@ -212,6 +215,43 @@ void F(red)(int n, int mode, __global const T *x, L ox, L ix, __global const T *
     s = work_group_reduce_add(s);
     if (get_local_id(0) == 0) part[get_group_id(0)] = s;
 }
+#else
+// No FP64 (Gen12LP): FP32 with compensation. Per lane a Neumaier sum (products with their exact rounding error from
+// fma), then a pairwise TwoSum tree over the work-group in SLM; the part is a float pair (sum, compensation) in the same
+// 8 bytes, added in double on the host (lib/src/level12.c reduction()).
+#define RED_ADD(t) do { const float t_ = (t), u_ = s + t_; \
+    c += fabs(s) >= fabs(t_) ? (s - u_) + t_ : (t_ - u_) + s; s = u_; } while (0)
+#define RED_TERM(a, b) do { const float a_ = (a), b_ = (b); \
+    if (mode == 0) { const float p_ = a_ * b_; c += fma(a_, b_, -p_); RED_ADD(p_); } \
+    else if (mode == 1) RED_ADD(fabs(a_)); \
+    else { const float p_ = a_ * a_; c += fma(a_, a_, -p_); RED_ADD(p_); } } while (0)
+__kernel __attribute__((reqd_work_group_size(256, 1, 1)))
+void F(red)(int n, int mode, __global const T *x, L ox, L ix, __global const T *y, L oy, L iy, __global float *part) {
+    __local float ls[256], lc[256];
+    float s = 0.0f, c = 0.0f;
+    const int vec = ix == 1 && (mode || iy == 1);
+    for (int i0 = get_global_id(0) * 4; i0 < n; i0 += get_global_size(0) * 4) {
+        if (vec && i0 + 3 < n) {
+            const float4 v = convert_float4(V4(x + ox + i0)), w = mode == 0 ? convert_float4(V4(y + oy + i0)) : v;
+            RED_TERM(v.x, w.x); RED_TERM(v.y, w.y); RED_TERM(v.z, w.z); RED_TERM(v.w, w.w);
+            continue;
+        }
+        for (int i = i0; i < min(n, i0 + 4); i++)
+            RED_TERM((float)LD(x, ox + (L)i * ix), mode == 0 ? (float)LD(y, oy + (L)i * iy) : 0.0f);
+    }
+    const int t = get_local_id(0);
+    ls[t] = s; lc[t] = c;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    for (int h = 128; h > 0; h >>= 1) {
+        if (t < h) {   // TwoSum: u + e = a + b exactly
+            const float a = ls[t], b = ls[t + h], u = a + b, bb = u - a, e = (a - (u - bb)) + (b - bb);
+            ls[t] = u; lc[t] += lc[t + h] + e;
+        }
+        barrier(CLK_LOCAL_MEM_FENCE);
+    }
+    if (t == 0) { part[2 * get_group_id(0)] = ls[0]; part[2 * get_group_id(0) + 1] = lc[0]; }
+}
+#endif
 // iamax: first index of the largest |x|; one part per group: (value, index); NaN skipped. Groups <= 96 (GROUPS in lib/src/internal.h).
 // A work-item scans its elements in ascending order (chunks of 4, in sequence), so on a tie the smaller index stays.
 __kernel __attribute__((reqd_work_group_size(256, 1, 1)))

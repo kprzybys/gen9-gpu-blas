@@ -94,7 +94,8 @@ case("S  37x1000x300 plain B (pb / w2)", S, 37, 1000, 300, transB=0)
 case("S  64x1536x1536 alpha 0.5 beta -2 (epilogue)", S, 64, 1536, 1536, alpha=0.5, beta=-2.0)
 case("H  256x1024x1024 transB", H, 256, 1024, 1024)
 case("HS 256x1024x2048 transB", HS, 256, 1024, 2048)
-case("D  64x512x512 transB", D, 64, 512, 512)
+if gen9blas.available(np.float64):   # no FP64 on Gen12LP (docs/gen12lp.md)
+    case("D  64x512x512 transB", D, 64, 512, 512)
 
 # reuse and independence from the original: pack once, overwrite B, multiply with two different A
 A1 = rng.uniform(-1, 1, (128, 1536)).astype(np.float32)

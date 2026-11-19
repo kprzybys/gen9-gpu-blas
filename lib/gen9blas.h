@@ -51,7 +51,8 @@ GEN9BLAS_API int gen9blas_version(void);
 // Opens the GPU and loads the kernels; once per process (later calls return the first result, a failure is final).
 // gen9blas_has() and gen9blas_alloc() call it themselves. The NEO comparison build reads kernel sources from GEN9BLAS_DIR.
 GEN9BLAS_API int gen9blas_init(void);
-// Device generation: 9 (Gen9 / Gen9.5), 8 (Gen8 Cherryview), 0 (no device; initializes like gen9blas_has).
+// Device generation: 9 (Gen9 / Gen9.5), 8 (Gen8 Cherryview), 12 (Gen12LP Tiger Lake: FP16/FP32 only), 0 (no device;
+// initializes like gen9blas_has).
 GEN9BLAS_API int gen9blas_device_gen(void);
 enum {
     GEN9BLAS_FEAT_FP16 = 0,    // GEN9BLAS_H / GEN9BLAS_HS kernels (not on Gen8 yet)

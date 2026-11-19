@@ -74,7 +74,7 @@ int lib_fail(int code, const char *fmt, ...);
 extern clMemBlockingFreeINTEL_fn usm_free;
 extern clSetKernelArgMemPointerINTEL_fn usm_arg;
 extern l12_t L12[3];
-extern int gen8;
+extern int gen8, gen12;
 extern cl_kernel k_rope_m, k_setrows, k_cpy_any, k_upscale, k_dec_part, k_dec_comb;
 extern cl_kernel k_skp[3];
 extern cl_kernel k_pa3_f32, k_epi_hf, k_swiglu, k_dequant, k_dequant2, k_pa3_v, k_epi_8, k_epi_8x;

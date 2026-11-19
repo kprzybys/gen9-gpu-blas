@@ -18,6 +18,10 @@ option(GEN9BLAS_BUILD_NEO "NEO (OpenCL) comparison builds libgen9blas_neo.so / l
 option(GEN9BLAS_BUILD_TESTS "ctest: the Python GPU test suites (label gpu)" ON)
 set(GEN9BLAS_PREBUILT_KERNELS "" CACHE PATH "directory with prebuilt kernels.c and kernels_gen8.c (instead of ocloc)")
 set(GEN9BLAS_OCLOC_VERSION "24.35.30872.36" CACHE STRING "ocloc version the kernels are generated with")
+# Gen12LP (Tiger Lake, docs/gen12lp.md): ocloc 24.35 has no Gen12, so its table comes from a second, newer ocloc. Empty:
+# no Gen12 table (kcl then finds no programs on a Gen12 GPU), unless GEN9BLAS_PREBUILT_KERNELS has kernels_gen12.c.
+set(GEN9BLAS_OCLOC_GEN12 "" CACHE FILEPATH "ocloc for the Gen12LP kernel table kernels_gen12.c (e.g. 26.27)")
+set(GEN9BLAS_OCLOC_GEN12_VERSION "26.27.039122" CACHE STRING "ocloc version the Gen12LP kernels are generated with")
 
 list(APPEND CMAKE_MODULE_PATH ${CMAKE_CURRENT_SOURCE_DIR}/cmake)
 include(gen9blasBuildOptions)   # default Release, hardening, reproducibility, LTO / -march / ccache options
@@ -31,7 +35,14 @@ find_package(Python3 REQUIRED COMPONENTS Interpreter)
 find_package(Threads REQUIRED)
 find_library(M_LIB m)
 set(MESA ${CMAKE_CURRENT_SOURCE_DIR}/third_party/mesa)
-set(CACHED ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/cached_tables.py "${GEN9BLAS_KERNEL_CACHE}")
+# cache off: "-", not an empty string (CMake drops an empty list element, and cached_tables.py then took "--key" as
+# its cache directory and served stale tables from build/--key; found on the Gen12 bring-up 2026-11-19)
+if(GEN9BLAS_KERNEL_CACHE)
+  set(_kcache "${GEN9BLAS_KERNEL_CACHE}")
+else()
+  set(_kcache "-")
+endif()
+set(CACHED ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/cached_tables.py ${_kcache})
 set(ASM_DIR ${CMAKE_CURRENT_SOURCE_DIR}/../asm)
 
 # ---- kernel tables -----------------------------------------------------------------------------------------------
@@ -43,6 +54,8 @@ set(KDIR ${CMAKE_CURRENT_BINARY_DIR}/kernels)     # staging: sources + binaries 
 set(GENK ${CMAKE_CURRENT_SOURCE_DIR}/gen_kernels.py)
 set(KERNELS_C ${CMAKE_CURRENT_BINARY_DIR}/kernels.c)
 set(KERNELS_GEN8_C ${CMAKE_CURRENT_BINARY_DIR}/kernels_gen8.c)
+set(KERNELS_GEN12_C ${CMAKE_CURRENT_BINARY_DIR}/kernels_gen12.c)
+set(_gen12_srcs hgemm.cl sgemm.cl level12.cl)   # what the tgllp target of gen_kernels.py compiles
 set(ATTN_TOKC attn_qwen_tokc attn_llama_tokc attn_whisper_tokc attn_qwen7b_tokc attn_qwen3_tokc attn_nemo_tokc
               attn_paddle_tokc attn_ernie_tokc attn_ernie_stokc)
 set(ATTN_OTHER attn_qwen attn_llama attn_qwen_tok attn_llama_tok)   # also built by asm (benches)
@@ -56,6 +69,10 @@ if(GEN9BLAS_PREBUILT_KERNELS)
   endforeach()
   configure_file(${GEN9BLAS_PREBUILT_KERNELS}/kernels.c ${KERNELS_C} COPYONLY)
   configure_file(${GEN9BLAS_PREBUILT_KERNELS}/kernels_gen8.c ${KERNELS_GEN8_C} COPYONLY)
+  if(EXISTS ${GEN9BLAS_PREBUILT_KERNELS}/kernels_gen12.c AND NOT GEN9BLAS_OCLOC_GEN12)
+    configure_file(${GEN9BLAS_PREBUILT_KERNELS}/kernels_gen12.c ${KERNELS_GEN12_C} COPYONLY)
+    set(_have_gen12 ON)
+  endif()
   message(STATUS "gen9blas: prebuilt kernel tables from ${GEN9BLAS_PREBUILT_KERNELS}")
 else()
   find_program(OCLOC ocloc)
@@ -103,10 +120,35 @@ else()
             -- ${Python3_EXECUTABLE} ${GENK} ${KDIR} ${CMAKE_CURRENT_BINARY_DIR}/.kernels_gen8 bdw
     DEPENDS ${GENK} ${_staged} ${KDIR}/dgemm.cl COMMENT "Gen8 kernel table kernels_gen8.c (ocloc)" VERBATIM)
 endif()
-add_custom_target(gen9blas_kernel_tables DEPENDS ${KERNELS_C} ${KERNELS_GEN8_C})
+if(GEN9BLAS_OCLOC_GEN12)
+  execute_process(COMMAND ${GEN9BLAS_OCLOC_GEN12} query OCL_DRIVER_VERSION WORKING_DIRECTORY /tmp OUTPUT_VARIABLE _ov12 ERROR_QUIET)
+  string(STRIP "${_ov12}" _ov12)
+  string(REGEX REPLACE ".*\n" "" _ov12 "${_ov12}")
+  if(NOT _ov12 STREQUAL GEN9BLAS_OCLOC_GEN12_VERSION)
+    message(FATAL_ERROR "gen9blas: GEN9BLAS_OCLOC_GEN12 is ocloc ${_ov12}, the Gen12 kernels need ${GEN9BLAS_OCLOC_GEN12_VERSION}")
+  endif()
+  set(_k12)
+  foreach(n ${_gen12_srcs})
+    set(_d ${CMAKE_CURRENT_BINARY_DIR}/kernels_gen12_src/${n})
+    add_custom_command(OUTPUT ${_d} COMMAND ${CMAKE_COMMAND} -E copy ${CMAKE_CURRENT_SOURCE_DIR}/kernels/${n} ${_d}
+                       DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/kernels/${n} VERBATIM)
+    list(APPEND _k12 ${_d})
+  endforeach()
+  add_custom_command(OUTPUT ${KERNELS_GEN12_C}
+    COMMAND ${CMAKE_COMMAND} -E env OCLOC=${GEN9BLAS_OCLOC_GEN12}
+            ${CACHED} --key ${GENK} ${_k12} --salt ${_ov12} tgllp --out ${KERNELS_GEN12_C} --stdout ${KERNELS_GEN12_C}
+            -- ${Python3_EXECUTABLE} ${GENK} ${CMAKE_CURRENT_BINARY_DIR}/kernels_gen12_src ${CMAKE_CURRENT_BINARY_DIR}/.kernels_gen12 tgllp
+    DEPENDS ${GENK} ${_k12} COMMENT "Gen12LP kernel table kernels_gen12.c (ocloc ${_ov12})" VERBATIM)
+  set(_have_gen12 ON)
+endif()
+set(_tables ${KERNELS_C} ${KERNELS_GEN8_C})
+if(_have_gen12)
+  list(APPEND _tables ${KERNELS_GEN12_C})
+endif()
+add_custom_target(gen9blas_kernel_tables DEPENDS ${_tables})
 
 # ---- kcl ---------------------------------------------------------------------------------------------------------
-set(KCL_SRC kcl.c kcl_gen8.c ${KERNELS_C} ${KERNELS_GEN8_C})
+set(KCL_SRC kcl.c kcl_gen8.c ${_tables})
 
 # libkcl.a: kcl for programs with their own kernel table (apps): symbols hidden, so each shared object linking it keeps
 # its own instance. The program table (kcl_programs / kcl_nprograms) comes from the program's gen_kernels.py output.

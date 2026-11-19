@@ -34,7 +34,7 @@ check("version 0.2.x", L.gen9blas_version() // 100, 2)
 check("init", L.gen9blas_init(), OK)
 check("init again (once per process)", L.gen9blas_init(), OK)
 check("has(unknown feature) = 0", L.gen9blas_has(999), 0)
-check("device_gen in (8, 9)", L.gen9blas_device_gen() in (8, 9), True)
+check("device_gen in (8, 9, 12)", L.gen9blas_device_gen() in (8, 9, 12), True)
 
 a = np.ones((8, 8), np.float32); b = np.ones((8, 8), np.float32); c = np.zeros((8, 8), np.float32)
 pa, pb, pc = a.ctypes.data, b.ctypes.data, c.ctypes.data

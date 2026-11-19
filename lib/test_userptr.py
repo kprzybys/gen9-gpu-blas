@@ -89,7 +89,7 @@ for r in range(3):
     for i in range(0, 28, 3):
         chk(f"small {i} r{r}", gen9blas.sgemm(small[i], small[i + 1]), gemm_ref(small[i], small[i + 1]), 1e-5)
 
-for dt in (np.float32, np.float64):
+for dt in (d for d in (np.float32, np.float64) if gen9blas.available(d)):   # Gen12LP: no FP64
     for n in (5, 255, 1000, 30000, 100003):
         for r in range(4):
             bufs = [rng.uniform(-1, 1, n + 3).astype(dt) for _ in range(6)]   # neighbours on the heap
@@ -104,7 +104,7 @@ for dt in (np.float32, np.float64):
                 chk(f"rot adjacent n={n}", np.concatenate([x, y]), np.concatenate([0.6 * Y + 0.8 * X, 0.6 * X - 0.8 * Y]), 1e-6)
 
 print("== 5. in-place result on plain arrays")
-for dt, tol in ((np.float32, 1e-5), (np.float64, 1e-12)):
+for dt, tol in ((d, t) for d, t in ((np.float32, 1e-5), (np.float64, 1e-12)) if gen9blas.available(d)):
     A = np.tril(rng.uniform(-1, 1, (300, 300))).astype(dt) + 300 * np.eye(300, dtype=dt)
     B = rng.uniform(-1, 1, (300, 70)).astype(dt)
     for r in range(2):

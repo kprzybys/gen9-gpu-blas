@@ -5,7 +5,7 @@ clean build and ccache cannot cache ocloc).
 usage: cached_tables.py CACHE_DIR --key FILE... [--salt STR...] --out FILE... [--stdout FILE] -- COMMAND...
 The key is the sha256 of the salts, the command line (output paths replaced by their names) and the contents of the
 key files. On a hit the outputs are copied from CACHE_DIR/<key>/; on a miss COMMAND runs (--stdout FILE: its stdout
-goes to FILE) and the outputs are stored. Messages go to stderr. CACHE_DIR empty: always run.
+goes to FILE) and the outputs are stored. Messages go to stderr. CACHE_DIR empty or "-": always run.
 """
 import hashlib, os, shutil, subprocess, sys
 
@@ -30,7 +30,7 @@ for k in sorted(groups["--key"], key=lambda p: (os.path.basename(p), p)):
     h.update(b"file\0" + os.path.basename(k).encode() + b"\0")
     with open(k, "rb") as f: h.update(hashlib.sha256(f.read()).digest())
 key = h.hexdigest()[:32]
-slot = os.path.join(cache, key) if cache else None
+slot = os.path.join(cache, key) if cache and cache != "-" else None   # "-": cache off (lib/CMakeLists.txt)
 if slot and all(os.path.exists(os.path.join(slot, names[o])) for o in outs):
     for o in outs:
         os.makedirs(os.path.dirname(os.path.abspath(o)), exist_ok=True)

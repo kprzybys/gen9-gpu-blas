@@ -46,12 +46,13 @@ for name, dt, n, tol in [c for c in (("dgemm n=4096", np.float64, 4096, 1e-12), 
         print(f"ERR {name}: {e}")
     del A, B
     gen9blas.free_pool()
-A, B = rand((2, 3072, 3072), np.float64), rand((2, 3072, 3072), np.float64)
-try:
-    check("batched dgemm 2 x 3072", A, B, gen9blas.gemm_batched(A, B), 1e-12)
-except RuntimeError as e:
-    errors += 1
-    print(f"ERR batched dgemm: {e}")
+if gen9blas.available(np.float64):   # no FP64 on Gen12LP (docs/gen12lp.md)
+    A, B = rand((2, 3072, 3072), np.float64), rand((2, 3072, 3072), np.float64)
+    try:
+        check("batched dgemm 2 x 3072", A, B, gen9blas.gemm_batched(A, B), 1e-12)
+    except RuntimeError as e:
+        errors += 1
+        print(f"ERR batched dgemm: {e}")
 
 print("RESULT: all OK" if errors == 0 else f"RESULT: {errors} errors")
 sys.exit(1 if errors else 0)

@@ -239,10 +239,17 @@ gpu = {w.split()[1] for w in entries if w.endswith("-> GPU")}
 cpu = {w.split()[1] for w in entries if w.endswith("-> CPU")}
 expected = {"sgemm", "ssymm", "ssyrk", "ssyr2k", "strmm", "strsm", "sgemv", "sger", "ssymv", "strmv", "strsv", "ssyr",
               "ssyr2", "saxpy", "sscal", "scopy", "sswap", "srot", "srotm", "sdot", "sasum", "snrm2", "isamax", "dgemm"}
+# no FP64 on the GPU (Gen12LP, docs/gen12lp.md): the D functions are forwarded to the CPU BLAS instead
+fp64 = gen9blas.available(np.float64)
+cpu_ok = set() if fp64 else {w for w in cpu if w.startswith(("d", "id"))}
+if not fp64:
+    expected = {f for f in expected if not f.startswith(("d", "id"))}
 if expected - gpu:
     errors += 1; print("  ERR: not on the GPU:", sorted(expected - gpu))
-if cpu:
-    errors += 1; print("  ERR: on the CPU:", sorted(cpu))
+if cpu - cpu_ok:
+    errors += 1; print("  ERR: on the CPU:", sorted(cpu - cpu_ok))
+if cpu_ok:
+    print("  (no FP64 on this GPU: on the CPU as expected:", len(cpu_ok), "D functions)")
 other = [w for w in entries if "->" not in w]
 if other:
     print("  stderr:", other[:5])

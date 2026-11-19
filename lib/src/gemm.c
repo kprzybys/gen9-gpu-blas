@@ -8,8 +8,14 @@ int gen9blas_gemm_batched(int type, int tA, int tB, int M, int N, int K, double 
     NEW_OPERATION();
     if (type < 0 || type > 3 || !types[type].ready) FAILC(GEN9BLAS_ERR_UNSUPPORTED, "type %d unavailable", type);
     if (M <= 0 || N <= 0 || K <= 0 || count <= 0) return 0;
-    if (count == 1 && (M < N ? M : N) <= skinny_threshold(type))   // small M or N: skinny kernel without packing
-        return gemm_skinny(type, tA, tB, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+    // weights contiguous along N need skinny_n4, which is not available on Gen12 (spills): the packed path then, for FP16
+    // the accurate kernel (FP32 sums like skinny, not the FP16 accumulation of GEN9BLAS_H)
+    const int skinny_n = M <= N ? !tB && ldb != 1 : tA && lda != 1;
+    if (count == 1 && (M < N ? M : N) <= skinny_threshold(type)) {
+        if (!skinny_n || L12[type == GEN9BLAS_S ? 1 : 0].skinny_n4)
+            return gemm_skinny(type, tA, tB, M, N, K, alpha, A, lda, B, ldb, beta, C, ldc);
+        if (type == GEN9BLAS_H && types[GEN9BLAS_HS].ready) type = GEN9BLAS_HS;
+    }
     double t_start = now_s();   // GEN9BLAS_PROFILE=1: stage times on stderr
     type_t *r = &types[type];
     int es = r->es, Mp = (M + 15) / 16 * 16, Np = (N + r->tn - 1) / r->tn * r->tn, Kp = (K + r->km - 1) / r->km * r->km;
@@ -128,6 +134,7 @@ double max_launch_ms(void) {
 double est_ms(type_t *r, double M, double N, double K) {   // conservative GFLOPS of the main kernels
     double gf = r == &types[GEN9BLAS_D] ? 45 : r == &types[GEN9BLAS_S] ? 300 : r == &types[GEN9BLAS_HS] ? 500 : 600;
     if (gen8) gf = r == &types[GEN9BLAS_D] ? 8 : 50;   // CHV peaks: FP64 14, FP32 115 GFLOPS (docs/gen8.md); not measured yet
+    if (gen12) gf = 200;   // Tiger Lake G4 with the OpenCL C main kernels: not measured yet, kept low
     return 2 * M * N * K / (gf * 1e6);
 }
 
