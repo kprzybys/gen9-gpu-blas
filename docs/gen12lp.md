@@ -1,7 +1,9 @@
 # Gen12LP (Tiger Lake, Xe-LP) port: facts before code
 
 Status (2026-11-19): **G1 microbenchmarks through NEO (section 6); G2-G4 done: the FP16/FP32 library runs through kcl on
-Gen12LP and passes its test suites (section 8, `results/gen12lp-a1-2026-11-19.txt`); Gen9/Gen8 kernel tables unchanged.** This file collects what has to change in kcl, in the kernels and in
+Gen12LP and passes its test suites (section 8, `results/gen12lp-a1-2026-11-19.txt`); Gen9/Gen8 kernel tables unchanged.
+2026-11-20: Qwen3 attention from `asm/attn.cl` compiled by IGC; Qwen3-Embedding through the ggml GEN9 backend beats
+llama.cpp Vulkan on the same GPU (section 9).** This file collects what has to change in kcl, in the kernels and in
 the build for a Gen12LP GPU (Tiger Lake UHD Graphics G4, 48 EU), following the method of
 [performance-model.md](performance-model.md) and the Gen8 port ([gen8.md](gen8.md)): facts with sources first, then
 a model with written predictions, then one change at a time and a test. Work happens on the `gen12` branch; `main`
@@ -188,5 +190,30 @@ Found on the way (each by a failing run):
   statistics build).
 
 Tests on the Gen12 GPU: basic, errors, level3, level12, userptr, packed, long_launch all OK; skinny 430/432 (two FP32
-cases 2.6e-6 against a 2e-6 tolerance, from the fallback above); blas suites not run (no OpenBLAS on the host).
+cases 2.6e-6 against a 2e-6 tolerance, from the fallback above); blas, blas_d, blas_banded OK after installing
+OpenBLAS on the host.
 GEMM through kcl: hgemm 1144 GFLOPS (63 % of the measured FP16 peak), accurate hgemm 951, sgemm 551 (58 % of FP32).
+
+## 9. Attention and Qwen3-Embedding (2026-11-20) [MEAS]
+
+The Gen9 assembler attention cannot run on Gen12 (no SWSB), so the Gen12 table gets `attn_qwen3_tokc.bin` from the
+OpenCL C template `asm/attn.cl` compiled by IGC (`-DD=128 -DG=2 -DHKV=8 -DRQ=2 -DNK=2 -DQTOK -DCAUSAL=1 -DCLMASK`).
+`-DCLMASK` masks the keys past `nv` inside the last partial key block, which the Gen9 binaries handle in assembler.
+The Gen9 attention binaries rebuilt on a Gen9 machine still match `asm/attn_sha256.txt`.
+
+Qwen3-Embedding-0.6B Q8_0 through llama-server with the flags of kp-docsearch, 32 texts of about 1200 characters per
+request, 5 minutes each (`ggml-intel-igpu` `bench/embed_rate.py`, results in its
+`results/embed-qwen3-gen12-2026-11-20.txt`). Control vector cosine against the Gen9 reference is 0.999997 in every run,
+with no GPU resets:
+
+| Backend | fragments/h | CPU cores used |
+|---|---|---|
+| GEN9, GPU attention, `-t 4` | 5673 | 2.84 |
+| GEN9, GPU attention, `-t 2` | 5412 | 1.02 |
+| GEN9, GPU attention, `-t 1` | 5065 | 0.33 |
+| GEN9, attention on the CPU, `-t 4` | 4578 | |
+| llama.cpp Vulkan, `-ngl 99` | 4796 | 0.21 |
+
+For a server running all day, `-t 1` or `-t 2` is the sensible choice: still faster than Vulkan at a fraction of the CPU.
+Not done yet: the backend `test_attn` comparison against the CPU on Gen12, Gen9 golden on the second UHD 620 machine.
+
