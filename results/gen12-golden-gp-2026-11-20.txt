@@ -1,0 +1,19 @@
+# Gen9 golden for branch gen12 (61790c3) on the second UHD 620 machine (gp: Gen9.5, Latitude 5500, on AC),
+# 2026-11-20 10:26. Completes the golden of results/gen12lp-a1-2026-11-19.txt (section 2: kp done, gp not run then).
+
+## Kernel tables (generated on kp: the build pins ocloc 24.35.30872.36, gp has 24.35.30872.45)
+Fresh builds with an empty kernel cache of the merge base with main (9677034) and of gen12 (61790c3):
+  kernels.c       sha256 e2b725fced57fdef...  both commits, byte-identical (= the cached table of 2026-11-15)
+  kernels_gen8.c  sha256 1de95b7150ddf5e9...  both commits, byte-identical
+-> gen12 does not change a single Gen9/Gen8 kernel binary.
+
+## GPU suites on gp (gen12 tree built on gp with GEN9BLAS_PREBUILT_KERNELS = the tables above, Release, ctest -L gpu,
+## SKIP_BIG=1); libgen9blas.so.0.2.0 sha256 439d88cf5fe5253a...
+basic        Passed 14.86 s     errors   Passed 0.17 s     level3       Passed  2.09 s     level12  Passed 3.89 s
+userptr      Passed  0.94 s     skinny   Passed 4.94 s     packed       Passed  3.90 s     long_launch Passed 14.35 s
+blas         Passed  0.49 s     blas_d   Passed 0.47 s     blas_banded  Passed  0.32 s
+100 % passed, 11/11 (46.4 s). Kernel log: no i915 hang/reset.
+GPU was free: the kp-docsearch helper on gp stopped for the run, no other GPU client.
+
+## Result
+Gen9 golden on both UHD 620 machines (kp 11/11 on 2026-11-19, gp 11/11 now): branch gen12 leaves Gen9 unchanged.

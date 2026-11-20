@@ -215,5 +215,8 @@ with no GPU resets:
 | llama.cpp Vulkan, `-ngl 99` | 4796 | 0.21 |
 
 For a server running all day, `-t 1` or `-t 2` is the sensible choice: still faster than Vulkan at a fraction of the CPU.
-Not done yet: the backend `test_attn` comparison against the CPU on Gen12, Gen9 golden on the second UHD 620 machine.
+Backend `test_attn` on Gen12 (`ggml-intel-igpu` `results/test-attn-gen12-2026-11-20.txt`): all mask modes of the Gen9
+suite pass (NMSE <= 2.2e-12, bound 5e-4), every node on the GPU, 2.2x the 4-thread CPU at a typical 430-token chunk
+and 3.2-3.3x at 2048 tokens; shapes without a Gen12 binary (whisper D 64, Qwen2.5-7B) stay on ggml-cpu. Gen9 golden
+on the second UHD 620 machine: 11/11 suites, kernel tables byte-identical (`results/gen12-golden-gp-2026-11-20.txt`).
 
